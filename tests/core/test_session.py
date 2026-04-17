@@ -250,19 +250,65 @@ ACTIVE:
 
 
 class TestEnsureHestaiStructure:
-    """Test .hestai/ directory structure creation."""
+    """Test .hestai/ directory structure creation with three-tier symlink convention."""
 
     def test_creates_structure_when_missing(self, tmp_path):
-        """Creates .hestai/ directory structure when it doesn't exist."""
+        """Creates full three-tier structure: .hestai/, .hestai-state/, and symlink."""
         mgr = SessionManager(str(tmp_path))
         status = mgr.ensure_hestai_structure()
         assert status == "created"
-        assert (tmp_path / ".hestai" / "state" / "sessions" / "active").exists()
-        assert (tmp_path / ".hestai" / "state" / "context").exists()
 
-    def test_returns_present_when_exists(self, tmp_path):
-        """Returns 'present' when .hestai/ already exists."""
+        # .hestai/ committed governance exists
+        assert (tmp_path / ".hestai").is_dir()
+        assert (tmp_path / ".hestai" / "north-star").is_dir()
+
+        # .hestai-state/ uncommitted working state exists with subdirs
+        assert (tmp_path / ".hestai-state").is_dir()
+        assert (tmp_path / ".hestai-state" / "sessions" / "active").is_dir()
+        assert (tmp_path / ".hestai-state" / "sessions" / "archive").is_dir()
+        assert (tmp_path / ".hestai-state" / "context").is_dir()
+        assert (tmp_path / ".hestai-state" / "context" / "state").is_dir()
+
+        # .hestai/state is a symlink to ../.hestai-state
+        state_link = tmp_path / ".hestai" / "state"
+        assert state_link.is_symlink()
+        assert state_link.resolve() == (tmp_path / ".hestai-state").resolve()
+
+    def test_returns_present_when_exists_and_creates_symlink(self, tmp_path):
+        """Returns 'present' when .hestai/ exists, creates symlink if missing."""
         (tmp_path / ".hestai").mkdir()
         mgr = SessionManager(str(tmp_path))
         status = mgr.ensure_hestai_structure()
         assert status == "present"
+
+        # Symlink must still be created
+        state_link = tmp_path / ".hestai" / "state"
+        assert state_link.is_symlink()
+        assert (tmp_path / ".hestai-state" / "sessions" / "active").is_dir()
+
+    def test_leaves_existing_symlink_alone(self, tmp_path):
+        """Does not recreate symlink if .hestai/state is already a valid symlink."""
+        # Pre-create the three-tier structure
+        (tmp_path / ".hestai").mkdir()
+        (tmp_path / ".hestai-state").mkdir()
+        (tmp_path / ".hestai" / "state").symlink_to("../.hestai-state")
+
+        mgr = SessionManager(str(tmp_path))
+        status = mgr.ensure_hestai_structure()
+        assert status == "present"
+
+        # Symlink is still there, pointing to the same target
+        state_link = tmp_path / ".hestai" / "state"
+        assert state_link.is_symlink()
+        assert state_link.resolve() == (tmp_path / ".hestai-state").resolve()
+
+    def test_state_dir_accessible_through_symlink(self, tmp_path):
+        """Session directories are accessible via .hestai/state/ symlink path."""
+        mgr = SessionManager(str(tmp_path))
+        mgr.ensure_hestai_structure()
+
+        # Write through symlink path, verify in real path
+        active_via_link = tmp_path / ".hestai" / "state" / "sessions" / "active"
+        active_real = tmp_path / ".hestai-state" / "sessions" / "active"
+        assert active_via_link.resolve() == active_real.resolve()
+        assert active_via_link.is_dir()

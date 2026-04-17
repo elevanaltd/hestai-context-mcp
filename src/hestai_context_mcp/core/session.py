@@ -179,34 +179,98 @@ class SessionManager:
         return context_paths
 
     def ensure_hestai_structure(self) -> str:
-        """Ensure .hestai/ directory structure exists.
+        """Ensure .hestai/ directory structure exists with three-tier symlink convention.
+
+        Three-tier convention:
+            .hestai/         - committed project governance (north-star, decisions)
+            .hestai-state/   - uncommitted working state (sessions, context)
+            .hestai/state    - symlink to ../.hestai-state
 
         Returns:
-            'present' if already existed, 'created' if newly created.
+            'present' if .hestai/ already existed, 'created' if newly created.
         """
         hestai_dir = self.working_dir / ".hestai"
-        state_dir = hestai_dir / "state"
+        state_link = hestai_dir / "state"
+        state_real = self.working_dir / ".hestai-state"
 
         if hestai_dir.exists() and hestai_dir.is_dir():
-            # Already exists, ensure subdirs
-            if not state_dir.is_symlink():
-                (state_dir / "sessions" / "active").mkdir(parents=True, exist_ok=True)
-                (state_dir / "sessions" / "archive").mkdir(parents=True, exist_ok=True)
-                (state_dir / "context").mkdir(parents=True, exist_ok=True)
-                (state_dir / "context" / "state").mkdir(parents=True, exist_ok=True)
+            # Already exists, ensure subdirs and symlink
+            self._ensure_state_directory(state_real)
+            self._ensure_state_symlink(state_link, state_real)
             (hestai_dir / "north-star").mkdir(parents=True, exist_ok=True)
             return "present"
 
         # Create new structure
         hestai_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / "sessions" / "active").mkdir(parents=True, exist_ok=True)
-        (state_dir / "sessions" / "archive").mkdir(parents=True, exist_ok=True)
-        (state_dir / "context").mkdir(parents=True, exist_ok=True)
-        (state_dir / "context" / "state").mkdir(parents=True, exist_ok=True)
+        self._ensure_state_directory(state_real)
+        self._ensure_state_symlink(state_link, state_real)
         (hestai_dir / "north-star").mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Created .hestai/ directory structure at {self.working_dir}")
         return "created"
+
+    def _ensure_state_directory(self, state_real: Path) -> None:
+        """Create .hestai-state/ with required subdirectories.
+
+        Args:
+            state_real: Path to the .hestai-state/ directory.
+        """
+        (state_real / "sessions" / "active").mkdir(parents=True, exist_ok=True)
+        (state_real / "sessions" / "archive").mkdir(parents=True, exist_ok=True)
+        (state_real / "context").mkdir(parents=True, exist_ok=True)
+        (state_real / "context" / "state").mkdir(parents=True, exist_ok=True)
+
+    def _ensure_state_symlink(self, state_link: Path, state_real: Path) -> None:
+        """Create .hestai/state symlink pointing to ../.hestai-state.
+
+        If the symlink already exists and is valid, it is left alone.
+        If a real directory exists at the symlink path, it is replaced.
+
+        Args:
+            state_link: Path where the symlink should be (.hestai/state).
+            state_real: Path to the real state directory (.hestai-state/).
+        """
+        if state_link.is_symlink():
+            # Already a symlink, leave it alone
+            return
+
+        if state_link.exists() and state_link.is_dir():
+            # Real directory exists where symlink should be — migrate contents
+            # to .hestai-state/ then replace with symlink
+            import shutil
+
+            self._migrate_state_contents(state_link, state_real)
+            shutil.rmtree(state_link)
+            logger.warning(
+                f"Migrated real directory at {state_link} to {state_real} "
+                f"and replaced with symlink to enforce three-tier convention"
+            )
+
+        state_link.symlink_to("../.hestai-state")
+        logger.info(f"Created symlink {state_link} -> ../.hestai-state " f"(three-tier convention)")
+
+    @staticmethod
+    def _migrate_state_contents(source: Path, target: Path) -> None:
+        """Migrate files from a real .hestai/state/ directory to .hestai-state/.
+
+        Walks the source directory and copies any files that don't already exist
+        in the target, preserving directory structure. This handles the upgrade
+        path from a pre-symlink layout to the three-tier convention.
+
+        Args:
+            source: The real directory at .hestai/state/ (will be removed after).
+            target: The .hestai-state/ directory to migrate into.
+        """
+        import shutil
+
+        for item in source.rglob("*"):
+            if item.is_file():
+                relative = item.relative_to(source)
+                dest = target / relative
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, dest)
+                    logger.info(f"Migrated {relative} to {target}")
 
     def read_file_contents(self, path: Path) -> str | None:
         """Read file contents, returning None if file doesn't exist or fails.
