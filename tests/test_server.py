@@ -38,13 +38,17 @@ class TestServerImport:
 class TestToolStubs:
     """Verify that all tool stubs exist and return not-yet-implemented."""
 
-    def test_clock_in_stub(self):
-        """clock_in should return a not-yet-implemented response."""
+    def test_clock_in_implemented(self, tmp_path):
+        """clock_in should return structured response per interface contract."""
+        from unittest.mock import patch
+
         from hestai_context_mcp.tools.clock_in import clock_in
 
-        result = clock_in(role="test", working_dir="/tmp")
-        assert result["status"] == "not_yet_implemented"
-        assert result["tool"] == "clock_in"
+        with patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main"):
+            result = clock_in(role="test", working_dir=str(tmp_path))
+        assert "session_id" in result
+        assert result["role"] == "test"
+        assert "context" in result
 
     def test_clock_out_stub(self):
         """clock_out should return a not-yet-implemented response."""
@@ -82,12 +86,13 @@ class TestToolStubs:
 class TestCoreModules:
     """Verify that core modules can be imported."""
 
-    def test_context_steward_import(self):
+    def test_context_steward_import(self, tmp_path):
         """ContextSteward should be importable."""
         from hestai_context_mcp.core.context_steward import ContextSteward
 
-        steward = ContextSteward(working_dir="/tmp")
-        assert steward.working_dir == "/tmp"
+        workflow_path = tmp_path / "workflow.oct.md"
+        steward = ContextSteward(workflow_path=workflow_path)
+        assert steward.workflow_path == workflow_path
 
     def test_redaction_engine_import(self):
         """RedactionEngine should be importable."""
@@ -96,9 +101,10 @@ class TestCoreModules:
         engine = RedactionEngine()
         assert engine is not None
 
-    def test_session_manager_import(self):
+    def test_session_manager_import(self, tmp_path):
         """SessionManager should be importable."""
+
         from hestai_context_mcp.core.session import SessionManager
 
-        manager = SessionManager(working_dir="/tmp")
-        assert manager.working_dir == "/tmp"
+        manager = SessionManager(working_dir=str(tmp_path))
+        assert manager.working_dir == tmp_path
