@@ -50,13 +50,16 @@ class TestToolStubs:
         assert result["role"] == "test"
         assert "context" in result
 
-    def test_clock_out_stub(self):
-        """clock_out should return a not-yet-implemented response."""
+    def test_clock_out_implemented(self, tmp_path):
+        """clock_out should return structured response per interface contract."""
         from hestai_context_mcp.tools.clock_out import clock_out
 
-        result = clock_out(session_id="test-123")
-        assert result["status"] == "not_yet_implemented"
-        assert result["tool"] == "clock_out"
+        # Without a valid session, should return error status
+        (tmp_path / ".hestai" / "state" / "sessions" / "active").mkdir(parents=True, exist_ok=True)
+        result = clock_out(session_id="nonexistent", working_dir=str(tmp_path))
+        assert result["status"] == "error"
+        assert "session_id" in result
+        assert "extracted_learnings" in result
 
     def test_get_context_implemented(self, tmp_path):
         """get_context should return structured context response."""
