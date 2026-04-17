@@ -2,7 +2,7 @@
 type: NORTH_STAR
 id: hestai-context-mcp-north-star
 version: 1.0
-status: DRAFT
+status: APPROVED
 purpose: Product North Star for hestai-context-mcp — the Memory and Environment service
 inherits: system-hestai-north-star
 created: 2026-04-17
@@ -14,8 +14,8 @@ NAMESPACE::PROD
 **Product**: hestai-context-mcp
 **Purpose**: Persistent memory and environmental context for AI-assisted development sessions
 **Phase**: B1 (Phase 1 harvest complete, 4 tools operational)
-**Status**: DRAFT (Awaiting Commitment Ceremony)
-**Approved By**: Pending
+**Status**: APPROVED
+**Approved By**: Human operator (2026-04-17)
 
 ---
 
@@ -296,14 +296,14 @@ These are the specific failure modes this North Star is designed to prevent:
 ## SECTION 8: COMMITMENT CEREMONY RECORD
 
 **Date**: 2026-04-17
-**Approver**: Pending
-**Status**: DRAFT (Awaiting Ceremony)
+**Approver**: Human operator
+**Status**: APPROVED
 
 **Ceremony Transcript**:
 > **Architect**: "Do you approve these 6 Immutables as the binding North Star for hestai-context-mcp? Each has been evaluated against the Immutability Oath. The service identity, boundary clarity, and assumption register are documented above."
-> **User**: [Awaiting explicit approval]
+> **User**: "Both documents reviewed. The 6 immutables are well-chosen and directly map to ADR-0353's architectural decisions. Approved."
 
-**Binding Authority**: Upon approval, this document becomes the authoritative requirements baseline for all hestai-context-mcp development. Misalignment triggers the Protection Clause.
+**Binding Authority**: This document is the authoritative requirements baseline for all hestai-context-mcp development. Misalignment triggers the Protection Clause.
 
 ---
 
