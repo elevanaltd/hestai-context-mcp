@@ -35,3 +35,14 @@ Thumbs.db
 # Git worktrees (HestAI Workbench)
 /worktrees/
 /worktree-*/
+
+# HestAI governance - runtime state (not committed)
+.hestai-sys/
+.hestai/state/sessions/active/
+.hestai/state/sessions/archive/
+.hestai/state/sessions/pending/
+.hestai/state/context/state/current-focus.oct.md
+.hestai/state/context/state/checklist.oct.md
+.hestai/state/context/state/blockers.oct.md
+.hestai/state/context/state/constraints.oct.md
+.hestai/state/learnings-index.jsonl
