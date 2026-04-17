@@ -248,17 +248,25 @@ class SessionManager:
             state_link.unlink()
             # Fall through to create the correct symlink below
 
-        if state_link.exists() and state_link.is_dir():
-            # Real directory exists where symlink should be — migrate contents
-            # to .hestai-state/ then replace with symlink
-            import shutil
+        if state_link.exists():
+            if state_link.is_dir():
+                # Real directory exists where symlink should be — migrate contents
+                # to .hestai-state/ then replace with symlink
+                import shutil
 
-            self._migrate_state_contents(state_link, state_real)
-            shutil.rmtree(state_link)
-            logger.warning(
-                f"Migrated real directory at {state_link} to {state_real} "
-                f"and replaced with symlink to enforce three-tier convention"
-            )
+                self._migrate_state_contents(state_link, state_real)
+                shutil.rmtree(state_link)
+                logger.warning(
+                    f"Migrated real directory at {state_link} to {state_real} "
+                    f"and replaced with symlink to enforce three-tier convention"
+                )
+            else:
+                # Plain file or other non-directory — remove to make way for symlink
+                state_link.unlink()
+                logger.warning(
+                    f"Removed unexpected file at {state_link} "
+                    f"to create symlink (three-tier convention)"
+                )
 
         state_link.symlink_to("../.hestai-state")
         logger.info(f"Created symlink {state_link} -> ../.hestai-state " f"(three-tier convention)")

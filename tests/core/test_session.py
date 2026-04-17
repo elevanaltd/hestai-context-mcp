@@ -378,3 +378,20 @@ class TestEnsureHestaiStructure:
         migrated_file = tmp_path / ".hestai-state" / "context" / "PROJECT-CONTEXT.oct.md"
         assert migrated_file.exists()
         assert migrated_file.read_text() == "test content"
+
+    def test_plain_file_collision_gets_replaced(self, tmp_path):
+        """A plain file at .hestai/state is removed and replaced with symlink."""
+        import os
+
+        # Pre-create .hestai/ with a plain file where the symlink should be
+        (tmp_path / ".hestai").mkdir()
+        (tmp_path / ".hestai" / "state").write_text("accidental file")
+
+        mgr = SessionManager(str(tmp_path))
+        mgr.ensure_hestai_structure()
+
+        # Plain file must be replaced with correct symlink
+        state_link = tmp_path / ".hestai" / "state"
+        assert state_link.is_symlink()
+        assert os.readlink(str(state_link)) == "../.hestai-state"
+        assert state_link.exists()  # Target exists
