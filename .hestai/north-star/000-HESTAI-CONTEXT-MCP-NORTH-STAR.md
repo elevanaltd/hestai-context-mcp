@@ -6,7 +6,7 @@ status: APPROVED
 purpose: Product North Star for hestai-context-mcp — the Memory and Environment service
 inherits: system-hestai-north-star
 created: 2026-04-17
-NAMESPACE::PROD
+namespace: PROD
 ---
 
 # HESTAI-CONTEXT-MCP PRODUCT NORTH STAR
