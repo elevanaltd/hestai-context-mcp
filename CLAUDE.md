@@ -45,7 +45,7 @@ Current coverage: ~89%.
 
 ```bash
 # Run by marker
-.venv/bin/python -m pytest -m smoke         # Fast sanity checks (~20 tests)
+.venv/bin/python -m pytest -m smoke         # Fast sanity checks
 .venv/bin/python -m pytest -m unit          # Unit tests
 .venv/bin/python -m pytest -m behavior      # Behavioral tests
 .venv/bin/python -m pytest -m contract      # Contract tests
