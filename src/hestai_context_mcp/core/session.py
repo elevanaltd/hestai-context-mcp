@@ -8,6 +8,7 @@ Harvested from legacy hestai-mcp clock_in.py and fast_layer.py.
 
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import UTC, datetime
@@ -223,16 +224,29 @@ class SessionManager:
     def _ensure_state_symlink(self, state_link: Path, state_real: Path) -> None:
         """Create .hestai/state symlink pointing to ../.hestai-state.
 
-        If the symlink already exists and is valid, it is left alone.
+        If the symlink already exists and points to the correct target, it is left alone.
+        If the symlink points to the wrong target or is broken, it is replaced.
         If a real directory exists at the symlink path, it is replaced.
 
         Args:
             state_link: Path where the symlink should be (.hestai/state).
             state_real: Path to the real state directory (.hestai-state/).
         """
+        expected_target = "../.hestai-state"
+
         if state_link.is_symlink():
-            # Already a symlink, leave it alone
-            return
+            current_target = os.readlink(str(state_link))
+            if current_target == expected_target:
+                # Correct symlink, leave it alone
+                return
+
+            # Wrong target or broken symlink — remove and recreate
+            logger.warning(
+                f"Symlink {state_link} points to '{current_target}' "
+                f"instead of '{expected_target}', correcting"
+            )
+            state_link.unlink()
+            # Fall through to create the correct symlink below
 
         if state_link.exists() and state_link.is_dir():
             # Real directory exists where symlink should be — migrate contents
