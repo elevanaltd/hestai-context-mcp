@@ -29,8 +29,9 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: uv sync --all-extras --python ${{ matrix.python-version }}
+        run: uv sync --all-extras
       - name: Ruff
         run: uv run ruff check src tests
       - name: Black
@@ -51,8 +52,9 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: uv sync --all-extras --python ${{ matrix.python-version }}
+        run: uv sync --all-extras
       - name: Mypy
         run: uv run mypy src
 
@@ -71,8 +73,9 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: uv sync --all-extras --python ${{ matrix.python-version }}
+        run: uv sync --all-extras
       - name: Pytest with coverage threshold
         run: uv run pytest --cov-fail-under=85
 
