@@ -64,6 +64,13 @@ addopts = [
     "--strict-markers",
     "-v",
 ]
+# Note: --cov-fail-under=85 is enforced in CI only (not here)
+# Reason: pyproject.toml addopts apply to ALL pytest runs including:
+#   - Subset test runs: pytest tests/unit/core/
+#   - TDD cycles: pytest tests/test_specific.py
+#   - Debugging: pytest -k "test_case"
+# These can't meet full-suite coverage thresholds.
+# Coverage threshold belongs at release gate (CI), not tool defaults.
 asyncio_mode = "auto"
 
 [tool.mypy]
