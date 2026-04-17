@@ -37,7 +37,7 @@ Thumbs.db
 /worktree-*/
 
 # HestAI governance - runtime state (not committed)
-.hestai-sys/
+/.hestai-sys/
 .hestai/state/sessions/active/
 .hestai/state/sessions/archive/
 .hestai/state/sessions/pending/
