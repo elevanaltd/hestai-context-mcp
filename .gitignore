@@ -36,13 +36,21 @@ Thumbs.db
 /worktrees/
 /worktree-*/
 
-# HestAI governance - runtime state (not committed)
-/.hestai-sys/
-.hestai/state/sessions/active/
-.hestai/state/sessions/archive/
-.hestai/state/sessions/pending/
-.hestai/state/context/state/current-focus.oct.md
-.hestai/state/context/state/checklist.oct.md
-.hestai/state/context/state/blockers.oct.md
-.hestai/state/context/state/constraints.oct.md
-.hestai/state/learnings-index.jsonl
+# HestAI Three-Tier Architecture
+# Tier 1: System governance (MCP-delivered, never committed)
+.hestai-sys/
+# Tier 3: Working state (gitignored, symlinked from .hestai/state/)
+.hestai-state/
+.hestai/state
+
+# Raw debate transcripts (OCTAVE compressed versions are committed)
+debates/*.json
+debates/*.lock
+
+# Claude Code local settings (user-specific)
+/.claude/settings.json
+/.claude/settings.local.json
+/.claude/commands/
+
+# Gemini clipboard cache
+.gemini-clipboard/
