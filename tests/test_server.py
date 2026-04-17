@@ -58,13 +58,20 @@ class TestToolStubs:
         assert result["status"] == "not_yet_implemented"
         assert result["tool"] == "clock_out"
 
-    def test_get_context_stub(self):
-        """get_context should return a not-yet-implemented response."""
+    def test_get_context_implemented(self, tmp_path):
+        """get_context should return structured context response."""
+        from unittest.mock import patch
+
         from hestai_context_mcp.tools.get_context import get_context
 
-        result = get_context(working_dir="/tmp")
-        assert result["status"] == "not_yet_implemented"
-        assert result["tool"] == "get_context"
+        with patch(
+            "hestai_context_mcp.tools.get_context.get_git_state",
+            return_value=None,
+        ):
+            result = get_context(working_dir=str(tmp_path))
+        assert "working_dir" in result
+        assert "context" in result
+        assert "product_north_star" in result["context"]
 
     def test_submit_review_implemented(self):
         """submit_review should be functional (no longer a stub)."""
