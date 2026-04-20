@@ -81,9 +81,8 @@ class TestClockInAiSynthesisIntegration:
     def test_ai_failure_collapses_to_fallback(
         self, _mock_branch, tmp_path, monkeypatch: pytest.MonkeyPatch
     ):
-        import hestai_context_mcp.ports.ai_client as port_mod
-
         import hestai_context_mcp.core.synthesis as synth_mod
+        import hestai_context_mcp.ports.ai_client as port_mod
         from hestai_context_mcp.tools.clock_in import clock_in
 
         monkeypatch.setattr(
