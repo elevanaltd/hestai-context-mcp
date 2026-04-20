@@ -121,6 +121,28 @@ class TestAuthErrorPath:
 
 class TestTransportErrorPath:
     @pytest.mark.asyncio
+    async def test_429_rate_limit_maps_to_transport_error(self):
+        """TMG C4: HTTP 429 (Too Many Requests) is a transient condition.
+
+        Per spec §6 all transient/server conditions collapse onto
+        ``AIClientTransportError`` and application layer emits fallback.
+        429 is not an auth failure (the key is valid; the quota is not),
+        so it must NOT map to ``AIClientAuthError``.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTransportError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, json={"error": "rate limit"}, headers={"retry-after": "30"})
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTransportError):
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("status", [500, 502, 503, 504])
     async def test_server_5xx_maps_to_transport_error(self, status: int):
         from hestai_context_mcp.ports.ai_client import (

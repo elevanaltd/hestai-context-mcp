@@ -265,18 +265,26 @@ class TestConfigNoLegacyImport:
 def test_resolve_api_key_never_logs_secret_value(
     clean_env, fake_keyring, caplog: pytest.LogCaptureFixture, monkeypatch
 ):
-    """PROD::I2: neither keyring values nor env values may be written to logs."""
+    """PROD::I2: neither keyring values nor env values may be written to logs.
+
+    TMG A1: captures at INFO level (the production default) so that a log
+    statement above DEBUG still cannot leak a secret. Also asserts at
+    DEBUG just in case a future verbose diagnostic path is added.
+    """
     from hestai_context_mcp.adapters.ai_config import KEYRING_SERVICE, resolve_api_key
 
     fake_keyring.set_password(KEYRING_SERVICE, "openrouter-key", "SECRET_AAA")
     monkeypatch.setenv("OPENROUTER_API_KEY", "SECRET_BBB")
 
-    with caplog.at_level(logging.DEBUG, logger="hestai_context_mcp.adapters.ai_config"):
-        resolve_api_key(provider="openrouter")
-
-    for rec in caplog.records:
-        assert "SECRET_AAA" not in rec.getMessage()
-        assert "SECRET_BBB" not in rec.getMessage()
+    # Run twice so we verify at both production (INFO) and verbose (DEBUG) levels.
+    for level in (logging.INFO, logging.DEBUG):
+        caplog.clear()
+        with caplog.at_level(level, logger="hestai_context_mcp.adapters.ai_config"):
+            resolve_api_key(provider="openrouter")
+        for rec in caplog.records:
+            msg = rec.getMessage()
+            assert "SECRET_AAA" not in msg, f"Secret leaked at level {level}: {msg!r}"
+            assert "SECRET_BBB" not in msg, f"Secret leaked at level {level}: {msg!r}"
 
 
 # Dead-import helper so ``Any`` stays reachable by mypy when adding fields.

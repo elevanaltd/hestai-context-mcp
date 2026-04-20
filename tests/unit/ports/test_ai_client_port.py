@@ -74,11 +74,27 @@ class TestCompletionRequestShape:
             req.system_prompt = "other"  # type: ignore[misc]
 
     def test_type_hints_are_primitive(self):
-        """I3 guard: no provider types leaked into request hints."""
+        """I3 guard: no provider types leaked into request hints.
+
+        TMG C3: asserts that every expected field *has* an annotation and
+        that each annotation is a primitive type. ``get_type_hints`` silently
+        returns ``{}`` for unannotated attributes, so a missing annotation
+        would otherwise pass vacuously.
+        """
         from hestai_context_mcp.ports.ai_client import CompletionRequest
 
         hints = get_type_hints(CompletionRequest)
-        # Every annotation must be a primitive type.
+        expected = {
+            "system_prompt",
+            "user_prompt",
+            "max_tokens",
+            "temperature",
+            "timeout_seconds",
+        }
+        assert set(hints.keys()) == expected, (
+            f"CompletionRequest annotation set mismatch: got {set(hints.keys())} "
+            f"expected {expected}"
+        )
         allowed = {str, int, float}
         for name, hint in hints.items():
             assert hint in allowed, f"CompletionRequest.{name} has non-primitive hint: {hint!r}"
