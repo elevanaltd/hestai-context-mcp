@@ -20,10 +20,15 @@ from hestai_context_mcp.core.synthesis import (
 
 
 class TestSynthesizeAiContextDefault:
-    """``synthesize_ai_context`` is the seam for issue #5; default returns None."""
+    """``synthesize_ai_context`` returns ``None`` when no provider client is available.
 
-    def test_default_returns_none(self):
-        """No provider wired yet → returns None (issue #5 replaces the body)."""
+    After issue #5, the seam delegates to ``build_default_ai_client()``. If no
+    credentials are configured anywhere, the factory returns ``None`` and the
+    seam returns ``None`` (letting ``resolve_ai_synthesis`` emit the fallback).
+    """
+
+    def test_returns_none_when_factory_yields_no_client(self, monkeypatch):
+        monkeypatch.setattr(synthesis_mod, "build_default_ai_client", lambda: None, raising=True)
         assert (
             synthesize_ai_context(
                 role="test-role",
