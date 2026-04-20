@@ -87,3 +87,51 @@ class TestNoProviderSdkInPorts:
         assert not offenders, "PROD::I3 violation — provider name in ports/:\n" + "\n".join(
             f"  {p}:{n} matched /{pat}/: {s}" for p, n, pat, s in offenders
         )
+
+
+class TestCoreDoesNotImportAdaptersAtModuleLoad:
+    """DIP boundary: ``core/`` modules must import only from ``ports/``.
+
+    Concrete adapters may be accessed via lazy imports *inside* function
+    bodies (composition-root pattern), but module-level ``from
+    hestai_context_mcp.adapters...`` in any ``core/`` file would couple
+    the application layer to a concrete implementation at import time
+    and violate the Dependency Inversion Principle. Prior CRS review
+    flagged this as blocking; this test is the structural regression
+    guard.
+    """
+
+    _CORE_ROOT = _SRC_ROOT / "core"
+    _TOP_LEVEL_ADAPTER_IMPORT: re.Pattern[str] = re.compile(
+        r"^\s*from\s+hestai_context_mcp\.adapters"
+    )
+
+    def test_no_module_level_adapter_import_in_core(self):
+        if not self._CORE_ROOT.exists():
+            return  # pragma: no cover — core must exist; belt-and-braces
+
+        offenders: list[tuple[Path, int, str]] = []
+        for py in _iter_python_files(self._CORE_ROOT):
+            inside_function = False
+            for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+                stripped = line.lstrip()
+                # A line inside a function/method body is indented; a
+                # module-level statement starts at column 0. This is a
+                # conservative structural test — the DIP concern is
+                # import-time coupling, so only col-0 imports matter.
+                if line.startswith("def ") or line.startswith("async def "):
+                    inside_function = True
+                    continue
+                if line and not line[0].isspace():
+                    # back at module scope — reset the flag
+                    inside_function = False
+                if (
+                    not inside_function
+                    and self._TOP_LEVEL_ADAPTER_IMPORT.match(line)
+                    and stripped == line.lstrip()  # truly at col 0
+                    and line == line.lstrip()
+                ):
+                    offenders.append((py, lineno, line.rstrip()))
+        assert not offenders, "DIP violation — module-level adapter import in core/:\n" + "\n".join(
+            f"  {p}:{n}: {s}" for p, n, s in offenders
+        )

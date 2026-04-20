@@ -18,9 +18,6 @@ import asyncio
 import logging
 from typing import TypedDict
 
-from hestai_context_mcp.adapters.openai_compat_ai_client import (
-    build_default_ai_client,
-)
 from hestai_context_mcp.ports.ai_client import (
     AIClient,
     AIClientError,
@@ -28,6 +25,33 @@ from hestai_context_mcp.ports.ai_client import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def build_default_ai_client() -> AIClient | None:
+    """Return the default :class:`AIClient`, or ``None`` if none available.
+
+    This is the *composition-root seam* for the AI synthesis path. It
+    performs a lazy import of the concrete adapter so that the
+    application-layer module (``core/synthesis``) imports only from
+    :mod:`hestai_context_mcp.ports` at module-load time. That preserves
+    the Dependency-Inversion layering invariant (core → ports, adapters
+    → ports; core does not structurally depend on adapters).
+
+    Tests may monkeypatch this symbol on :mod:`hestai_context_mcp.core.synthesis`
+    to inject stubs; that pattern is honoured because
+    :func:`synthesize_ai_context` resolves this symbol via the module
+    (not a direct name binding) on each call.
+    """
+    # Lazy import: breaks the structural adapter-import coupling at
+    # module-load time, preserving the ports-only dependency of core.
+    # The adapter module itself imports only from ports + adapter-
+    # internal config.
+    from hestai_context_mcp.adapters.openai_compat_ai_client import (
+        build_default_ai_client as _factory,
+    )
+
+    return _factory()
+
 
 # Valid values for the ``source`` discriminator. Anything else must be
 # rejected by :func:`resolve_ai_synthesis` to keep the response dict shape
