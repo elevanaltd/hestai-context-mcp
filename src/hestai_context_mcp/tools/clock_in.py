@@ -15,7 +15,9 @@ from hestai_context_mcp.core.git_state import (
     get_current_branch,
     get_git_state,
 )
+from hestai_context_mcp.core.phase import phase_prefix, resolve_phase
 from hestai_context_mcp.core.session import SessionManager
+from hestai_context_mcp.core.synthesis import resolve_ai_synthesis
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +161,13 @@ def clock_in(
             "modified_files": [],
         }
 
-    # Phase constraints (graceful fallback)
+    # Resolve the declared full-form phase (e.g. "B1_FOUNDATION_COMPLETE").
+    # Full form is the Payload Compiler shape-parity contract (issue #4).
+    phase = resolve_phase(working_dir_path)
+
+    # Phase constraints (graceful fallback). The workflow document uses
+    # prefix markers (B1_BUILD_PLAN, etc.), so pass the prefix — not the
+    # full form — to ContextSteward.
     phase_constraints = None
     try:
         # Look for workflow files in common locations
@@ -173,11 +181,26 @@ def clock_in(
         ]:
             if workflow_candidate.exists():
                 steward = ContextSteward(workflow_path=workflow_candidate)
-                constraints = steward.synthesize_active_state("B1")
+                constraints = steward.synthesize_active_state(phase_prefix(phase))
                 phase_constraints = constraints.to_dict()
                 break
     except (FileNotFoundError, ValueError) as e:
         logger.debug(f"Phase constraints not available: {e}")
+
+    # Build AI synthesis via the provider-agnostic seam (issue #5 replaces
+    # the body of synthesize_ai_context with a real provider call). The
+    # ai_synthesis field is ALWAYS present per PROD::I4 STRUCTURED_RETURN_SHAPES.
+    context_summary = _build_context_summary(
+        product_north_star=product_north_star,
+        project_context=project_context,
+        git_state=git_state,
+    )
+    ai_synthesis = resolve_ai_synthesis(
+        role=role,
+        focus=focus_resolved["value"],
+        phase=phase,
+        context_summary=context_summary,
+    )
 
     return {
         "session_id": session_id,
@@ -186,7 +209,9 @@ def clock_in(
         "focus_source": focus_resolved["source"],
         "branch": branch,
         "working_dir": str(working_dir_path),
+        "phase": phase,
         "context_paths": context_paths,
+        "ai_synthesis": ai_synthesis,
         "context": {
             "product_north_star": product_north_star,
             "project_context": project_context,
@@ -195,3 +220,23 @@ def clock_in(
             "active_sessions": active_sessions,
         },
     }
+
+
+def _build_context_summary(
+    *,
+    product_north_star: str | None,
+    project_context: str | None,
+    git_state: dict[str, Any],
+) -> str:
+    """Assemble a lightweight context summary for the AI synthesis seam.
+
+    Kept simple in this PR; issue #5 may extend with richer signals. No
+    provider-specific formatting is applied here (PROD::I3).
+    """
+    parts: list[str] = []
+    if product_north_star:
+        parts.append(f"NORTH_STAR::\n{product_north_star}")
+    if project_context:
+        parts.append(f"PROJECT_CONTEXT::\n{project_context}")
+    parts.append(f"GIT_STATE::{git_state}")
+    return "\n\n".join(parts)

@@ -151,14 +151,81 @@ class TestClockInReturnShape:
         assert result["context"]["project_context"] == ctx_content
 
     @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
-    def test_ai_synthesis_is_null(self, mock_branch, tmp_path):
-        """AI synthesis is not included (deferred per spec)."""
+    def test_ai_synthesis_always_present_as_structured_dict(self, mock_branch, tmp_path):
+        """ai_synthesis is ALWAYS in the response (PROD::I4 structured shape).
+
+        Issue #4: ai_synthesis must never be absent. With no provider wired,
+        the fallback dict must still be returned with {source, synthesis}.
+        """
         result = clock_in(
             role="test-role",
             working_dir=str(tmp_path),
         )
-        # ai_synthesis should not be in the response at all, or be None
-        assert result.get("ai_synthesis") is None
+        assert "ai_synthesis" in result
+        ai_syn = result["ai_synthesis"]
+        assert isinstance(ai_syn, dict)
+        assert set(ai_syn.keys()) == {"source", "synthesis"}
+        assert ai_syn["source"] == "fallback"
+        assert isinstance(ai_syn["synthesis"], str)
+        assert len(ai_syn["synthesis"]) > 0
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_ai_synthesis_fallback_synthesis_is_octave_template(self, mock_branch, tmp_path):
+        """Fallback synthesis string follows the OCTAVE template shape."""
+        result = clock_in(
+            role="test-role",
+            working_dir=str(tmp_path),
+            focus="explicit-focus",
+        )
+        synthesis_str = result["ai_synthesis"]["synthesis"]
+        # OCTAVE template contract: contains key::value lines per legacy reference
+        assert "FOCUS::" in synthesis_str
+        assert "PHASE::" in synthesis_str
+        assert "CONTEXT_FILES::" in synthesis_str
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_ai_synthesis_ai_seam_returns_source_ai(self, mock_branch, tmp_path, monkeypatch):
+        """When the AI seam returns a synthesis dict, response carries source:'ai'.
+
+        Issue #4: AI-success path is wired in #5; this test proves the seam exists
+        and is honoured. No provider SDK is imported here — we monkeypatch the seam
+        function directly.
+        """
+        from hestai_context_mcp.core import synthesis as synthesis_mod
+
+        def fake_ai_synthesis(**_kwargs):
+            return {"source": "ai", "synthesis": "PHASE::B1_FOUNDATION_COMPLETE\nFOCUS::mocked"}
+
+        monkeypatch.setattr(synthesis_mod, "synthesize_ai_context", fake_ai_synthesis)
+
+        result = clock_in(
+            role="test-role",
+            working_dir=str(tmp_path),
+        )
+        assert result["ai_synthesis"]["source"] == "ai"
+        assert "mocked" in result["ai_synthesis"]["synthesis"]
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_phase_string_is_full_form_not_abbreviated(self, mock_branch, tmp_path):
+        """Phase string returned is the full declared form (e.g. B1_FOUNDATION_COMPLETE).
+
+        Issue #4 acceptance criterion 2: legacy returns full phase strings, new
+        server must too. The bare 'B1' form would break the Payload Compiler
+        shape-parity gate.
+        """
+        ns_dir = tmp_path / ".hestai" / "north-star"
+        ns_dir.mkdir(parents=True)
+        (ns_dir / "000-TEST-NORTH-STAR-SUMMARY.oct.md").write_text(
+            "===NORTH_STAR===\nPHASE::B1_FOUNDATION_COMPLETE\n===END==="
+        )
+
+        result = clock_in(
+            role="test-role",
+            working_dir=str(tmp_path),
+        )
+        assert result["phase"] == "B1_FOUNDATION_COMPLETE"
+        # Must NOT be the bare abbreviation
+        assert result["phase"] != "B1"
 
 
 class TestClockInValidation:
