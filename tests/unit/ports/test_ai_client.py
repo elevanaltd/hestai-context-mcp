@@ -135,8 +135,13 @@ class TestAIClientProtocol:
         assert len(non_self) == 1, f"Expected exactly one non-self param, got {non_self}"
         p = non_self[0]
         # Annotation should refer to CompletionRequest (by type or string).
+        # ``from __future__ import annotations`` makes annotations strings at
+        # signature-inspect time; accept both string and type forms.
         ann = p.annotation
-        assert ann is CompletionRequest or getattr(ann, "__name__", None) == "CompletionRequest"
+        ann_name = ann if isinstance(ann, str) else getattr(ann, "__name__", None)
+        assert (
+            ann is CompletionRequest or ann_name == "CompletionRequest"
+        ), f"Expected CompletionRequest annotation, got {ann!r}"
 
     def test_satisfies_isinstance_with_conforming_stub(self):
         """A stub implementing __aenter__/__aexit__/complete_text is an AIClient."""

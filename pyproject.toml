@@ -22,6 +22,13 @@ classifiers = [
 dependencies = [
     "fastmcp>=2.0.0",
     "pydantic>=2.0.0",
+    # AIClient adapter (issue #5): direct HTTP to OpenAI-compat providers.
+    # Also pulled in transitively by fastmcp today, but we rely on it
+    # directly now so we declare it explicitly.
+    "httpx>=0.28.0",
+    # Credential storage for the AIClient adapter (issue #5), including
+    # migration from legacy "hestai-mcp" service name.
+    "keyring>=25.0.0",
 ]
 
 [project.optional-dependencies]
