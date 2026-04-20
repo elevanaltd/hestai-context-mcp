@@ -132,6 +132,36 @@ def _migrate_legacy_key(provider: str) -> str | None:
     return legacy_value
 
 
+def _self_heal_legacy_entry(provider: str) -> None:
+    """Delete any lingering legacy keyring entry for ``provider`` (best-effort).
+
+    Closes the crash-window leak identified by CE review:
+    ``_migrate_legacy_key`` writes to the new service and then deletes
+    the legacy entry; if the process dies between those two operations
+    the legacy secret persists forever because subsequent reads take
+    the fast path and never revisit the legacy entry. This helper is
+    invoked on every successful fast-path read of the new entry so the
+    duplicate is eventually cleaned up. No secret value is logged.
+    """
+    account = _keyring_account(provider)
+    legacy_value = keyring.get_password(LEGACY_KEYRING_SERVICE, account)
+    if not legacy_value:
+        return
+    try:
+        keyring.delete_password(LEGACY_KEYRING_SERVICE, account)
+    except Exception:
+        logger.warning(
+            "Keyring self-heal: failed to delete lingering legacy entry " "for provider %r",
+            provider,
+        )
+        return
+    logger.info(
+        "Keyring self-heal: removed lingering legacy credential for " "provider %r from service %r",
+        provider,
+        LEGACY_KEYRING_SERVICE,
+    )
+
+
 def resolve_api_key(*, provider: str) -> str | None:
     """Return the API key for ``provider``, or ``None`` if absent.
 
@@ -141,11 +171,21 @@ def resolve_api_key(*, provider: str) -> str | None:
            migrated into the new service entry then returned.
         3. environment variable (``OPENAI_API_KEY`` / ``OPENROUTER_API_KEY``).
 
+    When the new-service entry is present the function also performs a
+    best-effort *self-heal* deletion of any lingering legacy entry for
+    the same account. This closes the crash-window duplicate-leak
+    otherwise possible between ``set_password`` and ``delete_password``
+    inside :func:`_migrate_legacy_key`.
+
     Never logs the secret value.
     """
     account = _keyring_account(provider)
     value = keyring.get_password(KEYRING_SERVICE, account)
     if value:
+        # Self-heal: if the new entry exists, the legacy entry must NOT
+        # exist. If a prior migration crashed before its final delete,
+        # clean up here.
+        _self_heal_legacy_entry(provider)
         return value
     migrated = _migrate_legacy_key(provider)
     if migrated:

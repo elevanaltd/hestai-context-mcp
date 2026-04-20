@@ -136,7 +136,11 @@ class OpenAICompatAIClient:
             # Do NOT include the response body — it may contain the key
             # or a hint that is sensitive.
             raise AIClientAuthError(f"provider rejected credential (HTTP {status})")
-        if status == 429 or 500 <= status < 600:
+        # 408 (Request Timeout), 429 (Too Many Requests), and all 5xx
+        # are transient conditions the application must retry via the
+        # next request (not within this one). CE review
+        # ``ce-issue5-20260420-1`` explicitly flagged 408.
+        if status in (408, 429) or 500 <= status < 600:
             raise AIClientTransportError(f"provider returned HTTP {status}")
         if status != 200:
             # Unknown non-2xx: treat as protocol-level surprise.

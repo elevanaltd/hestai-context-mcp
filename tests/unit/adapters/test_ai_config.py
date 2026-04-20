@@ -220,8 +220,19 @@ class TestKeyringMigration:
             assert "SECRET_MIGRATED" not in rec.message
             assert "SECRET_MIGRATED" not in str(rec.args) if rec.args else True
 
-    def test_no_migration_when_new_entry_exists(self, clean_env, fake_keyring):
-        """If the new entry already exists, legacy is ignored (never read/written)."""
+    def test_self_heal_when_both_present(
+        self, clean_env, fake_keyring, caplog: pytest.LogCaptureFixture
+    ):
+        """When new entry exists AND a lingering legacy entry exists, the legacy
+        duplicate is self-healed (deleted) on the fast path.
+
+        CE review ``ce-issue5-20260420-1`` flagged the prior "preserve
+        legacy when new exists" behaviour as a crash-window
+        duplicate-persistence leak (PROD::I2): if a migration crashes
+        between ``set(NEW)`` and ``delete(LEGACY)``, the legacy entry
+        survives indefinitely because subsequent reads take the fast
+        path. The self-heal path closes the window.
+        """
         from hestai_context_mcp.adapters.ai_config import (
             KEYRING_SERVICE,
             LEGACY_KEYRING_SERVICE,
@@ -231,9 +242,33 @@ class TestKeyringMigration:
         fake_keyring.set_password(KEYRING_SERVICE, "openrouter-key", "NEW_KEY")
         fake_keyring.set_password(LEGACY_KEYRING_SERVICE, "openrouter-key", "LEGACY_KEY")
 
+        with caplog.at_level(logging.INFO, logger="hestai_context_mcp.adapters.ai_config"):
+            assert resolve_api_key(provider="openrouter") == "NEW_KEY"
+
+        # Legacy duplicate removed; new entry untouched.
+        assert (
+            fake_keyring.get_password(LEGACY_KEYRING_SERVICE, "openrouter-key") is None
+        ), "self-heal must remove lingering legacy entry"
+        assert fake_keyring.get_password(KEYRING_SERVICE, "openrouter-key") == "NEW_KEY"
+
+        # INFO-logged; neither secret is in the message.
+        heal_records = [r for r in caplog.records if "self-heal" in r.message.lower()]
+        assert heal_records, "expected an INFO log record mentioning self-heal"
+        for rec in heal_records:
+            assert "NEW_KEY" not in rec.getMessage()
+            assert "LEGACY_KEY" not in rec.getMessage()
+
+    def test_fast_path_with_no_legacy_does_not_call_delete(self, clean_env, fake_keyring):
+        """Self-heal must not call delete when there is no legacy entry.
+
+        Guard against needless keyring mutations (or ``PasswordDeleteError``
+        from backends that raise when asked to delete a non-existent key).
+        """
+        from hestai_context_mcp.adapters.ai_config import KEYRING_SERVICE, resolve_api_key
+
+        fake_keyring.set_password(KEYRING_SERVICE, "openrouter-key", "NEW_KEY")
         assert resolve_api_key(provider="openrouter") == "NEW_KEY"
-        # Legacy must remain untouched (no opportunistic delete when new exists).
-        assert fake_keyring.get_password(LEGACY_KEYRING_SERVICE, "openrouter-key") == "LEGACY_KEY"
+        assert fake_keyring.delete_calls == []
 
     def test_no_migration_when_neither_present(self, clean_env, fake_keyring):
         from hestai_context_mcp.adapters.ai_config import resolve_api_key

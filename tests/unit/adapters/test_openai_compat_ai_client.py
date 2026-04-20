@@ -121,6 +121,28 @@ class TestAuthErrorPath:
 
 class TestTransportErrorPath:
     @pytest.mark.asyncio
+    async def test_408_request_timeout_maps_to_transport_error(self):
+        """CE ``ce-issue5-20260420-1``: HTTP 408 is a transient condition.
+
+        Prior behaviour collapsed any non-2xx-non-auth-non-5xx status
+        into ``AIClientProtocolError``; 408 specifically must map to
+        ``AIClientTransportError`` so the application layer treats the
+        server-side timeout identically to a client-side timeout.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTransportError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(408, json={"error": "request timeout"})
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTransportError):
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+    @pytest.mark.asyncio
     async def test_429_rate_limit_maps_to_transport_error(self):
         """TMG C4: HTTP 429 (Too Many Requests) is a transient condition.
 
