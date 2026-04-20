@@ -71,3 +71,37 @@ class TestResolvePhase:
             "  PHASE::  B1_FOUNDATION_COMPLETE  \n"
         )
         assert resolve_phase(tmp_path) == "B1_FOUNDATION_COMPLETE"
+
+    def test_non_utf8_north_star_does_not_abort_resolution(self, tmp_path: Path):
+        """A non-decodable North Star file must not raise; resolver falls through.
+
+        Defensive: ``Path.read_text`` raises ``UnicodeDecodeError`` (a
+        ``ValueError`` subclass) rather than ``OSError`` when the bytes are
+        not valid UTF-8. The original ``except OSError`` would have let this
+        abort the whole resolution.
+        """
+        ns_dir = tmp_path / ".hestai" / "north-star"
+        ns_dir.mkdir(parents=True)
+        bad = ns_dir / "000-BAD-ENCODING-SUMMARY.oct.md"
+        # 0xFF is invalid as the first byte of any UTF-8 sequence.
+        bad.write_bytes(b"\xff\xfe\xffPHASE::SHOULD_NOT_BE_READ")
+        # With the broken file and no PROJECT-CONTEXT we must degrade to the
+        # default rather than raise.
+        assert resolve_phase(tmp_path) == DEFAULT_PHASE
+
+    def test_non_utf8_north_star_falls_through_to_project_context(self, tmp_path: Path):
+        """If the North Star cannot decode, PROJECT-CONTEXT is still consulted."""
+        ns_dir = tmp_path / ".hestai" / "north-star"
+        ns_dir.mkdir(parents=True)
+        (ns_dir / "000-BAD-SUMMARY.oct.md").write_bytes(b"\xff\xfe")
+        ctx_dir = tmp_path / ".hestai" / "state" / "context"
+        ctx_dir.mkdir(parents=True)
+        (ctx_dir / "PROJECT-CONTEXT.oct.md").write_text("PHASE::D3_PROTOTYPE")
+        assert resolve_phase(tmp_path) == "D3_PROTOTYPE"
+
+    def test_non_utf8_project_context_does_not_abort_resolution(self, tmp_path: Path):
+        """A non-decodable PROJECT-CONTEXT must not raise."""
+        ctx_dir = tmp_path / ".hestai" / "state" / "context"
+        ctx_dir.mkdir(parents=True)
+        (ctx_dir / "PROJECT-CONTEXT.oct.md").write_bytes(b"\xff\xfe\xff")
+        assert resolve_phase(tmp_path) == DEFAULT_PHASE

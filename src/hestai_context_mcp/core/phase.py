@@ -67,7 +67,9 @@ def _read_first_north_star_phase(working_dir: Path) -> str | None:
     for candidate in sorted(ns_dir.glob("*.oct.md")):
         try:
             content = candidate.read_text()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # UnicodeDecodeError is a ValueError subclass raised when the
+            # file bytes are not valid UTF-8. Treat as absent and fall back.
             continue
         phase = _extract_phase_from_content(content)
         if phase:
@@ -82,7 +84,7 @@ def _read_project_context_phase(working_dir: Path) -> str | None:
         return None
     try:
         content = path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return _extract_phase_from_content(content)
 

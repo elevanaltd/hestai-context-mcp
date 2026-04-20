@@ -67,6 +67,33 @@ def synthesize_ai_context(
     return None
 
 
+def _sanitise_single_line(value: str) -> str:
+    """Collapse line-breaking and control characters to prevent OCTAVE injection.
+
+    Defensive against malicious or accidental inputs containing ``\\n``,
+    ``\\r``, or other line-breaking characters that would otherwise let the
+    caller synthesise additional protocol fields (e.g. a focus value of
+    ``"bug\\nBLOCKERS::[pwned]"``).
+
+    Replaces with a single space:
+      * C0 controls (``\\x00``-``\\x1F``) — includes ``\\n``, ``\\r``, ``\\t``.
+      * DEL (``\\x7F``).
+      * C1 controls (``\\x80``-``\\x9F``) — includes NEL ``\\x85``.
+      * Unicode line separators ``\\u2028`` and paragraph separators ``\\u2029``.
+    These together form the full set on which Python's ``str.splitlines()``
+    splits, so the sanitised value is guaranteed to be a single line for
+    any downstream parser that uses ``splitlines`` semantics. Non-ASCII
+    printable characters (e.g. Latin-1 Supplement from ``\\u00A0``) are
+    preserved; the filter is not over-aggressive against international text.
+    """
+    if not isinstance(value, str):  # defence-in-depth; typing says str
+        return ""
+    return "".join(
+        " " if (cp < 0x20 or cp == 0x7F or 0x80 <= cp <= 0x9F or cp in (0x2028, 0x2029)) else c
+        for c, cp in ((c, ord(c)) for c in value)
+    ).strip()
+
+
 def build_fallback_synthesis(
     *,
     role: str,
@@ -79,6 +106,9 @@ def build_fallback_synthesis(
     Compiler can read it identically to a legacy response. Returned whenever
     :func:`synthesize_ai_context` returns ``None`` or raises.
 
+    All interpolated values are sanitised to a single line so a crafted
+    ``focus`` / ``role`` / ``phase`` cannot inject synthetic OCTAVE fields.
+
     Args:
         role: Agent role name.
         focus: Resolved focus string.
@@ -87,13 +117,16 @@ def build_fallback_synthesis(
     Returns:
         :class:`AiSynthesisResult` with ``source == "fallback"``.
     """
+    safe_role = _sanitise_single_line(role)
+    safe_focus = _sanitise_single_line(focus)
+    safe_phase = _sanitise_single_line(phase)
     synthesis = (
         "CONTEXT_FILES::[@.hestai/state/context/PROJECT-CONTEXT.oct.md, "
         "@.hestai/north-star/000-HESTAI-CONTEXT-MCP-NORTH-STAR-SUMMARY.oct.md]\n"
-        f"FOCUS::{focus}\n"
-        f"PHASE::{phase}\n"
+        f"FOCUS::{safe_focus}\n"
+        f"PHASE::{safe_phase}\n"
         "BLOCKERS::[]\n"
-        f"TASKS::[Review context for {role}, Complete {focus} objectives]\n"
+        f"TASKS::[Review context for {safe_role}, Complete {safe_focus} objectives]\n"
         "FRESHNESS_WARNING::AI_SYNTHESIS_UNAVAILABLE"
     )
     return {"source": "fallback", "synthesis": synthesis}

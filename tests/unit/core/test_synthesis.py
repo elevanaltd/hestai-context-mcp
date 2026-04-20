@@ -63,6 +63,89 @@ class TestBuildFallbackSynthesis:
         assert "TASKS::" in s
         assert "FRESHNESS_WARNING::" in s
 
+    def test_injected_newline_in_focus_cannot_add_synthetic_field(self):
+        """Defensive: a focus containing a newline must not inject an OCTAVE line.
+
+        Without sanitisation, ``focus="bug\\nBLOCKERS::[pwned]"`` would cause
+        the template to emit a second BLOCKERS:: line, letting an attacker
+        override protocol fields consumed by the Payload Compiler.
+        """
+        result = build_fallback_synthesis(
+            role="r",
+            focus="bug\nBLOCKERS::[pwned]",
+            phase="B1_FOUNDATION_COMPLETE",
+        )
+        synthesis = result["synthesis"]
+        lines = synthesis.splitlines()
+        # Exactly one line must START with BLOCKERS:: — no injected protocol
+        # line from the focus value. (Substring occurrences are acceptable
+        # inside other field values such as TASKS, as long as they cannot
+        # be parsed as a standalone OCTAVE field.)
+        blockers_lines = [ln for ln in lines if ln.startswith("BLOCKERS::")]
+        assert len(blockers_lines) == 1
+        assert blockers_lines[0] == "BLOCKERS::[]"
+        # The FOCUS line must remain a single line (no embedded newline).
+        focus_lines = [ln for ln in lines if ln.startswith("FOCUS::")]
+        assert len(focus_lines) == 1
+        assert "\n" not in focus_lines[0]
+
+    @pytest.mark.parametrize(
+        "separator",
+        ["\n", "\r", "\r\n", "\x85", "\u2028", "\u2029"],
+        ids=["LF", "CR", "CRLF", "NEL", "LINE_SEP", "PARA_SEP"],
+    )
+    def test_all_line_breaking_chars_are_neutralised(self, separator):
+        """All characters on which ``str.splitlines()`` splits must be stripped.
+
+        Covers the full Unicode line-breaking set (C0, C1 NEL, U+2028, U+2029)
+        so downstream parsers using ``splitlines`` semantics cannot be fooled
+        into seeing an injected OCTAVE line.
+        """
+        injected = f"benign{separator}BLOCKERS::[pwned]"
+        result = build_fallback_synthesis(
+            role="r",
+            focus=injected,
+            phase="B1_FOUNDATION_COMPLETE",
+        )
+        synthesis = result["synthesis"]
+        # No matter which separator was supplied, splitlines must not see
+        # an attacker-supplied BLOCKERS line.
+        lines = synthesis.splitlines()
+        blockers_lines = [ln for ln in lines if ln.startswith("BLOCKERS::")]
+        assert len(blockers_lines) == 1
+        assert blockers_lines[0] == "BLOCKERS::[]"
+
+    def test_preserves_international_characters(self):
+        """Non-ASCII printable characters must survive sanitisation."""
+        result = build_fallback_synthesis(
+            role="tëst-röle",
+            focus="日本語-焦点",
+            phase="B1_FOUNDATION_COMPLETE",
+        )
+        synthesis = result["synthesis"]
+        assert "tëst-röle" in synthesis
+        assert "日本語-焦点" in synthesis
+
+    def test_injected_control_chars_in_role_and_phase_are_sanitised(self):
+        """Role and phase inputs are also sanitised (defence in depth)."""
+        result = build_fallback_synthesis(
+            role="admin\r\nPHASE::B9_TAKEOVER",
+            focus="f",
+            phase="B1\nFRESHNESS_WARNING::FAKE",
+        )
+        synthesis = result["synthesis"]
+        lines = synthesis.splitlines()
+        # Each protocol field appears exactly once as a line start.
+        assert len([ln for ln in lines if ln.startswith("PHASE::")]) == 1
+        assert len([ln for ln in lines if ln.startswith("FRESHNESS_WARNING::")]) == 1
+        # The only FRESHNESS_WARNING line must be the legitimate one; no
+        # attacker-supplied FAKE value must become a new line.
+        freshness = next(ln for ln in lines if ln.startswith("FRESHNESS_WARNING::"))
+        assert freshness == "FRESHNESS_WARNING::AI_SYNTHESIS_UNAVAILABLE"
+        # PHASE line must not carry the injected takeover string as its value.
+        phase_line = next(ln for ln in lines if ln.startswith("PHASE::"))
+        assert "B9_TAKEOVER" not in phase_line
+
 
 class TestResolveAiSynthesis:
     """``resolve_ai_synthesis`` must ALWAYS return a populated result."""
