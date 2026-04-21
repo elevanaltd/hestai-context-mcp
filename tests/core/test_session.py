@@ -62,7 +62,12 @@ class TestFocusConflictDetection:
         assert conflicts == []
 
     def test_detects_same_focus_conflict(self, tmp_path):
-        """Detects conflict when another session has the same focus."""
+        """Detects conflict when another session has the same focus.
+
+        Issue #7: returns STRUCTURED entries (PROD::I4) with session_id, role,
+        focus so the Payload Compiler / caller can identify the conflicting
+        session without derivation from active_sessions.
+        """
         # Create an existing active session
         active_dir = tmp_path / ".hestai" / "state" / "sessions" / "active"
         existing_session = active_dir / "existing-session-id"
@@ -73,6 +78,8 @@ class TestFocusConflictDetection:
                     "session_id": "existing-session-id",
                     "role": "other-role",
                     "focus": "same-focus",
+                    "started_at": "2026-04-21T00:00:00+00:00",
+                    "branch": "main",
                 }
             )
         )
@@ -80,7 +87,11 @@ class TestFocusConflictDetection:
         mgr = SessionManager(str(tmp_path))
         conflicts = mgr.detect_focus_conflicts("same-focus", "new-session-id")
         assert len(conflicts) == 1
-        assert conflicts[0] == "same-focus"
+        entry = conflicts[0]
+        assert isinstance(entry, dict)
+        assert entry["session_id"] == "existing-session-id"
+        assert entry["role"] == "other-role"
+        assert entry["focus"] == "same-focus"
 
     def test_no_conflict_with_different_focus(self, tmp_path):
         """No conflict when other sessions have different focuses."""
@@ -131,6 +142,65 @@ class TestFocusConflictDetection:
         # Should not raise
         conflicts = mgr.detect_focus_conflicts("some-focus", "new-id")
         assert conflicts == []
+
+    def test_handles_non_dict_top_level_json(self, tmp_path):
+        """Adversarial: valid JSON whose top-level value is NOT an object
+        (e.g. an array) must not crash the conflict reader.
+        """
+        active_dir = tmp_path / ".hestai" / "state" / "sessions" / "active"
+        bad = active_dir / "array-session"
+        bad.mkdir(parents=True)
+        (bad / "session.json").write_text(json.dumps([{"focus": "same-focus"}]))
+
+        mgr = SessionManager(str(tmp_path))
+        # Must not raise AttributeError on .get() against a list.
+        conflicts = mgr.detect_focus_conflicts("same-focus", "new-id")
+        assert conflicts == []
+
+    def test_skips_record_with_null_role(self, tmp_path):
+        """Adversarial: a record whose role is null/missing is skipped
+        rather than leaking an empty-string role into the conflict entry.
+        """
+        active_dir = tmp_path / ".hestai" / "state" / "sessions" / "active"
+        bad = active_dir / "null-role-session"
+        bad.mkdir(parents=True)
+        (bad / "session.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "null-role-session",
+                    "role": None,
+                    "focus": "shared-focus",
+                }
+            )
+        )
+
+        mgr = SessionManager(str(tmp_path))
+        conflicts = mgr.detect_focus_conflicts("shared-focus", "new-id")
+        # The null-role record must NOT appear in conflicts.
+        assert conflicts == []
+
+    def test_falls_back_to_dir_name_when_session_id_null(self, tmp_path):
+        """Adversarial: session_id null/missing → falls back to directory name
+        (never emits null or empty session_id).
+        """
+        active_dir = tmp_path / ".hestai" / "state" / "sessions" / "active"
+        bad = active_dir / "dir-name-fallback"
+        bad.mkdir(parents=True)
+        (bad / "session.json").write_text(
+            json.dumps(
+                {
+                    "session_id": None,
+                    "role": "some-role",
+                    "focus": "shared-focus",
+                }
+            )
+        )
+
+        mgr = SessionManager(str(tmp_path))
+        conflicts = mgr.detect_focus_conflicts("shared-focus", "new-id")
+        assert len(conflicts) == 1
+        assert conflicts[0]["session_id"] == "dir-name-fallback"
+        assert conflicts[0]["role"] == "some-role"
 
 
 class TestGetActiveSessions:
