@@ -228,6 +228,85 @@ class TestClockInReturnShape:
         assert result["phase"] != "B1"
 
 
+class TestClockInNorthStarConstraints:
+    """Issue #6: structured North Star constraint extraction alongside raw blob.
+
+    The raw `context.product_north_star` field MUST remain unchanged (backward
+    compat). A new sibling key `context.product_north_star_constraints` carries
+    the structured {scope_boundaries, immutables} dict for the Payload Compiler.
+    """
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_constraints_key_always_present(self, mock_branch, tmp_path):
+        """The structured key is always in the response (PROD::I4), even when
+        no North Star file exists — value is an empty structured result.
+        """
+        result = clock_in(role="test-role", working_dir=str(tmp_path))
+        ctx = result["context"]
+        assert "product_north_star_constraints" in ctx
+        constraints = ctx["product_north_star_constraints"]
+        assert isinstance(constraints, dict)
+        assert set(constraints.keys()) == {"scope_boundaries", "immutables"}
+        assert constraints["scope_boundaries"] == {}
+        assert constraints["immutables"] == []
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_constraints_extracted_from_real_ns_format(self, mock_branch, tmp_path):
+        """When an OCTAVE North Star summary exists, structured fields parse.
+
+        Uses the same §2 IMMUTABLES / §4 SCOPE_BOUNDARIES shape as the real repo
+        North Star summary file.
+        """
+        ns_dir = tmp_path / ".hestai" / "north-star"
+        ns_dir.mkdir(parents=True)
+        (ns_dir / "000-TEST-NORTH-STAR.oct.md").write_text(
+            "===NORTH_STAR_SUMMARY===\n"
+            "§2::IMMUTABLES\n"
+            'I1::"FOO<PRINCIPLE::a,WHY::b,STATUS::IMPLEMENTED>"\n'
+            'I2::"BAR<PRINCIPLE::c,WHY::d,STATUS::IMPLEMENTED>"\n'
+            "§4::SCOPE_BOUNDARIES\n"
+            "IS::[\n"
+            '  "thing one",\n'
+            '  "thing two"\n'
+            "]\n"
+            "IS_NOT::[\n"
+            '  "not this",\n'
+            '  "not that"\n'
+            "]\n"
+            "===END===\n"
+        )
+
+        result = clock_in(role="test-role", working_dir=str(tmp_path))
+        constraints = result["context"]["product_north_star_constraints"]
+        assert "is" in constraints["scope_boundaries"]
+        assert "is_not" in constraints["scope_boundaries"]
+        assert any("thing one" in item for item in constraints["scope_boundaries"]["is"])
+        assert any("not this" in item for item in constraints["scope_boundaries"]["is_not"])
+        assert len(constraints["immutables"]) == 2
+        assert constraints["immutables"][0].startswith("I1::")
+        assert constraints["immutables"][1].startswith("I2::")
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_raw_north_star_field_unchanged_when_constraints_added(self, mock_branch, tmp_path):
+        """Backward compat: raw product_north_star still carries full file text."""
+        ns_dir = tmp_path / ".hestai" / "north-star"
+        ns_dir.mkdir(parents=True)
+        ns_text = (
+            "===NORTH_STAR===\n"
+            "§2::IMMUTABLES\n"
+            'I1::"X<PRINCIPLE::a,WHY::b,STATUS::IMPLEMENTED>"\n'
+            "===END===\n"
+        )
+        (ns_dir / "000-TEST-NORTH-STAR.oct.md").write_text(ns_text)
+
+        result = clock_in(role="test-role", working_dir=str(tmp_path))
+        ctx = result["context"]
+        # Raw blob — exact bytes-on-disk
+        assert ctx["product_north_star"] == ns_text
+        # Structured sibling present and populated
+        assert ctx["product_north_star_constraints"]["immutables"][0].startswith("I1::")
+
+
 class TestClockInValidation:
     """Test input validation."""
 

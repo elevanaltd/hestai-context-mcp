@@ -15,6 +15,10 @@ from hestai_context_mcp.core.git_state import (
     get_current_branch,
     get_git_state,
 )
+from hestai_context_mcp.core.north_star_parser import (
+    NorthStarConstraints,
+    extract_constraints,
+)
 from hestai_context_mcp.core.phase import phase_prefix, resolve_phase
 from hestai_context_mcp.core.session import SessionManager
 from hestai_context_mcp.core.synthesis import resolve_ai_synthesis
@@ -94,10 +98,17 @@ def clock_in(
         {
             session_id, role, focus, focus_source, branch, working_dir,
             context_paths, context: {
-                product_north_star, project_context, phase_constraints,
-                git_state, active_sessions
+                product_north_star, product_north_star_constraints,
+                project_context, phase_constraints, git_state,
+                active_sessions
             }
         }
+
+        ``product_north_star_constraints`` is a ``NorthStarConstraints``
+        TypedDict with ``scope_boundaries`` (dict) and ``immutables`` (list);
+        the structured sibling of the raw ``product_north_star`` blob per
+        PROD::I4 STRUCTURED_RETURN_SHAPES. See
+        :mod:`hestai_context_mcp.core.north_star_parser` for schema.
 
     Raises:
         ValueError: If role is invalid.
@@ -133,11 +144,18 @@ def clock_in(
     # Get active session focuses
     active_sessions = mgr.get_active_session_focuses()
 
-    # Read North Star contents
+    # Read North Star contents (raw blob for backward compatibility).
     product_north_star = None
     ns_path = mgr._find_north_star_file()
     if ns_path:
         product_north_star = mgr.read_file_contents(ns_path)
+
+    # Issue #6: harvest structured SCOPE_BOUNDARIES / IMMUTABLES alongside
+    # the raw blob so the Payload Compiler can extract architectural
+    # constraints programmatically (PROD::I4 STRUCTURED_RETURN_SHAPES).
+    # The parser is a pure function (PROD::I5); it returns an empty
+    # structured result when product_north_star is None/empty/malformed.
+    product_north_star_constraints: NorthStarConstraints = extract_constraints(product_north_star)
 
     # Read PROJECT-CONTEXT contents
     project_context_path = (
@@ -214,6 +232,7 @@ def clock_in(
         "ai_synthesis": ai_synthesis,
         "context": {
             "product_north_star": product_north_star,
+            "product_north_star_constraints": product_north_star_constraints,
             "project_context": project_context,
             "phase_constraints": phase_constraints,
             "git_state": git_state,
