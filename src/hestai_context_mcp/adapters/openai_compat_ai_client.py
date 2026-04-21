@@ -26,6 +26,7 @@ Design notes:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from types import TracebackType
@@ -60,14 +61,18 @@ class OpenAICompatAIClient:
         base_url: str,
         model: str,
         timeout_seconds: float = 15.0,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = float(timeout_seconds)
-        # A test-only transport (``httpx.MockTransport``) may be
-        # injected; otherwise the real network transport is used.
+        # A test-only transport (``httpx.MockTransport`` is acceptable
+        # because it implements ``AsyncBaseTransport`` for async clients)
+        # may be injected; otherwise the real network transport is used.
+        # Cubic-dev-ai P2: typing the parameter as the *async* base
+        # transport prevents mypy from accepting a sync transport that
+        # would crash at the first ``await`` against ``AsyncClient``.
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
 
@@ -189,10 +194,20 @@ def build_default_ai_client() -> AIClient | None:
         logger.warning("Unknown HESTAI_AI_PROVIDER %r; cannot build AIClient", provider)
         return None
     model = ai_config.resolve_model()
+    client = OpenAICompatAIClient(api_key=api_key, base_url=base_url, model=model)
+    # Construction-time guard (CRS gemini follow-up
+    # ``crs_review_pr9_followup_ceeaa71``): ``runtime_checkable`` Protocol
+    # only checks attribute *presence*, so a future adapter that defined
+    # ``complete_text`` as ``def`` rather than ``async def`` would pass
+    # ``isinstance(c, AIClient)`` and then crash at the first ``await``
+    # with ``TypeError: object str can't be used in 'await' expression``.
+    # Fail closed at construction so the bug surfaces before any I/O.
+    if not inspect.iscoroutinefunction(client.complete_text):
+        raise TypeError(
+            "AIClient implementation must define `complete_text` as `async def`; "
+            f"got a non-coroutine function on {type(client).__name__}"
+        )
     # Structural Protocol conformance: the concrete class satisfies the
     # ``AIClient`` runtime_checkable Protocol but mypy cannot see this
     # without an explicit cast (no nominal inheritance).
-    return cast(
-        AIClient,
-        OpenAICompatAIClient(api_key=api_key, base_url=base_url, model=model),
-    )
+    return cast(AIClient, client)

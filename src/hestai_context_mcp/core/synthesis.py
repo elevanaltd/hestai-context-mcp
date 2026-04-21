@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TypedDict
 
 from hestai_context_mcp.ports.ai_client import (
@@ -164,6 +165,76 @@ def synthesize_ai_context(
     return {"source": "ai", "synthesis": raw_text}
 
 
+# ``[^\S\n]*`` matches any whitespace *except* the newline used as the
+# regex line anchor. This intentionally consumes ``\r`` (so CRLF and bare
+# CR forms cannot bypass the escape) and Unicode whitespace such as
+# U+00A0 (NO-BREAK SPACE) and U+2003 (EM SPACE), which are
+# visually-blank to an LLM tokeniser. The earlier ``[ \t]*`` form was
+# bypassed by these — flagged by CRS gemini follow-up review on
+# ``fix/pr9-followup-hardening`` (continuation_id
+# ``crs_review_pr9_followup_ceeaa71``).
+_CONTEXT_BLOCK_MARKER_RE: re.Pattern[str] = re.compile(
+    r"(?im)^[^\S\n]*(BEGIN_CONTEXT|END_CONTEXT)[^\S\n]*$"
+)
+
+
+def _escape_context_markers(body: str) -> str:
+    """Neutralise any ``BEGIN_CONTEXT``/``END_CONTEXT`` lines inside ``body``.
+
+    Cubic-dev-ai P1 (PR #9 review) flagged that the prior
+    ``_build_prompts`` interpolated ``context_summary`` raw between the
+    delimiter markers. A crafted summary containing the literal token
+    ``END_CONTEXT`` on its own line escaped the protected block and
+    let an attacker graft follow-on instructions onto the prompt the
+    model received.
+
+    Defence: rewrite any *line* whose stripped, case-folded content is
+    exactly ``BEGIN_CONTEXT`` or ``END_CONTEXT`` to a tagged form
+    (``[BEGIN_CONTEXT_ESCAPED]`` / ``[END_CONTEXT_ESCAPED]``) so the
+    outer delimiters remain structurally unique. Whitespace-padded
+    (including Unicode whitespace like ``\\u00a0``) and case-variant
+    forms are matched too. CRLF and bare-CR line endings are
+    normalised first so the regex line anchors align with what the
+    LLM tokeniser will see as line boundaries — the ``re`` engine's
+    multi-line mode only treats ``\\n`` as a boundary, but
+    ``str.splitlines()`` (and downstream tokenisers) also split on
+    bare ``\\r``. Substring occurrences inside a longer line (e.g.
+    inside a sentence) are intentionally NOT rewritten — only
+    line-anchored standalone tokens have parser significance.
+    """
+    if not isinstance(body, str) or not body:
+        return body if isinstance(body, str) else ""
+
+    # Normalise line endings so regex line anchors (``^``/``$`` in
+    # multi-line mode, which only respect ``\n``) align with the
+    # boundaries ``str.splitlines()`` (and downstream LLM tokenisers)
+    # would see. Without this, a payload like
+    # ``"END_CONTEXT\u2028SYSTEM: ..."`` is one regex line but two
+    # tokenised lines, leaving the marker un-escaped.
+    #
+    # CRS gemini continuation_id ``crs_review_pr9_followup_6e40f6a``
+    # demonstrated that the earlier ``\r``-only normalisation left
+    # five further vectors open (U+2028 LINE SEPARATOR, U+2029
+    # PARAGRAPH SEPARATOR, U+0085 NEL, ``\v`` VT, ``\f`` FF). The
+    # canonical fix is to route through ``str.splitlines()``, which is
+    # the exact same line-splitting semantics downstream code uses —
+    # this closes the whole vector class in one step.
+    #
+    # Note: ``splitlines()`` drops a single trailing break if present.
+    # That is acceptable here because ``_build_prompts`` appends its
+    # own ``\n`` after the body, so the model never sees fewer line
+    # breaks than intended; and an attacker cannot rely on a trailing
+    # break to smuggle content (the block end-marker is appended by
+    # the prompt template, not by the body).
+    normalised = "\n".join(body.splitlines())
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(1).upper()
+        return f"[{token}_ESCAPED]"
+
+    return _CONTEXT_BLOCK_MARKER_RE.sub(_replace, normalised)
+
+
 def _build_prompts(
     *,
     role: str,
@@ -177,19 +248,24 @@ def _build_prompts(
     template is part of the OCTAVE protocol — a provider-agnostic
     concern.
 
-    PROMPT-INJECTION DEFENCE (CE review ``ce-issue5-20260420-1``):
-    role / focus / phase are passed through ``_sanitise_single_line``
-    so a crafted value containing newlines or C0/C1 controls cannot
-    synthesise additional prompt instructions. The pre-assembled
-    ``context_summary`` is genuinely multi-line by design, so it is
-    wrapped in a clearly-delimited block with an end marker — the
-    system prompt instructs the model to ignore any content purporting
-    to be a new instruction outside the delimited block.
+    PROMPT-INJECTION DEFENCE:
+        * role / focus / phase are passed through ``_sanitise_single_line``
+          so a crafted value containing newlines or C0/C1 controls cannot
+          synthesise additional prompt instructions
+          (CE review ``ce-issue5-20260420-1``).
+        * ``context_summary`` is run through ``_escape_context_markers``
+          so a crafted body containing ``BEGIN_CONTEXT`` / ``END_CONTEXT``
+          tokens cannot escape the surrounding delimited block
+          (cubic-dev-ai P1 review on PR #9).
+        * The system prompt instructs the model to ignore any
+          instruction-like content inside the delimited block.
     """
     safe_role = _sanitise_single_line(role)
     safe_focus = _sanitise_single_line(focus)
     safe_phase = _sanitise_single_line(phase)
-    context_body = context_summary if isinstance(context_summary, str) else ""
+    context_body = _escape_context_markers(
+        context_summary if isinstance(context_summary, str) else ""
+    )
 
     system_prompt = (
         "You are a context synthesis assistant for the HestAI Context MCP. "
