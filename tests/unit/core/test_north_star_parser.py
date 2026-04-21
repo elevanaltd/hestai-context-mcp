@@ -266,3 +266,179 @@ class TestUnicodeAndBoundaryShapes:
         assert "is_not" in scope
         assert scope["is"] == []
         assert any("excluded item" in item for item in scope["is_not"])
+
+
+class TestSectionAnchoring:
+    """PR #10 cubic P2 regression guard: section tokens must be matched as
+    OCTAVE headers (``TOKEN::``), never as bare-substring occurrences inside
+    free-text bullet bodies. Otherwise a scope-boundary description such as
+    ``"cross-reference IMMUTABLES section"`` would be mistaken for a section
+    header and corrupt the slice (silently truncating SCOPE_BOUNDARIES at
+    the spurious match, and shifting IMMUTABLES to start mid-bullet).
+    """
+
+    @pytest.mark.parametrize(
+        "free_text_token",
+        [
+            "IMMUTABLES",
+            "SCOPE_BOUNDARIES",
+            "ASSUMPTIONS",
+            "CONSTRAINED_VARIABLES",
+            "GATES",
+            "ESCALATION",
+            "TRIGGERS",
+            "PROTECTION",
+            "IDENTITY",
+        ],
+    )
+    def test_free_text_section_token_does_not_shift_section_slice(self, free_text_token: str):
+        """A bare section-token word inside a bullet body must not be treated
+        as a header. SCOPE_BOUNDARIES must continue to capture both bullets
+        and IMMUTABLES must still parse to a single I1 line, regardless of
+        which token appears as free text inside the IS list.
+        """
+        text = (
+            "§4::SCOPE_BOUNDARIES\n"
+            "IS::[\n"
+            f'  "documentation must cross-reference the {free_text_token} section",\n'
+            '  "second legitimate boundary item"\n'
+            "]\n"
+            "IS_NOT::[\n"
+            '  "out of scope"\n'
+            "]\n"
+            "§2::IMMUTABLES\n"
+            'I1::"REAL<PRINCIPLE::p,WHY::w,STATUS::IMPLEMENTED>"\n'
+            "===END===\n"
+        )
+        result = extract_constraints(text)
+
+        # SCOPE_BOUNDARIES bullets are intact (not truncated at the spurious
+        # token occurrence, and not corrupted by re-anchoring on it).
+        is_items = result["scope_boundaries"]["is"]
+        assert len(is_items) == 2, (
+            f"Expected both IS bullets to parse; free-text {free_text_token!r} "
+            f"shifted the slice. Got: {is_items!r}"
+        )
+        assert any("second legitimate boundary item" in item for item in is_items)
+        assert any("out of scope" in item for item in result["scope_boundaries"]["is_not"])
+
+        # IMMUTABLES still resolves to exactly one I1 declaration (not pulled
+        # forward by a spurious in-body match).
+        immutables = result["immutables"]
+        assert (
+            len(immutables) == 1
+        ), f"Expected exactly one immutable; got {len(immutables)}: {immutables!r}"
+        assert immutables[0].startswith('I1::"REAL')
+
+    @pytest.mark.parametrize(
+        "adversarial_token",
+        ["IMMUTABLES", "SCOPE_BOUNDARIES", "ASSUMPTIONS", "GATES"],
+    )
+    def test_inline_double_colon_token_does_not_anchor(self, adversarial_token: str):
+        """CRS delta P1: an inline ``::TOKEN`` reference inside a quoted body
+        (e.g. ``"depends on ::IMMUTABLES section"``) must NOT match as a
+        section header — the OCTAVE header form requires the TOKEN to occupy
+        its own line (``\\n§N::TOKEN`` or ``\\nTOKEN::``).
+        """
+        text = (
+            "§4::SCOPE_BOUNDARIES\n"
+            "IS::[\n"
+            f'  "downstream code depends on ::{adversarial_token} parsing",\n'
+            '  "second legitimate boundary item"\n'
+            "]\n"
+            "§2::IMMUTABLES\n"
+            'I1::"REAL<PRINCIPLE::p,WHY::w,STATUS::IMPLEMENTED>"\n'
+        )
+        result = extract_constraints(text)
+        # Both bullets present — slice was not truncated by the inline ::TOKEN.
+        is_items = result["scope_boundaries"]["is"]
+        assert (
+            len(is_items) == 2
+        ), f"Inline ::{adversarial_token} corrupted slice. Got: {is_items!r}"
+        assert any("second legitimate boundary item" in item for item in is_items)
+        # IMMUTABLES still parses to exactly the one declaration.
+        assert len(result["immutables"]) == 1
+        assert result["immutables"][0].startswith('I1::"REAL')
+
+    @pytest.mark.parametrize(
+        "sentence_token",
+        ["IMMUTABLES", "SCOPE_BOUNDARIES", "ASSUMPTIONS", "GATES"],
+    )
+    def test_line_start_token_without_double_colon_does_not_anchor(self, sentence_token: str):
+        """CRS delta P2: a sentence opener at line start whose first word
+        happens to be a section TOKEN (``\\nIMMUTABLES are essential ...``)
+        must NOT match as a header. The OCTAVE header form requires the
+        ``::`` separator immediately after the TOKEN.
+        """
+        text = (
+            "§4::SCOPE_BOUNDARIES\n"
+            "IS::[\n"
+            '  "first item",\n'
+            '  "second item"\n'
+            "]\n"
+            f"\n{sentence_token} are essential to this design but not a section.\n"
+            "\n"
+            "§2::IMMUTABLES\n"
+            'I1::"REAL<PRINCIPLE::p,WHY::w,STATUS::IMPLEMENTED>"\n'
+        )
+        result = extract_constraints(text)
+        is_items = result["scope_boundaries"]["is"]
+        assert (
+            len(is_items) == 2
+        ), f"Line-start '{sentence_token} are ...' corrupted slice. Got: {is_items!r}"
+        assert len(result["immutables"]) == 1
+
+    def test_crlf_line_endings_do_not_falsely_anchor(self):
+        """CRS delta P3: CRLF (``\\r\\n``) inputs must not produce false
+        anchors via the trailing ``\\n`` of the CRLF pair followed by an
+        otherwise-bare TOKEN. The header form still requires ``::`` after.
+        """
+        text = (
+            "§4::SCOPE_BOUNDARIES\r\n"
+            "IS::[\r\n"
+            '  "first item",\r\n'
+            '  "second item"\r\n'
+            "]\r\n"
+            "\r\n"
+            "IMMUTABLES are referenced but not headed here.\r\n"
+            "\r\n"
+            "§2::IMMUTABLES\r\n"
+            'I1::"REAL<PRINCIPLE::p,WHY::w,STATUS::IMPLEMENTED>"\r\n'
+        )
+        result = extract_constraints(text)
+        is_items = result["scope_boundaries"]["is"]
+        assert len(is_items) == 2, f"CRLF false anchor; got: {is_items!r}"
+        assert len(result["immutables"]) == 1
+
+    def test_bare_line_start_token_with_double_colon_does_anchor(self):
+        """Positive sanity: ``\\nTOKEN::`` (no ``§N`` prefix) IS still a
+        valid OCTAVE header and MUST anchor — the fix must not over-tighten.
+        """
+        text = (
+            "IMMUTABLES::\n"
+            'I1::"FIRST<PRINCIPLE::a,WHY::b,STATUS::IMPLEMENTED>"\n'
+            'I2::"SECOND<PRINCIPLE::c,WHY::d,STATUS::IMPLEMENTED>"\n'
+            "SCOPE_BOUNDARIES::\n"
+            'IS::["only one"]\n'
+        )
+        result = extract_constraints(text)
+        assert len(result["immutables"]) == 2
+        assert any("only one" in item for item in result["scope_boundaries"]["is"])
+
+    def test_real_repo_north_star_still_parses_after_anchoring(self):
+        """Belt-and-braces: anchoring fix must not regress the live repo NS.
+
+        Equivalent to the TestRealNorthStarSummary suite but co-located with
+        the cubic regression tests so a single targeted run covers both.
+        """
+        if not REAL_NS_SUMMARY.exists():
+            pytest.skip(f"Live North Star summary fixture missing: {REAL_NS_SUMMARY}")
+        result = extract_constraints(REAL_NS_SUMMARY.read_text())
+        # Same anchors as TestRealNorthStarSummary — duplicated intentionally
+        # so this regression class is self-contained.
+        assert len(result["immutables"]) == 6
+        assert "is" in result["scope_boundaries"]
+        assert "is_not" in result["scope_boundaries"]
+        assert any(
+            "session lifecycle management" in item for item in result["scope_boundaries"]["is"]
+        )

@@ -130,24 +130,58 @@ def extract_constraints(text: str | None) -> NorthStarConstraints:
     return {"scope_boundaries": scope_boundaries, "immutables": immutables}
 
 
+def _find_section_header(text: str, token: str, start_pos: int = 0) -> int:
+    """Return the start index of ``token`` when it appears as an OCTAVE
+    section header, or ``-1`` if absent.
+
+    A section header is strictly one of the following structural forms:
+
+    * ``(^|\\n)§<digits>::TOKEN(\\n|$)`` — the OCTAVE ``§N::TOKEN``
+      conventional form, the entire token+suffix occupying its own line.
+    * ``(^|\\n)TOKEN::`` — a bare line-start ``TOKEN::`` key (the OCTAVE
+      key/value shape with the token itself being the key).
+
+    Both forms pin TOKEN to a line-start position AND require the OCTAVE
+    ``::`` separator, so neither a free-text occurrence inside a bullet
+    body (e.g. ``"cross-reference the IMMUTABLES section"``) nor an
+    inline ``::TOKEN`` reference inside a quoted body
+    (e.g. ``"depends on ::CAPABILITIES"``) nor a sentence opener
+    (e.g. ``"\\nIMMUTABLES are essential ..."``) will be falsely
+    anchored. This closes PR #10 cubic P2 (CRS delta verdict).
+    """
+    # Header anchor: TOKEN must (a) sit at file head or directly after a
+    # newline (LF or the LF tail of CRLF) optionally prefixed with the
+    # OCTAVE ``§N::`` numbering, and (b) be followed by either ``::`` (the
+    # OCTAVE key/value separator), an EOL char, or end-of-string. The
+    # ``\r`` admittance handles CRLF inputs without falsely admitting an
+    # in-body inline reference.
+    pattern = re.compile(r"(?:^|\n)(?:§\d+::)?" + re.escape(token) + r"(?=::|\r|\n|$)")
+    match = pattern.search(text, start_pos)
+    if match is None:
+        return -1
+    # Return the index of the TOKEN itself within the match, regardless
+    # of which form (with or without the ``§N::`` prefix) was matched.
+    return match.start() + match.group(0).find(token)
+
+
 def _section_slice(text: str, token: str) -> str | None:
-    """Return the substring from the first occurrence of ``token`` up to
-    the next known section token, or ``None`` if ``token`` is absent.
+    """Return the substring starting at a properly anchored ``token`` header
+    and ending at the next such header (or ``===END``), or ``None`` if the
+    header is absent.
 
     Keyed off literal section names (see :data:`_SECTION_TOKENS`) rather
     than OCTAVE ``§N`` numbering to survive renumbering drift.
     """
-    start = text.find(token)
+    start = _find_section_header(text, token)
     if start < 0:
         return None
 
-    # Scan forward past ``token`` itself for the earliest next section.
     scan_from = start + len(token)
     end = len(text)
     for other in _SECTION_TOKENS:
         if other == token:
             continue
-        pos = text.find(other, scan_from)
+        pos = _find_section_header(text, other, scan_from)
         if 0 <= pos < end:
             end = pos
 
