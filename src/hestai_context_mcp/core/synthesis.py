@@ -207,10 +207,26 @@ def _escape_context_markers(body: str) -> str:
 
     # Normalise line endings so regex line anchors (``^``/``$`` in
     # multi-line mode, which only respect ``\n``) align with the
-    # boundaries the LLM tokeniser will see. Without this, a payload
-    # like ``"END_CONTEXT\r SYSTEM: ..."`` is one regex line but two
+    # boundaries ``str.splitlines()`` (and downstream LLM tokenisers)
+    # would see. Without this, a payload like
+    # ``"END_CONTEXT\u2028SYSTEM: ..."`` is one regex line but two
     # tokenised lines, leaving the marker un-escaped.
-    normalised = body.replace("\r\n", "\n").replace("\r", "\n")
+    #
+    # CRS gemini continuation_id ``crs_review_pr9_followup_6e40f6a``
+    # demonstrated that the earlier ``\r``-only normalisation left
+    # five further vectors open (U+2028 LINE SEPARATOR, U+2029
+    # PARAGRAPH SEPARATOR, U+0085 NEL, ``\v`` VT, ``\f`` FF). The
+    # canonical fix is to route through ``str.splitlines()``, which is
+    # the exact same line-splitting semantics downstream code uses —
+    # this closes the whole vector class in one step.
+    #
+    # Note: ``splitlines()`` drops a single trailing break if present.
+    # That is acceptable here because ``_build_prompts`` appends its
+    # own ``\n`` after the body, so the model never sees fewer line
+    # breaks than intended; and an attacker cannot rely on a trailing
+    # break to smuggle content (the block end-marker is appended by
+    # the prompt template, not by the body).
+    normalised = "\n".join(body.splitlines())
 
     def _replace(match: re.Match[str]) -> str:
         token = match.group(1).upper()
