@@ -100,7 +100,7 @@ def clock_in(
             context_paths, context: {
                 product_north_star, product_north_star_constraints,
                 project_context, phase_constraints, git_state,
-                active_sessions
+                active_sessions, conflicts
             }
         }
 
@@ -109,6 +109,13 @@ def clock_in(
         the structured sibling of the raw ``product_north_star`` blob per
         PROD::I4 STRUCTURED_RETURN_SHAPES. See
         :mod:`hestai_context_mcp.core.north_star_parser` for schema.
+
+        ``context.conflicts`` (issue #7) is a ``list[FocusConflict]`` of
+        structured entries describing other active sessions sharing the
+        resolved focus; always present (empty list when no conflict, never
+        null / never absent). Distinct from ``active_sessions`` (which is
+        the list of all active focus strings and remains backward compat).
+        See :class:`hestai_context_mcp.core.session.FocusConflict`.
 
     Raises:
         ValueError: If role is invalid.
@@ -133,7 +140,11 @@ def clock_in(
     )
     session_id = session_result["session_id"]
 
-    # Detect focus conflicts (other sessions with same focus)
+    # Detect focus conflicts (other sessions with same focus).
+    # Issue #7: the structured result is surfaced in the response
+    # (context.conflicts) so the Payload Compiler can read conflicting
+    # session identity directly without deriving it from active_sessions
+    # (PROD::I4 STRUCTURED_RETURN_SHAPES).
     conflicts = mgr.detect_focus_conflicts(focus_resolved["value"], session_id)
     if conflicts:
         logger.warning(f"Focus conflict detected: {conflicts}")
@@ -237,6 +248,7 @@ def clock_in(
             "phase_constraints": phase_constraints,
             "git_state": git_state,
             "active_sessions": active_sessions,
+            "conflicts": conflicts,
         },
     }
 
