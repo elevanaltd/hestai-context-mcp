@@ -380,3 +380,50 @@ class TestBuildDefaultFactory:
 
         client = build_default_ai_client()
         assert client is None
+
+    def test_factory_raises_typeerror_if_complete_text_is_sync(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """CRS gemini follow-up: production guard for non-coroutine complete_text.
+
+        ``runtime_checkable`` Protocol does not enforce ``async def`` —
+        the factory must therefore reject any client whose
+        ``complete_text`` is synchronous, otherwise the bug surfaces
+        only at the first ``await`` (a TypeError deep inside the
+        synthesis path).
+        """
+        import hestai_context_mcp.adapters.ai_config as cfg
+        import hestai_context_mcp.adapters.openai_compat_ai_client as adapter_mod
+
+        class _NoKR:
+            def get_password(self, *_a, **_kw):
+                return None
+
+            def set_password(self, *_a, **_kw):
+                return None
+
+            def delete_password(self, *_a, **_kw):
+                return None
+
+        monkeypatch.setattr(cfg, "keyring", _NoKR(), raising=True)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ENV_KEY")
+
+        # Substitute a broken constructor that returns an instance whose
+        # ``complete_text`` is sync — simulates a future regression where
+        # someone forgets the ``async`` keyword.
+        class _BrokenClient:
+            def __init__(self, **_kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def complete_text(self, request):  # SYNC — the regression
+                return "nope"
+
+        monkeypatch.setattr(adapter_mod, "OpenAICompatAIClient", _BrokenClient)
+        with pytest.raises(TypeError, match="async def"):
+            adapter_mod.build_default_ai_client()

@@ -165,8 +165,16 @@ def synthesize_ai_context(
     return {"source": "ai", "synthesis": raw_text}
 
 
+# ``[^\S\n]*`` matches any whitespace *except* the newline used as the
+# regex line anchor. This intentionally consumes ``\r`` (so CRLF and bare
+# CR forms cannot bypass the escape) and Unicode whitespace such as
+# U+00A0 (NO-BREAK SPACE) and U+2003 (EM SPACE), which are
+# visually-blank to an LLM tokeniser. The earlier ``[ \t]*`` form was
+# bypassed by these — flagged by CRS gemini follow-up review on
+# ``fix/pr9-followup-hardening`` (continuation_id
+# ``crs_review_pr9_followup_ceeaa71``).
 _CONTEXT_BLOCK_MARKER_RE: re.Pattern[str] = re.compile(
-    r"(?im)^[ \t]*(BEGIN_CONTEXT|END_CONTEXT)[ \t]*$"
+    r"(?im)^[^\S\n]*(BEGIN_CONTEXT|END_CONTEXT)[^\S\n]*$"
 )
 
 
@@ -183,20 +191,32 @@ def _escape_context_markers(body: str) -> str:
     Defence: rewrite any *line* whose stripped, case-folded content is
     exactly ``BEGIN_CONTEXT`` or ``END_CONTEXT`` to a tagged form
     (``[BEGIN_CONTEXT_ESCAPED]`` / ``[END_CONTEXT_ESCAPED]``) so the
-    outer delimiters remain structurally unique. Whitespace-padded and
-    case-variant forms are matched too. Substring occurrences inside a
-    longer line (e.g. inside a sentence) are intentionally NOT
-    rewritten — only line-anchored standalone tokens have parser
-    significance.
+    outer delimiters remain structurally unique. Whitespace-padded
+    (including Unicode whitespace like ``\\u00a0``) and case-variant
+    forms are matched too. CRLF and bare-CR line endings are
+    normalised first so the regex line anchors align with what the
+    LLM tokeniser will see as line boundaries — the ``re`` engine's
+    multi-line mode only treats ``\\n`` as a boundary, but
+    ``str.splitlines()`` (and downstream tokenisers) also split on
+    bare ``\\r``. Substring occurrences inside a longer line (e.g.
+    inside a sentence) are intentionally NOT rewritten — only
+    line-anchored standalone tokens have parser significance.
     """
     if not isinstance(body, str) or not body:
         return body if isinstance(body, str) else ""
+
+    # Normalise line endings so regex line anchors (``^``/``$`` in
+    # multi-line mode, which only respect ``\n``) align with the
+    # boundaries the LLM tokeniser will see. Without this, a payload
+    # like ``"END_CONTEXT\r SYSTEM: ..."`` is one regex line but two
+    # tokenised lines, leaving the marker un-escaped.
+    normalised = body.replace("\r\n", "\n").replace("\r", "\n")
 
     def _replace(match: re.Match[str]) -> str:
         token = match.group(1).upper()
         return f"[{token}_ESCAPED]"
 
-    return _CONTEXT_BLOCK_MARKER_RE.sub(_replace, body)
+    return _CONTEXT_BLOCK_MARKER_RE.sub(_replace, normalised)
 
 
 def _build_prompts(
