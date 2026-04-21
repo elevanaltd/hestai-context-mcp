@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TypedDict
 
 from hestai_context_mcp.ports.ai_client import (
@@ -164,6 +165,40 @@ def synthesize_ai_context(
     return {"source": "ai", "synthesis": raw_text}
 
 
+_CONTEXT_BLOCK_MARKER_RE: re.Pattern[str] = re.compile(
+    r"(?im)^[ \t]*(BEGIN_CONTEXT|END_CONTEXT)[ \t]*$"
+)
+
+
+def _escape_context_markers(body: str) -> str:
+    """Neutralise any ``BEGIN_CONTEXT``/``END_CONTEXT`` lines inside ``body``.
+
+    Cubic-dev-ai P1 (PR #9 review) flagged that the prior
+    ``_build_prompts`` interpolated ``context_summary`` raw between the
+    delimiter markers. A crafted summary containing the literal token
+    ``END_CONTEXT`` on its own line escaped the protected block and
+    let an attacker graft follow-on instructions onto the prompt the
+    model received.
+
+    Defence: rewrite any *line* whose stripped, case-folded content is
+    exactly ``BEGIN_CONTEXT`` or ``END_CONTEXT`` to a tagged form
+    (``[BEGIN_CONTEXT_ESCAPED]`` / ``[END_CONTEXT_ESCAPED]``) so the
+    outer delimiters remain structurally unique. Whitespace-padded and
+    case-variant forms are matched too. Substring occurrences inside a
+    longer line (e.g. inside a sentence) are intentionally NOT
+    rewritten — only line-anchored standalone tokens have parser
+    significance.
+    """
+    if not isinstance(body, str) or not body:
+        return body if isinstance(body, str) else ""
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(1).upper()
+        return f"[{token}_ESCAPED]"
+
+    return _CONTEXT_BLOCK_MARKER_RE.sub(_replace, body)
+
+
 def _build_prompts(
     *,
     role: str,
@@ -177,19 +212,24 @@ def _build_prompts(
     template is part of the OCTAVE protocol — a provider-agnostic
     concern.
 
-    PROMPT-INJECTION DEFENCE (CE review ``ce-issue5-20260420-1``):
-    role / focus / phase are passed through ``_sanitise_single_line``
-    so a crafted value containing newlines or C0/C1 controls cannot
-    synthesise additional prompt instructions. The pre-assembled
-    ``context_summary`` is genuinely multi-line by design, so it is
-    wrapped in a clearly-delimited block with an end marker — the
-    system prompt instructs the model to ignore any content purporting
-    to be a new instruction outside the delimited block.
+    PROMPT-INJECTION DEFENCE:
+        * role / focus / phase are passed through ``_sanitise_single_line``
+          so a crafted value containing newlines or C0/C1 controls cannot
+          synthesise additional prompt instructions
+          (CE review ``ce-issue5-20260420-1``).
+        * ``context_summary`` is run through ``_escape_context_markers``
+          so a crafted body containing ``BEGIN_CONTEXT`` / ``END_CONTEXT``
+          tokens cannot escape the surrounding delimited block
+          (cubic-dev-ai P1 review on PR #9).
+        * The system prompt instructs the model to ignore any
+          instruction-like content inside the delimited block.
     """
     safe_role = _sanitise_single_line(role)
     safe_focus = _sanitise_single_line(focus)
     safe_phase = _sanitise_single_line(phase)
-    context_body = context_summary if isinstance(context_summary, str) else ""
+    context_body = _escape_context_markers(
+        context_summary if isinstance(context_summary, str) else ""
+    )
 
     system_prompt = (
         "You are a context synthesis assistant for the HestAI Context MCP. "

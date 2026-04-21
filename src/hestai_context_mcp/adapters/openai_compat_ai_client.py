@@ -60,14 +60,18 @@ class OpenAICompatAIClient:
         base_url: str,
         model: str,
         timeout_seconds: float = 15.0,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = float(timeout_seconds)
-        # A test-only transport (``httpx.MockTransport``) may be
-        # injected; otherwise the real network transport is used.
+        # A test-only transport (``httpx.MockTransport`` is acceptable
+        # because it implements ``AsyncBaseTransport`` for async clients)
+        # may be injected; otherwise the real network transport is used.
+        # Cubic-dev-ai P2: typing the parameter as the *async* base
+        # transport prevents mypy from accepting a sync transport that
+        # would crash at the first ``await`` against ``AsyncClient``.
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
 

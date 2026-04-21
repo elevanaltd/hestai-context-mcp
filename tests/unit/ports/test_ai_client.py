@@ -143,6 +143,49 @@ class TestAIClientProtocol:
             ann is CompletionRequest or ann_name == "CompletionRequest"
         ), f"Expected CompletionRequest annotation, got {ann!r}"
 
+    def test_complete_text_must_be_coroutine_function(self):
+        """Cubic P2: guard against a sync ``def complete_text`` slipping through.
+
+        ``inspect.signature`` alone cannot distinguish ``def f(self, r)`` from
+        ``async def f(self, r)`` — their signatures are identical. The port
+        contract is async, so we must assert coroutine-function-ness
+        directly.
+        """
+        from hestai_context_mcp.ports.ai_client import AIClient
+
+        meth = getattr(AIClient, "complete_text", None)
+        assert meth is not None
+        assert inspect.iscoroutinefunction(meth), (
+            "AIClient.complete_text must be defined with `async def` so that "
+            "every adapter's implementation is awaitable."
+        )
+
+    def test_isinstance_accepts_sync_complete_text_but_guard_catches_it(self):
+        """Negative test: a sync ``complete_text`` passes ``isinstance`` but fails
+        the explicit coroutine-function guard.
+
+        Protocol.runtime_checkable only checks attribute *presence*, not
+        async-ness. The async contract must be enforced by an explicit
+        ``inspect.iscoroutinefunction`` check wherever port-conformance is
+        validated structurally.
+        """
+        from hestai_context_mcp.ports.ai_client import AIClient, CompletionRequest
+
+        class BadClient:  # noqa: D401 — test double
+            async def __aenter__(self):  # type: ignore[no-untyped-def]
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+                return None
+
+            def complete_text(self, request: CompletionRequest) -> str:  # sync!
+                return "nope"
+
+        # runtime_checkable Protocol is satisfied by attribute presence:
+        assert isinstance(BadClient(), AIClient) is True
+        # …but the explicit coroutine-function guard rejects it:
+        assert inspect.iscoroutinefunction(BadClient.complete_text) is False
+
     def test_satisfies_isinstance_with_conforming_stub(self):
         """A stub implementing __aenter__/__aexit__/complete_text is an AIClient."""
         from hestai_context_mcp.ports.ai_client import AIClient, CompletionRequest

@@ -63,6 +63,36 @@ class TestAdapterImplementsProtocol:
     def test_module_importable(self):
         import hestai_context_mcp.adapters.openai_compat_ai_client  # noqa: F401
 
+    def test_transport_parameter_is_async_base_transport(self):
+        """Cubic P2: ``transport`` must be typed ``httpx.AsyncBaseTransport``.
+
+        The underlying ``httpx.AsyncClient`` only accepts an async transport
+        at runtime. Typing the parameter as the *sync* base class
+        (``httpx.BaseTransport``) allowed mypy to accept mis-injected
+        synchronous transports that would fail at await time.
+        """
+        import inspect as _inspect
+
+        from hestai_context_mcp.adapters.openai_compat_ai_client import (
+            OpenAICompatAIClient,
+        )
+
+        sig = _inspect.signature(OpenAICompatAIClient.__init__)
+        transport_param = sig.parameters.get("transport")
+        assert transport_param is not None, "expected `transport` keyword on __init__"
+        # Annotation may be a type or a string (depending on
+        # ``from __future__ import annotations`` state of the module).
+        ann = transport_param.annotation
+        ann_str = ann if isinstance(ann, str) else getattr(ann, "__name__", str(ann))
+        assert (
+            "AsyncBaseTransport" in ann_str
+        ), f"transport annotation must reference AsyncBaseTransport, got {ann!r}"
+        assert "BaseTransport" in ann_str  # sanity — keeps the prefix intact
+        # And the sync BaseTransport MUST NOT be the sole qualifier:
+        assert (
+            ann_str.strip().rstrip("| None").rstrip() != "httpx.BaseTransport"
+        ), "transport must not be typed as sync httpx.BaseTransport"
+
     def test_adapter_satisfies_port_protocol(self):
         from hestai_context_mcp.ports.ai_client import AIClient
 
