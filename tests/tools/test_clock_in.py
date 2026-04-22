@@ -307,6 +307,166 @@ class TestClockInNorthStarConstraints:
         assert ctx["product_north_star_constraints"]["immutables"][0].startswith("I1::")
 
 
+class TestClockInConflictsField:
+    """Issue #7: surface distinct `conflicts` field from detect_focus_conflicts().
+
+    The response MUST include a `context.conflicts` list of STRUCTURED entries
+    (PROD::I4 STRUCTURED_RETURN_SHAPES) so the Payload Compiler can read
+    conflicting-session identity directly without deriving it from
+    `active_sessions`. `active_sessions` remains unchanged (backward compat).
+    """
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_conflicts_key_always_present(self, mock_branch, tmp_path):
+        """`context.conflicts` MUST always be in the response, never null/absent."""
+        result = clock_in(role="test-role", working_dir=str(tmp_path))
+        ctx = result["context"]
+        assert "conflicts" in ctx
+        assert isinstance(ctx["conflicts"], list)
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_conflicts_empty_when_no_conflict(self, mock_branch, tmp_path):
+        """Empty list when no other session shares the focus — never null."""
+        result = clock_in(
+            role="test-role",
+            working_dir=str(tmp_path),
+            focus="unique-focus",
+        )
+        assert result["context"]["conflicts"] == []
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_two_same_focus_sessions_surface_first_in_seconds_conflicts(
+        self, mock_branch, tmp_path
+    ):
+        """Behavioural: two sessions with the same focus → second sees the first
+        in `conflicts` with STRUCTURED fields (session_id + role, not just focus).
+
+        This is the acceptance criterion from issue #7 and proves the value
+        is not merely derivable from `active_sessions` (which only has focus
+        strings).
+        """
+        first = clock_in(
+            role="role-a",
+            working_dir=str(tmp_path),
+            focus="shared-focus",
+        )
+        second = clock_in(
+            role="role-b",
+            working_dir=str(tmp_path),
+            focus="shared-focus",
+        )
+
+        conflicts = second["context"]["conflicts"]
+        assert len(conflicts) == 1
+        entry = conflicts[0]
+        # Structured shape (PROD::I4) — dict, not string
+        assert isinstance(entry, dict)
+        assert entry["session_id"] == first["session_id"]
+        assert entry["role"] == "role-a"
+        assert entry["focus"] == "shared-focus"
+        # Identity fields the caller cannot get from active_sessions
+        # (active_sessions is just a list of focus strings)
+        assert second["context"]["active_sessions"].count("shared-focus") >= 1
+        # The structured conflicts entry carries session_id which is NOT
+        # available in active_sessions — proves the field adds value.
+        assert "session_id" in entry
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_active_sessions_shape_unchanged_with_conflicts(self, mock_branch, tmp_path):
+        """Backward compat: `active_sessions` remains a list of focus strings."""
+        clock_in(role="role-a", working_dir=str(tmp_path), focus="shared-focus")
+        second = clock_in(role="role-b", working_dir=str(tmp_path), focus="shared-focus")
+        active = second["context"]["active_sessions"]
+        assert isinstance(active, list)
+        # All entries are strings, not dicts
+        assert all(isinstance(x, str) for x in active)
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_conflicts_excludes_own_session(self, mock_branch, tmp_path):
+        """A session must not appear as its own conflict."""
+        result = clock_in(
+            role="solo-role",
+            working_dir=str(tmp_path),
+            focus="solo-focus",
+        )
+        # The session just created exists in active/, but should not appear in its own conflicts.
+        own_id = result["session_id"]
+        for entry in result["context"]["conflicts"]:
+            assert entry["session_id"] != own_id
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_conflicts_surfaces_with_missing_started_at_field(self, mock_branch, tmp_path):
+        """Adversarial: pre-existing session.json without `started_at` must not
+        break conflict surfacing. Legacy sessions may predate any future field
+        additions — loader must use .get(), not [] indexing.
+        """
+        import json as _json
+
+        active_dir = tmp_path / ".hestai" / "state" / "sessions" / "active"
+        existing = active_dir / "legacy-session-id"
+        existing.mkdir(parents=True)
+        (existing / "session.json").write_text(
+            _json.dumps(
+                {
+                    "session_id": "legacy-session-id",
+                    "role": "legacy-role",
+                    "focus": "shared-focus",
+                    "branch": "main",
+                    # No started_at
+                }
+            )
+        )
+
+        result = clock_in(role="role-b", working_dir=str(tmp_path), focus="shared-focus")
+        conflicts = result["context"]["conflicts"]
+        assert len(conflicts) == 1
+        assert conflicts[0]["session_id"] == "legacy-session-id"
+        # started_at is optional — allowed to be missing or None
+        assert conflicts[0].get("started_at") in (None, "") or "started_at" not in conflicts[0]
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_conflicts_surfaces_with_missing_branch_field(self, mock_branch, tmp_path):
+        """Adversarial: pre-existing session.json without `branch` must not
+        break conflict surfacing.
+        """
+        import json as _json
+
+        active_dir = tmp_path / ".hestai" / "state" / "sessions" / "active"
+        existing = active_dir / "old-session-id"
+        existing.mkdir(parents=True)
+        (existing / "session.json").write_text(
+            _json.dumps(
+                {
+                    "session_id": "old-session-id",
+                    "role": "old-role",
+                    "focus": "shared-focus",
+                    "started_at": "2026-04-21T00:00:00+00:00",
+                    # No branch
+                }
+            )
+        )
+
+        result = clock_in(role="role-b", working_dir=str(tmp_path), focus="shared-focus")
+        conflicts = result["context"]["conflicts"]
+        assert len(conflicts) == 1
+        assert conflicts[0]["session_id"] == "old-session-id"
+        assert conflicts[0].get("branch") in (None, "") or "branch" not in conflicts[0]
+
+    @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
+    def test_conflicts_and_active_sessions_coexist_in_same_response(self, mock_branch, tmp_path):
+        """Both `conflicts` and `active_sessions` keys are present simultaneously.
+
+        Backward-compat guarantee: adding `conflicts` MUST NOT remove or alter
+        `active_sessions` in the response object.
+        """
+        result = clock_in(role="solo-role", working_dir=str(tmp_path), focus="solo-focus")
+        ctx = result["context"]
+        assert "conflicts" in ctx
+        assert "active_sessions" in ctx
+        assert ctx["conflicts"] == []
+        assert isinstance(ctx["active_sessions"], list)
+
+
 class TestClockInValidation:
     """Test input validation."""
 

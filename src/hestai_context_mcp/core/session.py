@@ -13,9 +13,28 @@ import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 logger = logging.getLogger(__name__)
+
+
+class FocusConflict(TypedDict, total=False):
+    """Structured entry describing another active session that conflicts on focus.
+
+    Issue #7 / PROD::I4 STRUCTURED_RETURN_SHAPES: the Payload Compiler and CLI
+    callers need to identify *which* other session conflicts, not merely that
+    a conflict exists. `session_id`, `role`, and `focus` are always populated
+    from session.json. `started_at` and `branch` are optional — older
+    session.json files may predate those fields, and the loader uses ``.get()``
+    so missing keys surface as absent / ``None`` rather than raising KeyError.
+    """
+
+    session_id: str
+    role: str
+    focus: str
+    started_at: str | None
+    branch: str | None
+
 
 # Standard OCTAVE context files to discover
 STANDARD_CONTEXT_FILES = [
@@ -92,21 +111,28 @@ class SessionManager:
         self,
         focus: str,
         current_session_id: str,
-    ) -> list[str]:
+    ) -> list[FocusConflict]:
         """Detect other active sessions with the same focus.
+
+        Pure read (PROD::I5 READ_ONLY_CONTEXT_QUERY): scans
+        ``.hestai/state/sessions/active/`` without mutating any state.
 
         Args:
             focus: Focus to check for conflicts.
             current_session_id: Session ID to exclude from check.
 
         Returns:
-            List of conflicting focus values (duplicates of the input focus).
+            List of structured ``FocusConflict`` entries (PROD::I4
+            STRUCTURED_RETURN_SHAPES) describing conflicting sessions. Optional
+            fields (``started_at``, ``branch``) are omitted when absent from
+            the stored ``session.json`` so callers can rely on ``.get()``
+            semantics.
         """
         active_dir = self.working_dir / ".hestai" / "state" / "sessions" / "active"
         if not active_dir.exists():
             return []
 
-        conflicts: list[str] = []
+        conflicts: list[FocusConflict] = []
         for session_dir in active_dir.iterdir():
             if not session_dir.is_dir():
                 continue
@@ -119,11 +145,53 @@ class SessionManager:
 
             try:
                 data = json.loads(session_file.read_text())
-                if data.get("focus") == focus:
-                    conflicts.append(data["focus"])
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Error reading session file {session_file}: {e}")
                 continue
+
+            # Defensive: session.json may contain a non-dict top-level value
+            # (array, string, number, null) from a corrupted / foreign writer.
+            # Skip rather than crash on .get() against a non-dict.
+            if not isinstance(data, dict):
+                logger.warning(
+                    f"Skipping session file {session_file}: top-level JSON is not an object"
+                )
+                continue
+
+            if data.get("focus") != focus:
+                continue
+
+            # Identity fields MUST be non-empty strings to surface a conflict
+            # — a null/empty session_id or role is meaningless to the caller
+            # and would leak malformed state (CE gate finding). Skip the
+            # record instead of emitting a useless entry.
+            raw_sid = data.get("session_id")
+            session_id_value = raw_sid if isinstance(raw_sid, str) and raw_sid else session_dir.name
+            raw_role = data.get("role")
+            if not isinstance(raw_role, str) or not raw_role:
+                logger.warning(f"Skipping session file {session_file}: missing or invalid role")
+                continue
+            raw_focus = data.get("focus")
+            if not isinstance(raw_focus, str) or not raw_focus:
+                # focus already matched the input above, so this also guards
+                # against the input focus itself being an empty sentinel.
+                continue
+
+            entry: FocusConflict = {
+                "session_id": session_id_value,
+                "role": raw_role,
+                "focus": raw_focus,
+            }
+            # Optional fields — only populate when the stored value is a
+            # non-null string. Missing keys surface as absent in the
+            # TypedDict (preserving the adversarial-test contract).
+            started_at = data.get("started_at")
+            if isinstance(started_at, str) and started_at:
+                entry["started_at"] = started_at
+            branch = data.get("branch")
+            if isinstance(branch, str) and branch:
+                entry["branch"] = branch
+            conflicts.append(entry)
 
         return conflicts
 
