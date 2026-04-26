@@ -10,6 +10,23 @@ Use cases:
 - Payload Compiler preview ("what would an agent see?")
 - CI pipeline context injection
 - Lightweight reads without session overhead
+
+PURITY_GUARD::G3 — DO NOT ADD STORAGE IMPORTS.
+================================================
+
+Per CE RISK_003 OPTION_C ratified in the B1->B2 arbitration record,
+this module's public contract is **frozen** at
+``get_context(working_dir: str)``. Session-bound snapshots are exposed
+exclusively via ``clock_in.portable_state.snapshot``; ``get_context``
+MUST NOT import any adapter module, MUST NOT reference adapter or
+outbox symbols, MUST NOT create portable subdirectories, MUST NOT
+mutate snapshot/outbox mtimes, MUST NOT drain or enqueue outbox
+entries, and MUST NOT surface hydration as a successful response key.
+
+Behavioral invariants are enforced by
+``tests/integration/test_get_context_purity.py`` and the source-level
+guard is enforced by ``tests/storage/test_source_invariants_pss.py``
+(PROD::I5 + R10 INVARIANT_001).
 """
 
 import logging
