@@ -168,8 +168,10 @@ class TestClockOutArtifactBuild:
     ) -> None:
         """Published artifact parent_ids reference the snapshot's prior artifact ids."""
         import hashlib
+        from datetime import UTC, datetime
 
         from hestai_context_mcp.storage.local_filesystem import LocalFilesystemAdapter
+        from hestai_context_mcp.storage.provenance import build_provenance_or_raise
         from hestai_context_mcp.storage.types import (
             ArtifactKind,
             ArtifactRef,
@@ -178,9 +180,7 @@ class TestClockOutArtifactBuild:
             PortableNamespace,
             WritePrecondition,
         )
-        from hestai_context_mcp.storage.provenance import build_provenance_or_raise
         from hestai_context_mcp.tools.clock_out import clock_out
-        from datetime import UTC, datetime
 
         _write_identity_config(tmp_path)
 
@@ -236,9 +236,8 @@ class TestClockOutArtifactBuild:
         new_refs = [r for r in refs if r.artifact_id != "art-prior"]
         assert new_refs, "clock_out should have written at least one new artifact"
         new_artifact = adapter.read_artifact(new_refs[0])
-        from hestai_context_mcp.storage.types import PortableMemoryArtifact as PMA
 
-        assert isinstance(new_artifact, PMA)
+        assert isinstance(new_artifact, PortableMemoryArtifact)
         assert "art-prior" in new_artifact.parent_ids
 
 
@@ -246,9 +245,7 @@ class TestClockOutArtifactBuild:
 class TestClockOutPublishIntegration:
     """TEST_131 + TEST_132 + TEST_133."""
 
-    def test_clock_out_publishes_artifact_to_local_filesystem_adapter(
-        self, tmp_path: Path
-    ) -> None:
+    def test_clock_out_publishes_artifact_to_local_filesystem_adapter(self, tmp_path: Path) -> None:
         """Adapter gets exactly one publish call (no remote, no Git refs)."""
         from hestai_context_mcp.tools.clock_out import clock_out
 
@@ -347,18 +344,8 @@ class TestClockOutDuplicateIdempotent:
 
     def test_clock_out_duplicate_publish_is_idempotent_same_hash(self, tmp_path: Path) -> None:
         """Re-publishing the same payload hash returns DUPLICATE not FAILED."""
-        from hestai_context_mcp.storage.local_filesystem import LocalFilesystemAdapter
-        from hestai_context_mcp.storage.types import (
-            ArtifactKind,
-            ArtifactRef,
-            IdentityTuple,
-            PortableMemoryArtifact,
-            WritePrecondition,
-        )
-        from hestai_context_mcp.storage.provenance import build_provenance_or_raise
+
         from hestai_context_mcp.tools.clock_out import clock_out
-        from datetime import UTC, datetime
-        import hashlib
 
         _write_identity_config(tmp_path)
         sid = _clock_in_then_session(tmp_path)
