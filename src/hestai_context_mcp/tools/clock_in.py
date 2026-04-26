@@ -2,6 +2,12 @@
 
 Returns the structured response per ADR-0353 interface contract.
 Harvested from legacy hestai-mcp clock_in.py.
+
+ADR-0013 PSS extension: clock_in resolves the PSS IdentityTuple, restores
+Portable Memory Artifacts via LocalFilesystemAdapter, and writes a named
+session snapshot. The response is extended with a structured
+``portable_state`` block. All existing top-level fields are preserved
+(G2 backward compatibility).
 """
 
 import logging
@@ -231,6 +237,16 @@ def clock_in(
         context_summary=context_summary,
     )
 
+    # ADR-0013 PSS: restore Portable Memory Artifacts and write a named
+    # snapshot bound to session_id. The block is ALWAYS present (G2 +
+    # PROD::I4 STRUCTURED_RETURN_SHAPES). When no identity is configured
+    # the block reports restore_status="no_identity_configured" — never
+    # an exception, never a network call.
+    portable_state = _restore_portable_state(
+        working_dir_path=working_dir_path,
+        session_id=session_id,
+    )
+
     return {
         "session_id": session_id,
         "role": role,
@@ -250,6 +266,205 @@ def clock_in(
             "active_sessions": active_sessions,
             "conflicts": conflicts,
         },
+        "portable_state": portable_state,
+    }
+
+
+def _empty_portable_state(
+    *, restore_status: str, error: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    return {
+        "restore_status": restore_status,
+        "identity": None,
+        "artifact_count": 0,
+        "tombstone_count": 0,
+        "snapshot_path": None,
+        "error": error,
+    }
+
+
+def _restore_portable_state(*, working_dir_path: Path, session_id: str) -> dict[str, Any]:
+    """Restore PSS state and write a named snapshot bound to ``session_id``.
+
+    This function is the integration boundary between ``clock_in`` and
+    the storage adapter / projection / snapshot pipeline. It NEVER
+    raises: every error path returns a structured ``portable_state``
+    block so the caller's response shape is stable. Network calls are
+    impossible by construction (LocalFilesystemAdapter only).
+    """
+
+    # Lazy imports keep PSS coupling out of module-load time and allow
+    # get_context to import this module without dragging in the
+    # storage subtree.
+    from hestai_context_mcp.storage.identity import IdentityValidationError
+    from hestai_context_mcp.storage.identity_resolver import resolve_identity
+    from hestai_context_mcp.storage.local_filesystem import (
+        LocalFilesystemAdapter,
+        PayloadHashMismatchError,
+    )
+    from hestai_context_mcp.storage.projection import (
+        ProjectionError,
+        build_projection,
+    )
+    from hestai_context_mcp.storage.schema import (
+        SchemaTooNewError,
+        SchemaValidationError,
+        validate_artifact,
+    )
+    from hestai_context_mcp.storage.snapshots import create_session_snapshot
+    from hestai_context_mcp.storage.types import (
+        ArtifactKind,
+        PortableMemoryArtifact,
+        PortableNamespace,
+        TombstoneArtifact,
+    )
+
+    try:
+        identity = resolve_identity(working_dir_path)
+    except IdentityValidationError as e:
+        return _empty_portable_state(
+            restore_status="identity_invalid",
+            error={"code": e.code, "message": e.message},
+        )
+
+    if identity is None:
+        return _empty_portable_state(restore_status="no_identity_configured")
+
+    namespace = PortableNamespace(
+        project_id=identity.project_id,
+        workspace_id=identity.workspace_id,
+        user_id=identity.user_id,
+        state_schema_version=identity.state_schema_version,
+        carrier_namespace=identity.carrier_namespace,
+    )
+
+    adapter = LocalFilesystemAdapter(working_dir=working_dir_path)
+    try:
+        memory_refs = adapter.list_artifacts(namespace)
+    except IdentityValidationError as e:
+        return _empty_portable_state(
+            restore_status="identity_mismatch",
+            error={"code": e.code, "message": e.message},
+        )
+
+    artifacts: list[PortableMemoryArtifact] = []
+    tombstones: list[TombstoneArtifact] = []
+    for ref in memory_refs:
+        try:
+            obj = adapter.read_artifact(ref)
+        except (
+            PayloadHashMismatchError,
+            IdentityValidationError,
+            FileNotFoundError,
+        ) as e:
+            return _empty_portable_state(
+                restore_status="restore_io_error",
+                error={"code": getattr(e, "code", "io_error"), "message": str(e)},
+            )
+        if isinstance(obj, PortableMemoryArtifact):
+            try:
+                validate_artifact(obj)
+            except SchemaTooNewError as e:
+                return _empty_portable_state(
+                    restore_status="schema_too_new",
+                    error={"code": e.code, "message": e.message},
+                )
+            except SchemaValidationError as e:
+                return _empty_portable_state(
+                    restore_status="schema_invalid",
+                    error={"code": e.code, "message": e.message},
+                )
+            artifacts.append(obj)
+        elif isinstance(obj, TombstoneArtifact):
+            tombstones.append(obj)
+
+    # Tombstones live in a separate tree; list_artifacts(namespace) only
+    # returned PORTABLE_MEMORY refs above. Surface tombstones explicitly.
+    tomb_namespace_dir = (
+        working_dir_path
+        / ".hestai"
+        / "state"
+        / "portable"
+        / "tombstones"
+        / identity.carrier_namespace
+        / identity.project_id
+        / identity.workspace_id
+        / identity.user_id
+        / f"v{identity.state_schema_version}"
+    )
+    if tomb_namespace_dir.exists():
+        from hestai_context_mcp.storage.types import ArtifactRef
+
+        for json_path in sorted(tomb_namespace_dir.glob("*.json")):
+            import json as _json
+
+            try:
+                raw = _json.loads(json_path.read_text(encoding="utf-8"))
+                if raw.get("artifact_kind") != ArtifactKind.TOMBSTONE.value:
+                    continue
+                # Build a ref then read through the adapter so identity
+                # checks apply.
+                from datetime import datetime as _dt
+
+                ref = ArtifactRef(
+                    artifact_id=str(raw["artifact_id"]),
+                    identity=identity,
+                    artifact_kind=ArtifactKind.TOMBSTONE,
+                    sequence_id=int(raw["sequence_id"]),
+                    created_at=_dt.fromisoformat(raw["created_at"]),
+                    payload_hash=str(raw["payload_hash"]),
+                    carrier_path=str(json_path),
+                )
+                obj = adapter.read_artifact(ref)
+                if isinstance(obj, TombstoneArtifact):
+                    tombstones.append(obj)
+            except (OSError, KeyError, ValueError, IdentityValidationError):
+                # A bad tombstone file should not destroy a valid
+                # restore; continue past it.
+                continue
+
+    try:
+        projection = build_projection(
+            identity=identity,
+            artifacts=tuple(artifacts),
+            tombstones=tuple(tombstones),
+        )
+    except IdentityValidationError as e:
+        return _empty_portable_state(
+            restore_status="identity_mismatch",
+            error={"code": e.code, "message": e.message},
+        )
+    except ProjectionError as e:
+        return _empty_portable_state(
+            restore_status="projection_error",
+            error={"code": e.code, "message": e.message},
+        )
+
+    # Refs included in the snapshot are the post-tombstone memory refs.
+    accepted_ids = {r["artifact_id"] for r in projection["artifact_refs"]}
+    accepted_refs = tuple(r for r in memory_refs if r.artifact_id in accepted_ids)
+
+    snapshot_path = create_session_snapshot(
+        working_dir=working_dir_path,
+        session_id=session_id,
+        identity=identity,
+        artifact_refs=accepted_refs,
+        projection_payload=projection,
+    )
+
+    return {
+        "restore_status": "ok",
+        "identity": {
+            "project_id": identity.project_id,
+            "workspace_id": identity.workspace_id,
+            "user_id": identity.user_id,
+            "state_schema_version": identity.state_schema_version,
+            "carrier_namespace": identity.carrier_namespace,
+        },
+        "artifact_count": len(accepted_refs),
+        "tombstone_count": len(tombstones),
+        "snapshot_path": str(snapshot_path),
+        "error": None,
     }
 
 
