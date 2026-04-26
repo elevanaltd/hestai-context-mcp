@@ -29,9 +29,19 @@ from hestai_context_mcp.storage.types import (
     WritePrecondition,
 )
 
+#: G1 (CIV) — canonical positive marker that the B1 layering chain is
+#: sealed. The post-B2 quality gate chain (TMG -> CRS -> CE -> CIV)
+#: introspects this constant to confirm B1's structural invariants are
+#: in force. Future B2 work that adds adapters MUST flip this flag (or
+#: replace it with a version-tagged equivalent) so the chain catches
+#: layering changes instead of silently accepting drift.
+B1_LAYERING_FROZEN: bool = True
+
+
 __all__ = [
     "ArtifactKind",
     "ArtifactRef",
+    "B1_LAYERING_FROZEN",
     "IdentityTuple",
     "LocalFilesystemAdapter",
     "PortableArtifact",
