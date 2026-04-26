@@ -136,9 +136,8 @@ class TestProjectionIdentityGuards:
     """TEST_110."""
 
     def test_projection_rejects_mixed_identity_artifacts(self) -> None:
-        from hestai_context_mcp.storage.projection import build_projection
-
         from hestai_context_mcp.storage.identity import IdentityValidationError
+        from hestai_context_mcp.storage.projection import build_projection
 
         a1 = _memory(artifact_id="art-1", sequence_id=1)
         a2 = _memory(artifact_id="art-2", sequence_id=2, identity=_identity(project_id="proj-X"))

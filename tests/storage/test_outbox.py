@@ -180,7 +180,6 @@ class TestClassification:
 
     def test_outbox_is_classified_local_mutable(self, tmp_path: Path) -> None:
         from hestai_context_mcp.storage.outbox import OutboxStore
-
         from hestai_context_mcp.storage.types import StateClassification
 
         store = OutboxStore(working_dir=tmp_path)

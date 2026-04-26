@@ -188,9 +188,8 @@ class TestSnapshotConstraints:
     def test_snapshot_creation_rejects_identity_mismatch(self, tmp_path: Path) -> None:
         """Artifact refs whose identity differs from the snapshot identity
         are refused — prevents cross-identity contamination."""
-        from hestai_context_mcp.storage.snapshots import create_session_snapshot
-
         from hestai_context_mcp.storage.identity import IdentityValidationError
+        from hestai_context_mcp.storage.snapshots import create_session_snapshot
         from hestai_context_mcp.storage.types import (
             ArtifactKind,
             ArtifactRef,
@@ -224,7 +223,6 @@ class TestSnapshotConstraints:
 
     def test_snapshot_classified_derived_projection(self, tmp_path: Path) -> None:
         from hestai_context_mcp.storage.snapshots import SNAPSHOT_CLASSIFICATION
-
         from hestai_context_mcp.storage.types import StateClassification
 
         assert SNAPSHOT_CLASSIFICATION is StateClassification.DERIVED_PROJECTION
