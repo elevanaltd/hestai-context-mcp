@@ -16,6 +16,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from re import Pattern
 
+#: Canonical engine identifier for provenance metadata (RISK_004 / G6).
+#: Used by storage.provenance.build_provenance to populate
+#: RedactionProvenance.engine_name on every published Portable Memory
+#: Artifact (ADR-0013 R6). Must remain stable across refactors so older
+#: artifacts can identify the engine that produced them.
+REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
+
+#: Engine version embedded in artifact metadata (RISK_004 + G6 + A4).
+#: Bump this constant whenever PATTERNS or redaction semantics change so
+#: downstream readers can detect stale provenance and refuse to treat
+#: older redactor output as safe (PROD::I2 fail-closed). The B1
+#: arbitration record locks the value at '1' for the LocalFilesystem
+#: adapter ship.
+REDACTION_ENGINE_VERSION: str = "1"
+
 
 @dataclass(frozen=True)
 class RedactionResult:

@@ -19,7 +19,7 @@ INVARIANT_003.
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -100,9 +100,7 @@ class TestClassificationLabel:
     def test_redaction_provenance_classification_must_be_portable_memory(self) -> None:
         from hestai_context_mcp.storage.provenance import build_provenance
 
-        prov = build_provenance(
-            input_text="x", output_text="x", redacted_credential_categories=()
-        )
+        prov = build_provenance(input_text="x", output_text="x", redacted_credential_categories=())
         assert prov.classification_label == "PORTABLE_MEMORY"
 
 
@@ -113,9 +111,7 @@ class TestCategoriesNormalization:
     def test_redacted_categories_can_be_empty_but_not_none(self) -> None:
         from hestai_context_mcp.storage.provenance import build_provenance
 
-        prov = build_provenance(
-            input_text="x", output_text="x", redacted_credential_categories=()
-        )
+        prov = build_provenance(input_text="x", output_text="x", redacted_credential_categories=())
         assert prov.redacted_credential_categories == ()
 
 
@@ -142,9 +138,7 @@ class TestCompletenessValidation:
             validate_provenance_complete,
         )
 
-        prov = build_provenance(
-            input_text="x", output_text="x", redacted_credential_categories=()
-        )
+        prov = build_provenance(input_text="x", output_text="x", redacted_credential_categories=())
         broken = dataclasses.replace(prov, **{field: value})
         with pytest.raises(ProvenanceIncompleteError) as excinfo:
             validate_provenance_complete(broken)
@@ -163,9 +157,7 @@ class TestStaleRulesetHashFails:
             build_provenance,
         )
 
-        prov = build_provenance(
-            input_text="x", output_text="x", redacted_credential_categories=()
-        )
+        prov = build_provenance(input_text="x", output_text="x", redacted_credential_categories=())
         stale = dataclasses.replace(prov, ruleset_hash="0" * 64)
         with pytest.raises(ProvenanceStaleError) as excinfo:
             assert_ruleset_hash_current(stale)
@@ -277,12 +269,10 @@ class TestProvenanceClassificationLiteral:
     def test_provenance_classification_literal(self) -> None:
         from hestai_context_mcp.storage.provenance import build_provenance
 
-        prov = build_provenance(
-            input_text="x", output_text="x", redacted_credential_categories=()
-        )
+        prov = build_provenance(input_text="x", output_text="x", redacted_credential_categories=())
         assert prov.classification_label == "PORTABLE_MEMORY"
         # tzinfo robustness across Python timezone module variants
-        _ = timezone.utc
+        _ = UTC
         _ = UTC
         assert prov.redacted_at.tzinfo is not None
         # not naive
