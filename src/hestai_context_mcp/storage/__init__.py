@@ -11,6 +11,8 @@ verbatim. Any drift requires CE re-consult per the B1→B2 arbitration record.
 
 from __future__ import annotations
 
+from hestai_context_mcp.storage.local_filesystem import LocalFilesystemAdapter
+from hestai_context_mcp.storage.protocol import StorageAdapter
 from hestai_context_mcp.storage.types import (
     ArtifactKind,
     ArtifactRef,
@@ -31,6 +33,7 @@ __all__ = [
     "ArtifactKind",
     "ArtifactRef",
     "IdentityTuple",
+    "LocalFilesystemAdapter",
     "PortableArtifact",
     "PortableMemoryArtifact",
     "PortableNamespace",
@@ -38,6 +41,7 @@ __all__ = [
     "PublishStatus",
     "RedactionProvenance",
     "StateClassification",
+    "StorageAdapter",
     "StorageCapabilities",
     "TombstoneArtifact",
     "WritePrecondition",

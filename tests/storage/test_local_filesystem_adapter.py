@@ -218,7 +218,9 @@ class TestWriteArtifact:
         ref = _make_ref_for(artifact)
         ack = adapter.write_artifact(ref, artifact, WritePrecondition())
         # An on-disk file exists under the artifacts subtree.
-        artifact_files = list((tmp_path / ".hestai" / "state" / "portable" / "artifacts").rglob("*.json"))
+        artifact_files = list(
+            (tmp_path / ".hestai" / "state" / "portable" / "artifacts").rglob("*.json")
+        )
         assert artifact_files
         assert any(artifact.artifact_id in p.name for p in artifact_files)
         assert ack.artifact_id == artifact.artifact_id
@@ -315,9 +317,7 @@ class TestWriteArtifact:
         ack2 = adapter.write_artifact(ref, artifact, WritePrecondition())
         assert ack2.status == PublishStatus.DUPLICATE
 
-    def test_duplicate_artifact_id_different_hash_fails_precondition(
-        self, tmp_path: Path
-    ) -> None:
+    def test_duplicate_artifact_id_different_hash_fails_precondition(self, tmp_path: Path) -> None:
         from hestai_context_mcp.storage.types import PublishStatus, WritePrecondition
 
         adapter = self._adapter(tmp_path)
