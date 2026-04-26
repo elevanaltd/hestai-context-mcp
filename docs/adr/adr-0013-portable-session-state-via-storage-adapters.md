@@ -1,17 +1,18 @@
-# ADR-00XX: Portable Session State via Storage Adapters
+# ADR-0013: Portable Session State via Storage Adapters
 
 ## Status
 
-PROPOSED (awaiting ratification)
+ACCEPTED
 
-- **ADR Number**: ADR-00XX (pending GitHub issue allocation before ratification)
+- **ADR Number**: ADR-0013
 - **Title**: Portable Session State via Storage Adapters
 - **Type**: ADR
-- **Author**: requirements-steward
+- **Author**: requirements-steward (codex, via control-room session)
 - **Created**: 2026-04-25
-- **Updated**: 2026-04-25
+- **Updated**: 2026-04-26
+- **Ratified**: 2026-04-26 (human authority via control-room session)
 - **Phase**: D2 design
-- **GitHub Issue**: TBD at ratification
+- **GitHub Issue**: [#13](https://github.com/elevanaltd/hestai-context-mcp/issues/13)
 - **Implements**: Portable Session State (PSS) design for hestai-context-mcp
 - **Deviates From**: none
 - **Supersedes**: none
@@ -238,4 +239,4 @@ Last-Write-Wins remote state. Rejected. LWW selects a winner, not a complete mem
 - HestAI-MCP `9071a2a8c3b76ed61dae8f244b17dbbb8b60705e`: `Merge PR #382 hestai-mcp-control-room: docs: sync ecosystem docs and lock hestai-context-mcp Phase 1.5 plan`
 - HestAI-MCP `9dad66035922363a3d18e154d85e31fedb680f87`: `Merge PR #48 review-hestai-folder: docs: HestAI context architecture debates and synthesis`
 
-**END OF ADR-00XX**
+**END OF ADR-0013**
