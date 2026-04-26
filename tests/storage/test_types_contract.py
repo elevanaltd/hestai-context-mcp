@@ -388,6 +388,4 @@ class TestTypesModuleHasNoIo:
         )
         text = types_src.read_text()
         for forbidden in ("requests", "httpx", "boto", "urllib.request", "git "):
-            assert forbidden not in text, (
-                f"types.py imported forbidden token: {forbidden}"
-            )
+            assert forbidden not in text, f"types.py imported forbidden token: {forbidden}"
