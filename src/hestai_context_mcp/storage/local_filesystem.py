@@ -288,6 +288,21 @@ class LocalFilesystemAdapter:
 
         return self._working_dir / ".hestai" / "state" / "portable"
 
+    @staticmethod
+    def is_local_only() -> bool:
+        """Canonical structural marker: this adapter is local-only (B1, R12).
+
+        Returns:
+            ``True`` for ``LocalFilesystemAdapter``. The post-B2 quality
+            gate chain uses this method to mechanically confirm that B1
+            ships only the local carrier per B2_START_BLOCKER_003. Future
+            non-local adapters MUST return ``False`` from their override
+            so PSS lifecycle code can short-circuit appropriately when
+            local-only constraints apply.
+        """
+
+        return True
+
     @property
     def _artifacts_root(self) -> Path:
         return self.portable_root / "artifacts"
