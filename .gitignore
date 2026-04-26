@@ -45,6 +45,7 @@ Thumbs.db
 
 # Raw debate transcripts (OCTAVE compressed versions are committed)
 debates/*.json
+debates/*.jsonl
 debates/*.lock
 
 # Claude Code local settings (user-specific)
