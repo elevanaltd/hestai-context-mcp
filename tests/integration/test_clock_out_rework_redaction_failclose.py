@@ -126,12 +126,12 @@ class TestRedactionFailureBlocksPublish:
 
         # The response MUST carry a structured failure for portable_publication.
         publication = result["portable_publication"]
-        assert publication["status"] == "failed", (
-            f"redaction failure must fail-closed for publish, got {publication}"
-        )
-        assert publication["error_code"] == "redaction_failure", (
-            f"expected error_code='redaction_failure', got {publication['error_code']!r}"
-        )
+        assert (
+            publication["status"] == "failed"
+        ), f"redaction failure must fail-closed for publish, got {publication}"
+        assert (
+            publication["error_code"] == "redaction_failure"
+        ), f"expected error_code='redaction_failure', got {publication['error_code']!r}"
 
         # No PortableMemoryArtifact JSON file written anywhere under portable artifacts.
         portable = tmp_path / ".hestai" / "state" / "portable"
@@ -152,9 +152,7 @@ class TestRedactionFailureBlocksPublish:
         # Archive path MUST be null (redaction failed -> no archive).
         assert result["archive_path"] is None
 
-    def test_redaction_engine_raise_writes_outbox_status_record(
-        self, tmp_path: Path
-    ) -> None:
+    def test_redaction_engine_raise_writes_outbox_status_record(self, tmp_path: Path) -> None:
         """A2 second-order concern: skip must leave a durable on-disk audit.
 
         After GREEN: an outbox status entry with reason_code='redaction_failure'
@@ -188,9 +186,9 @@ class TestRedactionFailureBlocksPublish:
             if payload.get("error_code") == "redaction_failure":
                 matched = True
                 # session-id linkage so operators can correlate.
-                assert sid in entry.name or sid in str(payload), (
-                    f"outbox entry must reference session_id {sid!r}: {payload}"
-                )
+                assert sid in entry.name or sid in str(
+                    payload
+                ), f"outbox entry must reference session_id {sid!r}: {payload}"
                 break
         assert matched, (
             f"no outbox entry with error_code='redaction_failure' "
@@ -227,9 +225,9 @@ class TestRedactionFailureBlocksPublish:
 
         # The response payload (anywhere) must not contain the TESTONLY marker.
         rendered = json.dumps(result, default=str)
-        assert "TESTONLY" not in rendered, (
-            "unredacted TESTONLY secret leaked into clock_out response"
-        )
+        assert (
+            "TESTONLY" not in rendered
+        ), "unredacted TESTONLY secret leaked into clock_out response"
 
         # And no PortableMemoryArtifact JSON written.
         portable = tmp_path / ".hestai" / "state" / "portable"
@@ -238,9 +236,9 @@ class TestRedactionFailureBlocksPublish:
                 if "/outbox/" in str(p) or "/snapshots/" in str(p) or p.name == "identity.json":
                     continue
                 content = p.read_text(encoding="utf-8")
-                assert "TESTONLY" not in content, (
-                    f"unredacted secret leaked into on-disk artifact at {p}"
-                )
+                assert (
+                    "TESTONLY" not in content
+                ), f"unredacted secret leaked into on-disk artifact at {p}"
 
 
 @pytest.mark.integration

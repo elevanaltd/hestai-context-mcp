@@ -53,9 +53,7 @@ def _write_session(working_dir: Path, session_id: str) -> Path:
 class TestNoIdentityConfiguredOutboxStatusRecord:
     """ADDITIONAL CONCERN 1: skip must leave durable on-disk audit."""
 
-    def test_no_identity_configured_skip_writes_outbox_status_record(
-        self, tmp_path: Path
-    ) -> None:
+    def test_no_identity_configured_skip_writes_outbox_status_record(self, tmp_path: Path) -> None:
         """A2 + PROD::I1: identity-skip writes durable outbox record.
 
         After GREEN: a file exists at
@@ -127,9 +125,7 @@ class TestNoIdentityConfiguredOutboxStatusRecord:
 class TestSkipReasonCodeFileNamingConvention:
     """Naming convention guard: {session_id}-{reason_code}.json under outbox/."""
 
-    def test_skip_status_file_name_is_session_id_dash_reason_code(
-        self, tmp_path: Path
-    ) -> None:
+    def test_skip_status_file_name_is_session_id_dash_reason_code(self, tmp_path: Path) -> None:
         """The on-disk filename follows {session_id}-{reason_code}.json (CE rework)."""
 
         from hestai_context_mcp.tools.clock_out import clock_out

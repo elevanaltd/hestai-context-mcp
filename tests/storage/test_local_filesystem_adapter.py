@@ -218,9 +218,7 @@ class TestWriteArtifact:
         ref = _make_ref_for(artifact)
         ack = adapter.write_artifact(ref, artifact, WritePrecondition())
         # An on-disk file exists under the artifacts subtree.
-        artifact_files = list(
-            (tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json")
-        )
+        artifact_files = list((tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json"))
         assert artifact_files
         assert any(artifact.artifact_id in p.name for p in artifact_files)
         assert ack.artifact_id == artifact.artifact_id
@@ -419,9 +417,7 @@ class TestReadArtifact:
         adapter.write_artifact(ref, artifact, WritePrecondition())
 
         # Tamper with the on-disk file.
-        artifact_files = list(
-            (tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json")
-        )
+        artifact_files = list((tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json"))
         assert artifact_files
         target = artifact_files[0]
         raw = json.loads(target.read_text())
@@ -533,9 +529,7 @@ class TestWriteTombstone:
         adapter = self._adapter(tmp_path)
         artifact = _make_artifact(artifact_id="art-1", sequence_id=1)
         adapter.write_artifact(_make_ref_for(artifact), artifact, WritePrecondition())
-        target_files = list(
-            (tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json")
-        )
+        target_files = list((tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json"))
         assert target_files
         target_file = target_files[0]
         before = target_file.read_text()

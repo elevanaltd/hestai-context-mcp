@@ -242,9 +242,7 @@ class TestRestoreErrors:
         # adapter happy, then write an artifact under a *different*
         # carrier-path identity by overwriting the json file in place.
         _seed_artifact(tmp_path, artifact_id="art-1", sequence_id=1)
-        json_path = next(
-            (tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json")
-        )
+        json_path = next((tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json"))
         raw = json.loads(json_path.read_text())
         raw["identity"]["project_id"] = "proj-OTHER"
         json_path.write_text(json.dumps(raw))
@@ -270,9 +268,7 @@ class TestRestoreErrors:
         _write_identity_config(tmp_path)
         _seed_artifact(tmp_path, artifact_id="art-1", sequence_id=1)
         # Bump minimum_reader_version on disk to 99 (too new).
-        json_path = next(
-            (tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json")
-        )
+        json_path = next((tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json"))
         raw = json.loads(json_path.read_text())
         raw["minimum_reader_version"] = 99
         json_path.write_text(json.dumps(raw))

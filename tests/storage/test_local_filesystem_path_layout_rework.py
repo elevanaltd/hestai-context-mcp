@@ -123,9 +123,7 @@ class TestLocalFilesystemPssPathLayout:
             f"^pss/[^/]+/[^/]+/[^/]+/[^/]+/artifacts/[^/]+\\.json$"
         )
 
-    def test_write_artifact_top_segment_is_pss_not_portable_artifacts(
-        self, tmp_path: Path
-    ) -> None:
+    def test_write_artifact_top_segment_is_pss_not_portable_artifacts(self, tmp_path: Path) -> None:
         from hestai_context_mcp.storage.local_filesystem import LocalFilesystemAdapter
         from hestai_context_mcp.storage.types import WritePrecondition
 
@@ -135,9 +133,9 @@ class TestLocalFilesystemPssPathLayout:
         adapter.write_artifact(ref, artifact, WritePrecondition())
 
         # New layout: pss/ exists; portable/artifacts/{ns}/... does NOT.
-        assert (tmp_path / ".hestai" / "state" / "portable" / "pss").exists(), (
-            "ADR-0013 binding requires top segment 'pss' under portable root"
-        )
+        assert (
+            tmp_path / ".hestai" / "state" / "portable" / "pss"
+        ).exists(), "ADR-0013 binding requires top segment 'pss' under portable root"
         # The legacy 'artifacts/' top-segment subtree at portable/artifacts/{ns}
         # must not be created. (Note: the END-position 'artifacts/' segment
         # under pss/{ns}/{proj}/{ws}/{user}/artifacts IS expected.)
@@ -151,9 +149,7 @@ class TestLocalFilesystemPssPathLayout:
                 f"found: {json_files}"
             )
 
-    def test_write_artifact_does_not_include_v_schema_version_segment(
-        self, tmp_path: Path
-    ) -> None:
+    def test_write_artifact_does_not_include_v_schema_version_segment(self, tmp_path: Path) -> None:
         from hestai_context_mcp.storage.local_filesystem import LocalFilesystemAdapter
         from hestai_context_mcp.storage.types import WritePrecondition
 
@@ -166,9 +162,11 @@ class TestLocalFilesystemPssPathLayout:
         assert receipt is not None
         # No segment named v1, v2, etc. The schema_version is a field on
         # PortableMemoryArtifact and PortableNamespace, not a path segment.
-        rel_str = str(Path(receipt).resolve().relative_to(
-            (tmp_path / ".hestai" / "state" / "portable").resolve()
-        ))
+        rel_str = str(
+            Path(receipt)
+            .resolve()
+            .relative_to((tmp_path / ".hestai" / "state" / "portable").resolve())
+        )
         for part in Path(rel_str).parts:
             assert not re.match(r"^v\d+$", part), (
                 f"path segment {part!r} matches v<int> shape; "
@@ -188,8 +186,10 @@ class TestLocalFilesystemPssPathLayout:
 
         receipt = ack.durable_carrier_receipt
         assert receipt is not None
-        rel = Path(receipt).resolve().relative_to(
-            (tmp_path / ".hestai" / "state" / "portable").resolve()
+        rel = (
+            Path(receipt)
+            .resolve()
+            .relative_to((tmp_path / ".hestai" / "state" / "portable").resolve())
         )
         parts = rel.parts
         # Expected: ('pss', ns, proj, ws, user, 'artifacts', '<id>.json')
