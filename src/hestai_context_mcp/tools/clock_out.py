@@ -252,8 +252,14 @@ def clock_out(
     # Extract learnings from assistant messages
     extracted_learnings = _extract_learnings(messages)
 
-    # Archive: redact and save transcript
+    # Archive: redact and save transcript.
+    # RISK_010 fail-closed (CE rework): redaction failure is structurally
+    # distinct from "no transcript" — the former MUST block publish; the
+    # latter is a legitimate skip. We track the two outcomes separately so
+    # the publish path can decide deterministically.
     archive_path: str | None = None
+    redaction_failed: bool = False
+    redaction_failure_reason: str = ""
     archive_dir = wd / ".hestai" / "state" / "sessions" / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -271,11 +277,31 @@ def clock_out(
             logger.info("Archived redacted transcript to %s", dest)
         except Exception as e:
             logger.error("Redaction/archival failed: %s", e)
-            # Continue without archive -- session cleanup still needed
+            # CE rework RISK_010: do NOT silently fall through to publish.
+            # The transcript existed but redaction failed — this is a
+            # structural credential-safety failure (PROD::I2 fail-closed).
+            redaction_failed = True
+            redaction_failure_reason = str(e)
+            # Best-effort cleanup of any partial dest file so no
+            # half-redacted content lingers on disk.
+            try:
+                if dest.exists():
+                    dest.unlink()
+            except OSError:  # pragma: no cover — defensive
+                pass
 
     # OCTAVE compression (Phase 1 simplification: skipped)
     octave_path: str | None = None
     compression_status = "skipped"
+
+    # CE rework RISK_010: when redaction fails, the in-memory
+    # extracted_learnings may carry unredacted credentials from the parsed
+    # transcript. PROD::I2 fail-closed forbids surfacing them in the
+    # response or the learnings index. Replace with empty lists so the
+    # caller gets the structured shape (PROD::I4 STRUCTURED_RETURN_SHAPES)
+    # without any credential exposure.
+    if redaction_failed:
+        extracted_learnings = {"decisions": [], "blockers": [], "learnings": []}
 
     # Append to learnings index
     _append_to_learnings_index(
@@ -298,6 +324,8 @@ def clock_out(
         archive_path=archive_path,
         extracted_learnings=extracted_learnings,
         description=description,
+        redaction_failed=redaction_failed,
+        redaction_failure_reason=redaction_failure_reason,
     )
 
     # Remove active session directory
@@ -333,6 +361,54 @@ def _skipped_publication(reason_code: str) -> dict[str, Any]:
         "error_code": reason_code,
         "error_message": f"clock_out skipped portable publication: {reason_code}",
     }
+
+
+def _record_skip_status(
+    working_dir: Path,
+    *,
+    session_id: str,
+    reason_code: str,
+    reason_message: str,
+) -> Path | None:
+    """Write a durable on-disk skip-status record under portable/outbox/.
+
+    CE rework ADDITIONAL CONCERN 1: any structured publish skip
+    (no_identity_configured, redaction_failure, provenance_incomplete,
+    archive_unreadable, identity_invalid) MUST leave an auditable on-disk
+    trace so PROD::I1 lifecycle integrity holds (no orphaned sessions).
+
+    The file shape is intentionally simple JSON keyed by
+    ``{session_id}-{reason_code}.json`` so operators can locate the
+    record directly without parsing the broader outbox queue. The
+    contents include the reason message and a UTC timestamp.
+
+    Returns:
+        The on-disk Path of the written record, or ``None`` if the write
+        failed (defensive: skip-status is best-effort and must never
+        propagate an exception out of clock_out).
+    """
+
+    target_dir = working_dir / ".hestai" / "state" / "portable" / "outbox"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        # session_id is already validated upstream (no path traversal).
+        # reason_code is internal-controlled.
+        target = target_dir / f"{session_id}-{reason_code}.json"
+        record = {
+            "session_id": session_id,
+            "error_code": reason_code,
+            "error_message": reason_message,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "kind": "skip_status",
+        }
+        target.write_text(
+            json.dumps(record, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        return target
+    except OSError as e:  # pragma: no cover - defensive
+        logger.warning("skip-status record write failed: %s", e)
+        return None
 
 
 def _outbox_has_entries(working_dir: Path) -> bool:
@@ -400,6 +476,13 @@ def _ack_to_publication(ack: Any) -> dict[str, Any]:
     }
 
 
+#: Sentinel input used when there is *no* transcript content to hash.
+#: Distinct from any payload_canonical so input_artifact_hash and
+#: output_artifact_hash are never equal for non-empty payloads (RISK_010
+#: provenance integrity, CE rework).
+_EMPTY_TRANSCRIPT_SENTINEL: str = "<no_transcript_input>"
+
+
 def _publish_portable_memory(
     *,
     working_dir_path: Path,
@@ -408,6 +491,8 @@ def _publish_portable_memory(
     archive_path: str | None,
     extracted_learnings: dict[str, list[str]],
     description: str,
+    redaction_failed: bool = False,
+    redaction_failure_reason: str = "",
 ) -> tuple[dict[str, Any], bool]:
     """Build, publish, and (on failure) enqueue the Portable Memory Artifact.
 
@@ -415,6 +500,13 @@ def _publish_portable_memory(
     Never raises: every failure path is captured into the structured
     publication block. Lazy imports keep storage coupling out of
     module-load time.
+
+    Args:
+        redaction_failed: When True, the upstream redaction step raised; we
+            MUST fail-closed (RISK_010, CE rework) and never publish — even
+            if identity is configured and provenance can be re-computed.
+        redaction_failure_reason: Human-readable reason; surfaced in the
+            outbox status record so operators can correlate.
     """
 
     # Lazy imports: keep storage subtree off clock_out's import-time
@@ -439,25 +531,57 @@ def _publish_portable_memory(
 
     outbox = OutboxStore(working_dir=working_dir_path)
 
+    # CE rework BLOCKER 1 (RISK_010): if redaction failed upstream, the
+    # publish path is fail-closed regardless of identity / provenance.
+    # PROD::I2 forbids any publish that does not preserve fail-closed
+    # redaction. Emit a structured failure + durable outbox status record
+    # so the skip is auditable (A2 second-order concern).
+    if redaction_failed:
+        publication = _skipped_publication("redaction_failure")
+        publication["error_message"] = (
+            redaction_failure_reason or "redaction failed; publish blocked fail-closed"
+        )
+        _record_skip_status(
+            working_dir_path,
+            session_id=session_id,
+            reason_code="redaction_failure",
+            reason_message=publication["error_message"],
+        )
+        return publication, True
+
     # Identity gate: B2_START_BLOCKER_001 — do not invent identity. If the
     # config is absent, the publish path is a structured skip with an
-    # outbox status record (A2). The skip record is informational; we
-    # don't write a persistent outbox entry because there's nothing to
-    # publish. ``unpublished_memory_exists`` reflects the durable queue.
+    # outbox status record (A2 + CE rework ADDITIONAL CONCERN 1). Every
+    # structured skip leaves a durable on-disk trace so PROD::I1 lifecycle
+    # integrity is preserved (no orphaned sessions).
     try:
         identity = resolve_identity(working_dir_path)
     except IdentityValidationError as e:
         publication = _skipped_publication("identity_invalid")
         publication["error_message"] = e.message
-        return publication, outbox.unpublished_memory_exists()
+        _record_skip_status(
+            working_dir_path,
+            session_id=session_id,
+            reason_code="identity_invalid",
+            reason_message=e.message,
+        )
+        return publication, True
 
     if identity is None:
         publication = _skipped_publication("no_identity_configured")
-        return publication, outbox.unpublished_memory_exists()
+        _record_skip_status(
+            working_dir_path,
+            session_id=session_id,
+            reason_code="no_identity_configured",
+            reason_message="no identity configured; publish skipped",
+        )
+        return publication, True
 
     # Provenance gate: G4 atomic guard. Build provenance from the redacted
-    # archive if available; else from the v1 payload itself so a complete
-    # provenance pair always exists before any adapter call (RISK_010).
+    # archive if available; else use a deterministic empty-input sentinel
+    # distinct from the canonical payload so input_artifact_hash and
+    # output_artifact_hash are independently derived (RISK_010 provenance
+    # integrity — CE rework: same-source fallback is forbidden).
     payload_role = str(session_data.get("role", "unknown"))
     payload_focus = str(session_data.get("focus", "unknown"))
     payload = _build_v1_payload(
@@ -476,13 +600,20 @@ def _publish_portable_memory(
         except OSError as e:
             publication = _skipped_publication("archive_unreadable")
             publication["error_message"] = str(e)
-            return publication, outbox.unpublished_memory_exists()
+            _record_skip_status(
+                working_dir_path,
+                session_id=session_id,
+                reason_code="archive_unreadable",
+                reason_message=str(e),
+            )
+            return publication, True
     else:
-        # No transcript archived; still produce a complete provenance pair
-        # over the canonical payload so RISK_010 holds (no publish without
-        # a redacted input/output pair). Empty input is acceptable because
-        # the redaction engine has no secrets to redact.
-        input_text = payload_canonical
+        # No transcript archived (legitimate "no transcript" case). Use a
+        # constant sentinel as input_text so input_artifact_hash !=
+        # output_artifact_hash for any non-empty payload. This keeps
+        # provenance integrity structurally distinguishable from the
+        # forbidden "same source" pattern (CE rework RISK_010).
+        input_text = _EMPTY_TRANSCRIPT_SENTINEL
 
     try:
         provenance = build_provenance_or_raise(
@@ -493,8 +624,8 @@ def _publish_portable_memory(
     except ProvenanceIncompleteError as e:
         publication = _skipped_publication(e.code)
         publication["error_message"] = e.message
-        # A2: the skip is observable. Outbox status reflects existing queue
-        # plus a synthetic record so unpublished_memory_exists flips True.
+        # A2 + CE rework: the skip is observable on disk via the outbox
+        # entry AND a status record keyed by session+reason for operators.
         try:
             synthetic_id = f"skip-{session_id}"
             ack = PublishAck(
@@ -513,6 +644,12 @@ def _publish_portable_memory(
             publication["queued_path"] = str(queued)
         except Exception as enqueue_err:  # pragma: no cover - defensive
             logger.warning("outbox enqueue for provenance skip failed: %s", enqueue_err)
+        _record_skip_status(
+            working_dir_path,
+            session_id=session_id,
+            reason_code=e.code,
+            reason_message=e.message,
+        )
         return publication, outbox.unpublished_memory_exists()
 
     # Build the artifact. parent_ids reference the session snapshot's
