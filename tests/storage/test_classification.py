@@ -84,19 +84,24 @@ class TestPortableMemoryPaths:
         return classify_state_path(working_dir / relative, working_dir=working_dir)
 
     def test_portable_artifacts_are_portable_memory(self, tmp_path: Path) -> None:
+        # CE rework RISK_006: ADR-0013 abstract path layout
+        # portable/pss/{ns}/{proj}/{ws}/{user}/artifacts/{id}.json (no
+        # v{schema_version} segment).
         assert (
             self._classify(
                 working_dir=tmp_path,
-                relative=".hestai/state/portable/artifacts/personal/proj/wt/u/v1/art-1.json",
+                relative=".hestai/state/portable/pss/personal/proj/wt/u/artifacts/art-1.json",
             )
             is StateClassification.PORTABLE_MEMORY
         )
 
     def test_portable_tombstones_are_portable_memory(self, tmp_path: Path) -> None:
+        # CE rework RISK_006: tombstones live under the per-identity subtree
+        # at portable/pss/{ns}/{proj}/{ws}/{user}/tombstones/{id}.json.
         assert (
             self._classify(
                 working_dir=tmp_path,
-                relative=".hestai/state/portable/tombstones/personal/proj/wt/u/v1/tomb-1.json",
+                relative=".hestai/state/portable/pss/personal/proj/wt/u/tombstones/tomb-1.json",
             )
             is StateClassification.PORTABLE_MEMORY
         )

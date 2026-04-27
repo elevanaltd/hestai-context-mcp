@@ -378,19 +378,21 @@ def _restore_portable_state(*, working_dir_path: Path, session_id: str) -> dict[
         elif isinstance(obj, TombstoneArtifact):
             tombstones.append(obj)
 
-    # Tombstones live in a separate tree; list_artifacts(namespace) only
-    # returned PORTABLE_MEMORY refs above. Surface tombstones explicitly.
+    # Tombstones live in a separate leaf under the per-identity subtree
+    # (CE rework RISK_006: pss/{ns}/{proj}/{ws}/{user}/tombstones/ — no
+    # v{schema_version} segment). list_artifacts(namespace) only returned
+    # PORTABLE_MEMORY refs above. Surface tombstones explicitly.
     tomb_namespace_dir = (
         working_dir_path
         / ".hestai"
         / "state"
         / "portable"
-        / "tombstones"
+        / "pss"
         / identity.carrier_namespace
         / identity.project_id
         / identity.workspace_id
         / identity.user_id
-        / f"v{identity.state_schema_version}"
+        / "tombstones"
     )
     if tomb_namespace_dir.exists():
         from hestai_context_mcp.storage.types import ArtifactRef

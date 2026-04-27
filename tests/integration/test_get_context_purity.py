@@ -121,16 +121,17 @@ class TestGetContextFilesystemPurity:
             assert before[k] == after[k], f"get_context mutated {k}: {before[k]} -> {after[k]}"
 
     def test_get_context_does_not_create_portable_directories(self, tmp_path: Path) -> None:
-        """R10: get_context never creates portable/{outbox,snapshots,artifacts}."""
+        """R10: get_context never creates portable/{outbox,snapshots,pss}."""
         from hestai_context_mcp.tools.get_context import get_context
 
         get_context(working_dir=str(tmp_path))
 
         portable = tmp_path / ".hestai" / "state" / "portable"
         # The portable subtree must not be created by get_context.
+        # CE rework RISK_006: artifacts now live under portable/pss/.
         assert not (portable / "outbox").exists()
         assert not (portable / "snapshots").exists()
-        assert not (portable / "artifacts").exists()
+        assert not (portable / "pss").exists()
 
 
 @pytest.mark.integration

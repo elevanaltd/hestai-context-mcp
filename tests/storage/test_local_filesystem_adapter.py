@@ -13,7 +13,7 @@ Binding rulings exercised here:
 - R11: no shelling out to git, no custom Git refs.
 - R12: no remote SDKs, no network imports.
 - RISK_006: local carrier path layout mirrors the abstract ADR layout
-  under .hestai/state/portable/artifacts/.
+  under .hestai/state/portable/pss/{ns}/{proj}/{ws}/{user}/artifacts/.
 """
 
 from __future__ import annotations
@@ -219,7 +219,7 @@ class TestWriteArtifact:
         ack = adapter.write_artifact(ref, artifact, WritePrecondition())
         # An on-disk file exists under the artifacts subtree.
         artifact_files = list(
-            (tmp_path / ".hestai" / "state" / "portable" / "artifacts").rglob("*.json")
+            (tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json")
         )
         assert artifact_files
         assert any(artifact.artifact_id in p.name for p in artifact_files)
@@ -288,10 +288,11 @@ class TestWriteArtifact:
         with pytest.raises(ProvenanceIncompleteError):
             adapter.write_artifact(ref, artifact, WritePrecondition())
 
-        # G4 atomic-guard: NO partial file written under the artifacts tree.
-        artifacts_dir = tmp_path / ".hestai" / "state" / "portable" / "artifacts"
-        if artifacts_dir.exists():
-            assert not list(artifacts_dir.rglob("*.json"))
+        # G4 atomic-guard: NO partial file written under the pss subtree
+        # (CE rework RISK_006: ADR-0013 abstract path).
+        pss_dir = tmp_path / ".hestai" / "state" / "portable" / "pss"
+        if pss_dir.exists():
+            assert not list(pss_dir.rglob("*.json"))
 
     def test_local_filesystem_write_is_create_only_by_default(self, tmp_path: Path) -> None:
         from hestai_context_mcp.storage.types import WritePrecondition
@@ -419,7 +420,7 @@ class TestReadArtifact:
 
         # Tamper with the on-disk file.
         artifact_files = list(
-            (tmp_path / ".hestai" / "state" / "portable" / "artifacts").rglob("*.json")
+            (tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json")
         )
         assert artifact_files
         target = artifact_files[0]
@@ -519,9 +520,12 @@ class TestWriteTombstone:
         tomb = self._make_tombstone(target_artifact_id="art-1")
         ack = adapter.write_tombstone(self._ref_for_tombstone(tomb), tomb, WritePrecondition())
         assert ack.artifact_id == tomb.artifact_id
-        tombstones_dir = tmp_path / ".hestai" / "state" / "portable" / "tombstones"
-        assert tombstones_dir.exists()
-        assert list(tombstones_dir.rglob("*.json"))
+        # CE rework RISK_006: tombstones live under per-identity subtree at
+        # portable/pss/{ns}/{proj}/{ws}/{user}/tombstones/{id}.json.
+        pss_root = tmp_path / ".hestai" / "state" / "portable" / "pss"
+        assert pss_root.exists()
+        tombstones = [p for p in pss_root.rglob("*.json") if p.parent.name == "tombstones"]
+        assert tombstones, f"no tombstone files found under {pss_root}"
 
     def test_write_tombstone_does_not_delete_target_artifact(self, tmp_path: Path) -> None:
         from hestai_context_mcp.storage.types import WritePrecondition
@@ -530,7 +534,7 @@ class TestWriteTombstone:
         artifact = _make_artifact(artifact_id="art-1", sequence_id=1)
         adapter.write_artifact(_make_ref_for(artifact), artifact, WritePrecondition())
         target_files = list(
-            (tmp_path / ".hestai" / "state" / "portable" / "artifacts").rglob("*.json")
+            (tmp_path / ".hestai" / "state" / "portable" / "pss").rglob("*.json")
         )
         assert target_files
         target_file = target_files[0]

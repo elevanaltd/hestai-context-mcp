@@ -52,11 +52,17 @@ def classify_state_path(target: Path, *, working_dir: Path) -> StateClassificati
     if not parts:
         return StateClassification.LOCAL_MUTABLE
 
-    # PORTABLE_MEMORY: artifacts and tombstones carrier files.
     if parts[:1] == ("portable",) and len(parts) > 1:
         sub = parts[1]
-        if sub in ("artifacts", "tombstones"):
-            return StateClassification.PORTABLE_MEMORY
+        # PORTABLE_MEMORY: ADR-0013 abstract path (CE rework RISK_006).
+        # Layout: portable/pss/{ns}/{proj}/{ws}/{user}/{leaf}/{id}.json
+        # where {leaf} is 'artifacts' or 'tombstones'. We classify by the
+        # second-from-last segment so the path geometry is the basis (R1).
+        if sub == "pss" and len(parts) >= 4:
+            leaf = parts[-2]
+            if leaf in ("artifacts", "tombstones"):
+                return StateClassification.PORTABLE_MEMORY
+            return StateClassification.LOCAL_MUTABLE
         if sub == "snapshots":
             return StateClassification.DERIVED_PROJECTION
         if sub in ("outbox", "tmp"):

@@ -26,14 +26,20 @@ Binding rulings enforced here:
 - R11: no git CLI shell-out, no custom Git refs.
 - R12: no network imports, no remote SDKs.
 
-Local carrier path layout (RISK_006):
+Local carrier path layout (RISK_006, post-CE-rework):
 
     .hestai/state/portable/
-      artifacts/{carrier_namespace}/{project_id}/{workspace_id}/{user_id}/v{schema_version}/{artifact_id}.json
-      tombstones/{carrier_namespace}/{project_id}/{workspace_id}/{user_id}/v{schema_version}/{artifact_id}.json
+      pss/{carrier_namespace}/{project_id}/{workspace_id}/{user_id}/artifacts/{artifact_id}.json
+      pss/{carrier_namespace}/{project_id}/{workspace_id}/{user_id}/tombstones/{artifact_id}.json
       tmp/                # atomic-write staging
       outbox/             # owned by storage.outbox (R7)
       snapshots/          # owned by storage.snapshots (R5)
+
+CE Stage C ruling (RISK_006 APPROVE_MIRROR): the on-disk path MUST
+match the ADR-0013 abstract path. The 'pss' top segment, the END-
+position 'artifacts/' segment, and the absence of any v{schema_version}
+segment are all binding. schema_version is a field inside the artifact
+and namespace records — embedding it in the path is over-specification.
 """
 
 from __future__ import annotations
@@ -304,18 +310,29 @@ class LocalFilesystemAdapter:
         return True
 
     @property
-    def _artifacts_root(self) -> Path:
-        return self.portable_root / "artifacts"
+    def _pss_root(self) -> Path:
+        """Root for the ADR-0013 abstract-path layout: ``portable/pss/``."""
 
-    @property
-    def _tombstones_root(self) -> Path:
-        return self.portable_root / "tombstones"
+        return self.portable_root / "pss"
 
     @property
     def _tmp_root(self) -> Path:
         return self.portable_root / "tmp"
 
     def _namespace_dir(self, namespace: PortableNamespace, *, kind: ArtifactKind) -> Path:
+        """Per-identity namespace dir for ``kind``.
+
+        Layout (CE rework RISK_006 APPROVE_MIRROR — ADR-0013 abstract path)::
+
+            pss/{ns}/{proj}/{ws}/{user}/artifacts
+            pss/{ns}/{proj}/{ws}/{user}/tombstones
+
+        The 'artifacts'/'tombstones' segment lives at the END so the
+        identity-keyed subtree is shared and the kind segment terminates
+        the directory. No ``v{schema_version}`` segment — schema_version
+        is a field inside the artifact/namespace records.
+        """
+
         # Validate identity-shaped fields before any path construction (R3).
         identity = IdentityTuple(
             project_id=namespace.project_id,
@@ -326,32 +343,28 @@ class LocalFilesystemAdapter:
         )
         validate_identity_tuple(identity)
 
-        root = (
-            self._artifacts_root if kind is ArtifactKind.PORTABLE_MEMORY else self._tombstones_root
-        )
+        leaf = "artifacts" if kind is ArtifactKind.PORTABLE_MEMORY else "tombstones"
         return (
-            root
+            self._pss_root
             / namespace.carrier_namespace
             / namespace.project_id
             / namespace.workspace_id
             / namespace.user_id
-            / f"v{namespace.state_schema_version}"
+            / leaf
         )
 
     def _artifact_path(self, ref: ArtifactRef) -> Path:
         # Validate identity before path construction (R3).
         validate_identity_tuple(ref.identity)
         kind = ref.artifact_kind
-        root = (
-            self._artifacts_root if kind is ArtifactKind.PORTABLE_MEMORY else self._tombstones_root
-        )
+        leaf = "artifacts" if kind is ArtifactKind.PORTABLE_MEMORY else "tombstones"
         return (
-            root
+            self._pss_root
             / ref.identity.carrier_namespace
             / ref.identity.project_id
             / ref.identity.workspace_id
             / ref.identity.user_id
-            / f"v{ref.identity.state_schema_version}"
+            / leaf
             / f"{ref.artifact_id}.json"
         )
 
