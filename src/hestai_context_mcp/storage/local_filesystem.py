@@ -411,7 +411,23 @@ class LocalFilesystemAdapter:
 
         refs.sort(key=lambda r: (r.sequence_id, r.artifact_id))
         if after_id is not None:
-            refs = [r for r in refs if r.artifact_id > after_id]
+            # Cubic P1 #4: pagination MUST use the same key as the sort,
+            # ``(sequence_id, artifact_id)``. Lexicographic comparison on
+            # ``artifact_id`` alone breaks the cursor when artifact_ids do
+            # not increase monotonically with sequence_ids (PROD::I1
+            # SESSION_LIFECYCLE_INTEGRITY: restore-time listing depends on
+            # a stable cursor). Locate the ref whose artifact_id == after_id
+            # in the already-sorted list and slice everything after it.
+            cursor_index: int | None = None
+            for idx, ref in enumerate(refs):
+                if ref.artifact_id == after_id:
+                    cursor_index = idx
+                    break
+            if cursor_index is None:
+                # Cursor does not match any known ref: return empty rather
+                # than the full list, preserving fail-closed semantics.
+                return []
+            refs = refs[cursor_index + 1 :]
         return refs
 
     def read_artifact(self, ref: ArtifactRef) -> PortableArtifact:
