@@ -56,11 +56,17 @@ def classify_state_path(target: Path, *, working_dir: Path) -> StateClassificati
         sub = parts[1]
         # PORTABLE_MEMORY: ADR-0013 abstract path (CE rework RISK_006).
         # Layout: portable/pss/{ns}/{proj}/{ws}/{user}/{leaf}/{id}.json
-        # where {leaf} is 'artifacts' or 'tombstones'. We classify by the
-        # second-from-last segment so the path geometry is the basis (R1).
-        if sub == "pss" and len(parts) >= 4:
-            leaf = parts[-2]
-            if leaf in ("artifacts", "tombstones"):
+        # where {leaf} is 'artifacts' or 'tombstones'.
+        #
+        # Cubic P2 #7: enforce EXACT segment count (8 parts relative to
+        # ``.hestai/state/``). The previous ``len(parts) >= 4`` guard was
+        # too permissive — paths like ``portable/pss/ns/artifacts/x.json``
+        # (5 segments) matched because parts[-2] == "artifacts" and were
+        # misclassified as PORTABLE_MEMORY. Per ADR-0013 R1 path geometry
+        # is authoritative, and per RULE_005 of BUILD-PLAN §SCOPE_DISCIPLINE
+        # malformed shapes fall through to LOCAL_MUTABLE.
+        if sub == "pss":
+            if len(parts) == 8 and parts[-2] in ("artifacts", "tombstones"):
                 return StateClassification.PORTABLE_MEMORY
             return StateClassification.LOCAL_MUTABLE
         if sub == "snapshots":
