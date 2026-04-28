@@ -166,7 +166,14 @@ class OutboxStore:
         for path in sorted(self.root.glob("*.json")):
             try:
                 entries.append(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError) as e:
+            except (OSError, ValueError) as e:
+                # Cubic P2 #9: ``ValueError`` is the structural superset:
+                # ``json.JSONDecodeError`` is a ValueError subclass, and
+                # ``UnicodeDecodeError`` (raised by read_text on non-UTF-8
+                # bytes) is also a ValueError subclass. Catching ValueError
+                # ensures every decode failure is wrapped as a structured
+                # OutboxParseError per R10 fail-closed and PROD::I4
+                # STRUCTURED_RETURN_SHAPES.
                 raise OutboxParseError(
                     code="outbox_entry_parse_failed",
                     message=f"failed to parse outbox entry {path}: {e}",
