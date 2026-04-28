@@ -54,9 +54,7 @@ def _write_session_with_focus_none(working_dir: Path, session_id: str) -> Path:
 class TestClockOutDestUnboundCleanup:
     """Cubic P1 #3: cleanup handler must not leak UnboundLocalError."""
 
-    def test_clock_out_focus_none_does_not_leak_unbound_local_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_clock_out_focus_none_does_not_leak_unbound_local_error(self, tmp_path: Path) -> None:
         """focus=None must not cause UnboundLocalError when dest is referenced
         in the cleanup handler. A structured response is required."""
 

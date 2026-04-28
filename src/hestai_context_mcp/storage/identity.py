@@ -83,8 +83,7 @@ def _check_string_component(value: object, *, field: str) -> None:
         raise IdentityValidationError(
             code="invalid_identity_component_type",
             message=(
-                f"identity component {field!r} must be a string, "
-                f"got {type(value).__name__}"
+                f"identity component {field!r} must be a string, " f"got {type(value).__name__}"
             ),
             field=field,
         )

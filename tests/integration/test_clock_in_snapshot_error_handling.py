@@ -51,12 +51,14 @@ class TestClockInSnapshotWriteFailure:
         def _raise(*args: Any, **kwargs: Any) -> Any:
             raise OSError("simulated disk-full on snapshot write")
 
-        with patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main"):
-            with patch(
+        with (
+            patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main"),
+            patch(
                 "hestai_context_mcp.storage.snapshots.create_session_snapshot",
                 side_effect=_raise,
-            ):
-                result = clock_in(role="impl", working_dir=str(tmp_path), focus="task")
+            ),
+        ):
+            result = clock_in(role="impl", working_dir=str(tmp_path), focus="task")
 
         # Top-level shape preserved (G2 backward-compat).
         assert "session_id" in result

@@ -35,9 +35,7 @@ class TestNonStringIdentityComponentTypeRejection:
         "value",
         [123, ["a", "b"], {"k": "v"}, 1.5, ("a",)],
     )
-    def test_non_string_component_raises_structured_error(
-        self, field: str, value: Any
-    ) -> None:
+    def test_non_string_component_raises_structured_error(self, field: str, value: Any) -> None:
         from hestai_context_mcp.storage.identity import (
             IdentityValidationError,
             validate_identity_tuple,

@@ -28,7 +28,9 @@ def _config(working_dir: Path, payload: dict[str, Any]) -> Path:
 class TestResolveIdentityFailClosedOnNonStringField:
     """Cubic P2 #6: non-string fields must NOT be coerced via str(...)."""
 
-    @pytest.mark.parametrize("field", ["project_id", "workspace_id", "user_id", "carrier_namespace"])
+    @pytest.mark.parametrize(
+        "field", ["project_id", "workspace_id", "user_id", "carrier_namespace"]
+    )
     @pytest.mark.parametrize("value", [123, ["a"], {"k": "v"}])
     def test_non_string_field_returns_none_not_coerced(
         self, tmp_path: Path, field: str, value: Any
