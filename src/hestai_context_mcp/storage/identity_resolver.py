@@ -63,13 +63,30 @@ def resolve_identity(working_dir: str | Path) -> IdentityTuple | None:
             code="identity_config_shape",
             message=f"PSS identity config at {cfg_path} must be a JSON object",
         )
+
+    # Cubic P2 #6: do NOT silently coerce non-string identity fields via
+    # str(...). Per RISK_001 fail-closed default and PROD::I2 fail-closed
+    # identity safety, a malformed identity.json (string fields that are
+    # actually int/list/dict) must surface as "no identity configured"
+    # rather than a fabricated IdentityTuple. Return None so callers
+    # (clock_in restore path, clock_out publish path) treat the situation
+    # exactly as if the file were missing.
+    for string_field in ("project_id", "workspace_id", "user_id", "carrier_namespace"):
+        value = raw.get(string_field)
+        if not isinstance(value, str):
+            return None
+    if not isinstance(raw.get("state_schema_version"), int) or isinstance(
+        raw.get("state_schema_version"), bool
+    ):
+        return None
+
     try:
         identity = IdentityTuple(
-            project_id=str(raw["project_id"]),
-            workspace_id=str(raw["workspace_id"]),
-            user_id=str(raw["user_id"]),
-            state_schema_version=int(raw["state_schema_version"]),
-            carrier_namespace=str(raw["carrier_namespace"]),
+            project_id=raw["project_id"],
+            workspace_id=raw["workspace_id"],
+            user_id=raw["user_id"],
+            state_schema_version=raw["state_schema_version"],
+            carrier_namespace=raw["carrier_namespace"],
         )
     except (KeyError, TypeError, ValueError) as e:
         raise IdentityValidationError(
