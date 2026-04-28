@@ -343,29 +343,41 @@ class TestClockOutDuplicateIdempotent:
     """TEST_138."""
 
     def test_clock_out_duplicate_publish_is_idempotent_same_hash(self, tmp_path: Path) -> None:
-        """Re-publishing the same payload hash returns DUPLICATE not FAILED."""
+        """Re-publishing the same payload hash returns DUPLICATE not FAILED.
+
+        Cubic P2 #8 fix: the artifact_id seed is content-addressed on
+        ``session_id|identity|payload_hash`` (clock_out.py:673). Calling
+        ``_clock_in_then_session`` twice generated DIFFERENT sids, so the
+        second publish derived a different artifact_id and never hit
+        duplicate detection — the original test was vacuous. We must
+        REUSE the same session_id (and same role/focus, so v1 payload
+        is identical) across both publish calls.
+        """
 
         from hestai_context_mcp.tools.clock_out import clock_out
 
         _write_identity_config(tmp_path)
-        sid = _clock_in_then_session(tmp_path)
+        sid = _clock_in_then_session(tmp_path, role="impl", focus="task")
 
-        # Pre-seed an artifact with the deterministic id clock_out will derive.
-        # We don't know the id until clock_out builds it, so we let clock_out
-        # publish first, then call clock_out again on a fresh session with the
-        # same content -> should hit duplicate.
+        # First publish.
         result1 = clock_out(session_id=sid, working_dir=str(tmp_path))
         assert result1["portable_publication"]["status"] in {"published", "duplicate"}
+        first_artifact_id = result1["portable_publication"]["artifact_id"]
+        assert first_artifact_id  # sanity: non-empty
 
-        # Second clock_out with identical session content. Re-create session and
-        # session.json with the same role/focus so the v1 payload yields the same
-        # hash.
-        sid2 = _clock_in_then_session(tmp_path)
-        # Ensure we're targeting the same artifact_id by reusing the first
-        # publication's seed: write a manual duplicate via the adapter.
-        # If our derivation is content-stable, clock_out's second call should
-        # observe the existing artifact_id and return DUPLICATE rather than FAILED.
-        # We guard by asserting status is in {published, duplicate}, never failed.
-        result2 = clock_out(session_id=sid2, working_dir=str(tmp_path))
-        assert result2["portable_publication"]["status"] in {"published", "duplicate"}
-        assert result2["portable_publication"]["status"] != "failed"
+        # clock_out removes the active session dir; recreate it with the
+        # SAME sid + same role + same focus so v1 payload hash and
+        # artifact_id seed are identical to the first call.
+        _write_session(tmp_path, sid, role="impl", focus="task")
+
+        # Second publish — content-addressed artifact_id matches the
+        # already-on-disk artifact, so the adapter returns DUPLICATE.
+        result2 = clock_out(session_id=sid, working_dir=str(tmp_path))
+        publication2 = result2["portable_publication"]
+        assert publication2["artifact_id"] == first_artifact_id, (
+            "duplicate test requires identical artifact_ids; "
+            f"got {publication2['artifact_id']!r} != {first_artifact_id!r}"
+        )
+        # The §INTEGRATION_PLAN R9 idempotent-on-same-hash contract:
+        # the second publish MUST report status="duplicate".
+        assert publication2["status"] == "duplicate"
