@@ -81,20 +81,53 @@ class TestClockOutLocalArchiveSeparable:
     def test_clock_out_local_archive_success_independent_from_portable_publish(
         self, tmp_path: Path
     ) -> None:
-        """Local archive completes regardless of publish outcome."""
+        """Local archive completes regardless of publish outcome.
+
+        Cubic P3 #10 fix: previously this test seeded a session whose
+        ``transcript_path`` was None, which short-circuited the entire
+        archive/redaction branch — the test only verified the
+        no-archive path. To genuinely cover "local archive success
+        independent from portable publish" we seed a real transcript
+        file and assert archive_path is non-null and the on-disk
+        archive actually exists.
+        """
         from hestai_context_mcp.tools.clock_out import clock_out
+
+        # Seed a small transcript so the archive/redaction branch runs.
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(
+            json.dumps({"role": "user", "content": "hi"}) + "\n",
+            encoding="utf-8",
+        )
 
         # No identity configured -> publish is skipped, but archive flow runs.
         sid = "session-localonly"
-        _write_session(tmp_path, sid, role="impl", focus="task")
+        active = tmp_path / ".hestai" / "state" / "sessions" / "active" / sid
+        active.mkdir(parents=True, exist_ok=True)
+        session_data: dict[str, Any] = {
+            "session_id": sid,
+            "role": "impl",
+            "focus": "task",
+            "branch": "main",
+            "transcript_path": str(transcript),
+            "created_at": "2026-04-26T00:00:00+00:00",
+        }
+        (active / "session.json").write_text(json.dumps(session_data))
 
         result = clock_out(session_id=sid, working_dir=str(tmp_path))
 
         assert result["status"] == "success"
+        # Archive branch genuinely ran: archive_path is non-null and the file exists.
+        assert result["archive_path"] is not None
+        assert Path(result["archive_path"]).exists()
         # Portable publication block exists and is structured even without identity.
         assert "portable_publication" in result
         assert "unpublished_memory_exists" in result
         assert isinstance(result["unpublished_memory_exists"], bool)
+        # Publication is skipped because no identity; archive succeeded
+        # independently per R7 (local archive separable from publish).
+        assert result["portable_publication"]["status"] == "failed"
+        assert result["portable_publication"]["artifact_id"] is None
 
 
 @pytest.mark.integration
