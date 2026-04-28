@@ -264,6 +264,14 @@ def clock_out(
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     if transcript_path and transcript_path.exists():
+        # Cubic P1 #3: ``dest`` must be initialised BEFORE the try block so
+        # the cleanup handler does not raise UnboundLocalError when an
+        # earlier statement (e.g., focus.replace on a None focus) raises
+        # before the assignment ``dest = archive_dir / archive_filename``
+        # is reached. PROD::I1 SESSION_LIFECYCLE_INTEGRITY + PROD::I4
+        # STRUCTURED_RETURN_SHAPES require a structured response, not an
+        # unstructured UnboundLocalError leak.
+        dest: Path | None = None
         try:
             timestamp = datetime.now(UTC).strftime("%Y-%m-%d")
             focus = session_data.get("focus", "general")
@@ -285,7 +293,7 @@ def clock_out(
             # Best-effort cleanup of any partial dest file so no
             # half-redacted content lingers on disk.
             try:
-                if dest.exists():
+                if dest is not None and dest.exists():
                     dest.unlink()
             except OSError:  # pragma: no cover — defensive
                 pass
