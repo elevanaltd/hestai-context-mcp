@@ -271,7 +271,10 @@ def clock_in(
 
 
 def _empty_portable_state(
-    *, restore_status: str, error: dict[str, Any] | None = None
+    *,
+    restore_status: str,
+    error: dict[str, Any] | None = None,
+    snapshot_error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "restore_status": restore_status,
@@ -280,6 +283,7 @@ def _empty_portable_state(
         "tombstone_count": 0,
         "snapshot_path": None,
         "error": error,
+        "snapshot_error": snapshot_error,
     }
 
 
@@ -443,16 +447,35 @@ def _restore_portable_state(*, working_dir_path: Path, session_id: str) -> dict[
         )
 
     # Refs included in the snapshot are the post-tombstone memory refs.
-    accepted_ids = {r["artifact_id"] for r in projection["artifact_refs"]}
-    accepted_refs = tuple(r for r in memory_refs if r.artifact_id in accepted_ids)
-
-    snapshot_path = create_session_snapshot(
-        working_dir=working_dir_path,
-        session_id=session_id,
-        identity=identity,
-        artifact_refs=accepted_refs,
-        projection_payload=projection,
-    )
+    # Cubic P1 #1: both the dict comprehension and the create_session_snapshot
+    # call can raise (KeyError, TypeError, OSError on disk-full / permission
+    # errors). Local session creation already succeeded, so we surface
+    # snapshot-write failure via a structured ``snapshot_error`` field rather
+    # than letting it propagate (PROD::I4 STRUCTURED_RETURN_SHAPES; parallels
+    # the A2 audit-on-skip pattern).
+    snapshot_path: str | None = None
+    snapshot_error: dict[str, Any] | None = None
+    accepted_refs: tuple[Any, ...] = ()
+    try:
+        accepted_ids = {r["artifact_id"] for r in projection["artifact_refs"]}
+        accepted_refs = tuple(r for r in memory_refs if r.artifact_id in accepted_ids)
+        path = create_session_snapshot(
+            working_dir=working_dir_path,
+            session_id=session_id,
+            identity=identity,
+            artifact_refs=accepted_refs,
+            projection_payload=projection,
+        )
+        snapshot_path = str(path)
+    except (OSError, KeyError, TypeError, ValueError) as e:
+        snapshot_error = {
+            "code": "snapshot_write_failed",
+            "message": f"failed to write session snapshot: {e}",
+        }
+        # accepted_refs may be empty if the comprehension itself raised; the
+        # post-tombstone count below falls back to the memory_refs count.
+        if not accepted_refs:
+            accepted_refs = tuple(memory_refs)
 
     return {
         "restore_status": "ok",
@@ -465,8 +488,9 @@ def _restore_portable_state(*, working_dir_path: Path, session_id: str) -> dict[
         },
         "artifact_count": len(accepted_refs),
         "tombstone_count": len(tombstones),
-        "snapshot_path": str(snapshot_path),
+        "snapshot_path": snapshot_path,
         "error": None,
+        "snapshot_error": snapshot_error,
     }
 
 
