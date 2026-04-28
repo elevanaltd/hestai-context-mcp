@@ -134,8 +134,13 @@ def validate_identity_tuple(identity: IdentityTuple) -> IdentityTuple:
     for field in ("project_id", "workspace_id", "user_id", "carrier_namespace"):
         _check_string_component(getattr(identity, field), field=field)
 
+    # Cubic P1 #5: bool subclasses int, so ``isinstance(int)`` would
+    # silently accept True/False (True → 1 passes the supported-version
+    # membership check). Reject bool explicitly before the int check so
+    # PROD::I2 fail-closed identity validation rejects all non-int types.
     if (
-        not isinstance(identity.state_schema_version, int)
+        isinstance(identity.state_schema_version, bool)
+        or not isinstance(identity.state_schema_version, int)
         or identity.state_schema_version <= 0
         or identity.state_schema_version not in SUPPORTED_SCHEMA_VERSIONS
     ):
