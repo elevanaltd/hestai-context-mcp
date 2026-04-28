@@ -68,8 +68,26 @@ class RestoreError(Exception):
         Exception.__init__(self, self.message)
 
 
-def _check_string_component(value: str, *, field: str) -> None:
-    """Validate a single identity string component (R3)."""
+def _check_string_component(value: object, *, field: str) -> None:
+    """Validate a single identity string component (R3).
+
+    Cubic P1 #2: explicitly reject non-string types BEFORE any string
+    method is called. Without this gate, a non-string truthy value
+    (e.g., int, list, dict) would reach ``value.strip()`` and raise
+    an unstructured ``AttributeError``. Per PROD::I2 fail-closed
+    identity validation and RISK_001, the structured error code is
+    ``invalid_identity_component_type``.
+    """
+
+    if not isinstance(value, str):
+        raise IdentityValidationError(
+            code="invalid_identity_component_type",
+            message=(
+                f"identity component {field!r} must be a string, "
+                f"got {type(value).__name__}"
+            ),
+            field=field,
+        )
 
     if not value or not value.strip():
         raise IdentityValidationError(
