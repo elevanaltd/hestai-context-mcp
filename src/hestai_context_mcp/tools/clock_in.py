@@ -446,6 +446,13 @@ def _restore_portable_state(*, working_dir_path: Path, session_id: str) -> dict[
             error={"code": e.code, "message": e.message},
         )
 
+    # Cubic P2 #2 (rework cycle 3): ``artifact_count`` is the post-tombstone
+    # count, which is authoritatively present in ``projection["artifact_refs"]``
+    # (the projection builder already applied tombstones per R8). Compute it
+    # BEFORE the snapshot try-block so the count is independent of snapshot
+    # success/failure and never falls back to pre-tombstone memory_refs.
+    artifact_count = len(projection["artifact_refs"])
+
     # Refs included in the snapshot are the post-tombstone memory refs.
     # Cubic P1 #1: both the dict comprehension and the create_session_snapshot
     # call can raise (KeyError, TypeError, OSError on disk-full / permission
@@ -455,7 +462,6 @@ def _restore_portable_state(*, working_dir_path: Path, session_id: str) -> dict[
     # the A2 audit-on-skip pattern).
     snapshot_path: str | None = None
     snapshot_error: dict[str, Any] | None = None
-    accepted_refs: tuple[Any, ...] = ()
     try:
         accepted_ids = {r["artifact_id"] for r in projection["artifact_refs"]}
         accepted_refs = tuple(r for r in memory_refs if r.artifact_id in accepted_ids)
@@ -472,10 +478,6 @@ def _restore_portable_state(*, working_dir_path: Path, session_id: str) -> dict[
             "code": "snapshot_write_failed",
             "message": f"failed to write session snapshot: {e}",
         }
-        # accepted_refs may be empty if the comprehension itself raised; the
-        # post-tombstone count below falls back to the memory_refs count.
-        if not accepted_refs:
-            accepted_refs = tuple(memory_refs)
 
     return {
         "restore_status": "ok",
@@ -486,7 +488,7 @@ def _restore_portable_state(*, working_dir_path: Path, session_id: str) -> dict[
             "state_schema_version": identity.state_schema_version,
             "carrier_namespace": identity.carrier_namespace,
         },
-        "artifact_count": len(accepted_refs),
+        "artifact_count": artifact_count,
         "tombstone_count": len(tombstones),
         "snapshot_path": snapshot_path,
         "error": None,
