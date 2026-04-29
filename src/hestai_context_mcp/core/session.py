@@ -283,11 +283,20 @@ class SessionManager:
 
         Args:
             state_real: Path to the .hestai-state/ directory.
+
+        ADR-0013 §MIGRATION_PLAN FIRST_RUN_DIRECTORY_CREATION: clock_in
+        also creates the PSS portable subtree (outbox + snapshots) so
+        the LocalFilesystemAdapter has somewhere to write. get_context
+        is forbidden from creating these directories (purity invariant
+        in test_get_context_purity.py).
         """
         (state_real / "sessions" / "active").mkdir(parents=True, exist_ok=True)
         (state_real / "sessions" / "archive").mkdir(parents=True, exist_ok=True)
         (state_real / "context").mkdir(parents=True, exist_ok=True)
         (state_real / "context" / "state").mkdir(parents=True, exist_ok=True)
+        # PSS portable directories (R5 + R7). Created at clock_in time.
+        (state_real / "portable" / "outbox").mkdir(parents=True, exist_ok=True)
+        (state_real / "portable" / "snapshots").mkdir(parents=True, exist_ok=True)
 
     def _ensure_state_symlink(self, state_link: Path, state_real: Path) -> None:
         """Create .hestai/state symlink pointing to ../.hestai-state.

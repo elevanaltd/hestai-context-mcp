@@ -1,0 +1,58 @@
+"""Portable Session State (PSS) storage package — ADR-0013 B1 foundation.
+
+Re-exports the stable type and protocol contract for ADR-0013 Portable
+Session State. Concrete adapters (currently only LocalFilesystemAdapter)
+land alongside; remote carriers are explicitly out of scope per R12 and
+the B2_START_BLOCKERS in the B1 BUILD-PLAN.
+
+Per CRS C1 the signatures here MUST match BUILD-PLAN §PROTOCOL_SIGNATURES
+verbatim. Any drift requires CE re-consult per the B1→B2 arbitration record.
+"""
+
+from __future__ import annotations
+
+from hestai_context_mcp.storage.local_filesystem import LocalFilesystemAdapter
+from hestai_context_mcp.storage.protocol import StorageAdapter
+from hestai_context_mcp.storage.types import (
+    ArtifactKind,
+    ArtifactRef,
+    IdentityTuple,
+    PortableArtifact,
+    PortableMemoryArtifact,
+    PortableNamespace,
+    PublishAck,
+    PublishStatus,
+    RedactionProvenance,
+    StateClassification,
+    StorageCapabilities,
+    TombstoneArtifact,
+    WritePrecondition,
+)
+
+#: G1 (CIV) — canonical positive marker that the B1 layering chain is
+#: sealed. The post-B2 quality gate chain (TMG -> CRS -> CE -> CIV)
+#: introspects this constant to confirm B1's structural invariants are
+#: in force. Future B2 work that adds adapters MUST flip this flag (or
+#: replace it with a version-tagged equivalent) so the chain catches
+#: layering changes instead of silently accepting drift.
+B1_LAYERING_FROZEN: bool = True
+
+
+__all__ = [
+    "ArtifactKind",
+    "ArtifactRef",
+    "B1_LAYERING_FROZEN",
+    "IdentityTuple",
+    "LocalFilesystemAdapter",
+    "PortableArtifact",
+    "PortableMemoryArtifact",
+    "PortableNamespace",
+    "PublishAck",
+    "PublishStatus",
+    "RedactionProvenance",
+    "StateClassification",
+    "StorageAdapter",
+    "StorageCapabilities",
+    "TombstoneArtifact",
+    "WritePrecondition",
+]
