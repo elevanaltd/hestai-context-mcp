@@ -216,11 +216,10 @@ These aspects are important but negotiable within the constraints of the immutab
 | A1 | Stdio subprocess transport is sufficient for all consumers | ADR-0353 | Need daemon/network transport, adds operational complexity | 85% | HIGH | Workbench integration testing |
 | A2 | JSONL learnings index scales to hundreds of sessions | Implementation choice | Need database or indexed storage | 80% | MEDIUM | Load test at 500+ sessions |
 | A3 | Transcript parsing adapter pattern covers future providers | Architecture decision | New provider requires new parser, but pattern supports it | 90% | LOW | Add parser when new provider appears |
-| A4 | RedactionEngine credential patterns cover real-world leaks | Security design | Undetected credential type persists in archive | 75% | CRITICAL | Periodic audit against new credential formats |
+| A4 | RedactionEngine credential patterns cover real-world leaks | Security design | Undetected credential type persists in archive | 80% | CRITICAL | Periodic audit against new credential formats Adversarial review cadence: each minor release OR on new provider adapter. |
 | A5 | get_context response is sufficient for Payload Compiler Position 3 | Interface contract | Compiler needs fields not provided, requires contract revision | 80% | HIGH | First Payload Compiler integration |
-| A6 | Single .hestai/ directory structure works for all project layouts | Convention | Monorepo or non-standard layouts need different discovery | 75% | MEDIUM | Test with 3+ project structures |
-| A7 | Phase 1 (4 tools) covers the minimum viable context engine | Harvest scope | Missing tool blocks Workbench integration | 85% | HIGH | Workbench Step 3A integration |
-| A8 | Focus resolution from branch names provides useful session context | Implementation | Branch names are not meaningful, focus is always "general" | 70% | LOW | Observe focus values in real sessions |
+| A6 | Portable state default is LocalFilesystem; multi-dir continuity provided by StorageAdapter protocol + IdentityTuple per ADR-0013 | ADR-0013 | Single-dir default fails for forks/worktrees/cross-machine — but ADR-0013 covers those cases | 90% | HIGH | Production exercise via PR #17 (853 tests, 91.20% coverage) |
+| A7 | Focus resolution from branch names provides useful session context | Implementation | Branch names are not meaningful, focus is always "general" | 70% | LOW | Observe focus values in real sessions |
 
 ### CRITICAL ASSUMPTIONS (Must validate before next phase)
 
@@ -254,13 +253,14 @@ These aspects are important but negotiable within the constraints of the immutab
 
 ## SECTION 6: CURRENT PHASE ASSESSMENT
 
-**Phase**: B1 (First functional build complete)
+**Phase**: B1 (Phase 1 + Phase 1.5 + PSS B1 complete; Phase 2 pending workbench integration)
 
 **What exists**:
 - 4 MCP tools operational: clock_in, clock_out, get_context, submit_review
 - Core modules: SessionManager, ContextSteward, RedactionEngine, FocusResolver, GitStateDetector
 - Transcript parsing with provider adapter pattern
-- 361 tests, 89% coverage, Python 3.11/3.12 CI
+- Portable session state (StorageAdapter, IdentityTuple, PortableArtifact union) per ADR-0013 B1 (PR #17, merged 2026-04-29)
+- 853 tests, 91.20% coverage, Python 3.11/3.12 CI
 - All quality gates green (ruff, black, mypy, pytest)
 - Product North Star (this document) established
 
