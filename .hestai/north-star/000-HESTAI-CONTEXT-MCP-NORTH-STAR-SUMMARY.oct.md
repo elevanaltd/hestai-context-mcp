@@ -7,6 +7,7 @@ META:
   APPROVED_BY::"Human operator (2026-04-17)"
   FULL_DOCUMENT::"000-HESTAI-CONTEXT-MCP-NORTH-STAR.md"
   COMPRESSION::"311 to 95 lines (3.3:1)"
+  LAST_UPDATED::"2026-04-30"
 §1::IDENTITY
 PURPOSE::"Persistent memory and environmental context for AI-assisted development sessions"
 ROLE_IN_ECOSYSTEM::"Memory and Environment in Three-Service Model (ADR-0353)"
@@ -23,17 +24,17 @@ I6::"LEGACY_INDEPENDENCE<PRINCIPLE::no_runtime_or_install_dependency_on_hestai_m
 A1::"STDIO_TRANSPORT_SUFFICIENT[85%] HIGH_CONFIDENCE"
 A2::"JSONL_LEARNINGS_SCALES[80%] MEDIUM_CONFIDENCE"
 A3::"ADAPTER_PATTERN_COVERS_PROVIDERS[90%] HIGH_CONFIDENCE"
-A4::"REDACTION_PATTERN_COVERAGE[75%] CRITICAL"
+A4::"REDACTION_PATTERN_COVERAGE[80%] CRITICAL<CADENCE::adversarial_review_each_minor_release_or_on_new_provider_adapter>"
 A5::"GET_CONTEXT_SUFFICIENT_FOR_POSITION_3[80%] CRITICAL"
-A6::"SINGLE_HESTAI_DIR_WORKS[75%] MEDIUM_CONFIDENCE"
-A7::"PHASE_1_IS_MINIMUM_VIABLE[85%] HIGH_CONFIDENCE"
-A8::"BRANCH_FOCUS_RESOLUTION_USEFUL[70%] LOW_CONFIDENCE"
+A6::"PORTABLE_STATE_DEFAULT_LOCAL_FILESYSTEM[90%] HIGH_CONFIDENCE"
+A7::"BRANCH_FOCUS_RESOLUTION_USEFUL[70%] LOW_CONFIDENCE"
 §4::SCOPE_BOUNDARIES
 IS::[
   "session lifecycle management (clock_in, clock_out)",
   "context synthesis engine (.hestai state, North Stars, git state)",
   "learnings extraction pipeline (transcript parsing, redaction, indexing)",
-  "review infrastructure (structured PR verdicts, CI gate clearing)"
+  "review infrastructure (structured PR verdicts, CI gate clearing)",
+  "portable session state (StorageAdapter, IdentityTuple, PortableArtifact union) per ADR-0013"
 ]
 IS_NOT::[
   "agent identity or governance (Vault owns)",
@@ -59,8 +60,13 @@ COVERAGE::[
   IMMUTABLE::"85_percent_minimum_CI_enforced",
   FLEXIBLE::test_strategies
 ]
+STORAGE_BACKEND::[
+  IMMUTABLE::StorageAdapter_protocol,
+  FLEXIBLE::adapter_implementation,
+  NEGOTIABLE::carrier_namespace_layout
+]
 §6::GATES
-GATES::"D1[DONE] B1[DONE_Phase_1] B2[PENDING_Phase_2_workbench_integration] B3[FUTURE] B4[FUTURE]"
+GATES::"D1[DONE] B1[DONE_Phase_1+Phase_1.5+PSS_B1_2026-04-29] B2[PENDING_workbench_Phase_3C_integration] B3[FUTURE_NS_injection_unification] B4[FUTURE_git_hooks_legacy_deprecation]"
 §7::ESCALATION
 ESCALATION_ROUTING::[
   requirements_steward::[
@@ -87,7 +93,8 @@ LOAD_FULL_NORTH_STAR_IF::[
   "side effect or mutation or get_context writes = I5 purity violation",
   "import hestai_mcp or legacy dependency = I6 independence breach",
   "scope boundary or feature creep = identity boundary question",
-  "B2 or Phase 2 or workbench integration = decision gate approaching"
+  "B2 or Phase 2 or workbench integration = decision gate approaching",
+  "identity tuple or carrier_namespace or storage adapter or multi_directory = ADR-0013 boundary question"
 ]
 §9::PROTECTION
 IF::agent_detects_work_contradicting_North_Star
