@@ -727,6 +727,134 @@ class TestReturnShape:
         # Top-level and nested values must agree while both forms coexist.
         assert result["error_type"] == result["validation"]["error_type"]
 
+    # ------------------------------------------------------------------
+    # AC1 surface coverage: commit_sha echo on remaining error branches
+    # (gate-validation failure, missing token, timeout). Per TMG verdict
+    # on f6c6fdc — issue #30.
+    # ------------------------------------------------------------------
+    def test_error_path_gate_validation_failure_includes_top_level_commit_sha(self):
+        """Gate-validation error path exposes commit_sha at top level (echo)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        # Patch _check_would_clear_gate to force the format-validation
+        # error branch (status=error, validation.would_clear_gate=False).
+        with patch(
+            "hestai_context_mcp.tools.submit_review._check_would_clear_gate",
+            return_value=False,
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                commit_sha="gatefail123",
+                dry_run=True,
+            )
+        assert result["status"] == "error"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "gatefail123"
+
+    def test_error_path_gate_validation_failure_includes_top_level_error_type(self):
+        """Gate-validation errors expose error_type='validation' at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch(
+            "hestai_context_mcp.tools.submit_review._check_would_clear_gate",
+            return_value=False,
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=True,
+            )
+        assert result["status"] == "error"
+        assert "error_type" in result
+        assert result["error_type"] == "validation"
+
+    def test_error_path_missing_token_includes_top_level_commit_sha(self):
+        """Missing-token auth error exposes commit_sha at top level (echo)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                commit_sha="authtest456",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "authtest456"
+
+    def test_error_path_missing_token_includes_top_level_error_type(self):
+        """Missing-token auth error exposes error_type='auth' at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert "error_type" in result
+        assert result["error_type"] == "auth"
+
+    def test_error_path_timeout_includes_top_level_commit_sha(self):
+        """Timeout error path exposes commit_sha at top level (echo)."""
+        import subprocess as sp
+
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run", side_effect=sp.TimeoutExpired("gh", 30)),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                commit_sha="timeout789",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "timeout789"
+
+    def test_error_path_timeout_includes_top_level_error_type(self):
+        """Timeout error path exposes error_type='network' at top level."""
+        import subprocess as sp
+
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run", side_effect=sp.TimeoutExpired("gh", 30)),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert "error_type" in result
+        assert result["error_type"] == "network"
+
     def test_success_path_does_not_include_top_level_error_type(self):
         """Top-level error_type appears ONLY on the error path."""
         from hestai_context_mcp.tools.submit_review import submit_review
