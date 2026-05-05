@@ -275,8 +275,28 @@ def submit_review(
         dry_run: If True, validate format without posting.
 
     Returns:
-        Dict with status, comment_url, validation, and dry_run fields.
-        Error responses include validation.error for diagnosis.
+        Dict with the following top-level fields:
+
+        * ``status`` — ``"ok"`` or ``"error"``.
+        * ``comment_url`` — posted comment URL, or ``None`` when not applicable.
+        * ``commit_sha`` — echo of the input ``commit_sha`` (or ``None`` when
+          not provided). Present on BOTH success and error paths so the
+          workbench DISPATCH RETRY-STRATEGY layer can correlate verdicts with
+          the commit they were recorded against without traversing the
+          response. (Issue #30)
+        * ``error_type`` — present ONLY on the error path. One of
+          ``"validation"``, ``"auth"``, ``"rate_limit"``, ``"network"``.
+          Lifted from the nested ``validation`` block to the top level so
+          retry strategies can branch on a deterministic field path.
+          (Issue #30)
+        * ``validation`` — diagnostic block. ``validation.error`` is present
+          on all error responses. ``validation.error_type`` is RETAINED
+          additively on the post-API failure branch for backwards
+          compatibility; values agree with the top-level ``error_type``.
+          Removal is deferred until either hestai-mcp issue #399 reliability
+          fix lands OR a future Phase 3 sub-scope on a workbench-team signal
+          — DO NOT remove without that coordinated signal.
+        * ``dry_run`` — echo of the ``dry_run`` input.
     """
     # Normalize empty strings to None for internal processing
     annotation = model_annotation if model_annotation else None
@@ -288,6 +308,8 @@ def submit_review(
         return {
             "status": "error",
             "comment_url": None,
+            "commit_sha": sha,
+            "error_type": "validation",
             "validation": {"error": error},
             "dry_run": dry_run,
         }
@@ -309,6 +331,8 @@ def submit_review(
         return {
             "status": "error",
             "comment_url": None,
+            "commit_sha": sha,
+            "error_type": "validation",
             "validation": {
                 "error": "Format validation failed: APPROVED comment does not match gate pattern",
                 "would_clear_gate": False,
@@ -329,6 +353,7 @@ def submit_review(
         return {
             "status": "ok",
             "comment_url": None,
+            "commit_sha": sha,
             "validation": validation,
             "dry_run": True,
         }
@@ -340,9 +365,14 @@ def submit_review(
         return {
             "status": "error",
             "comment_url": None,
+            "commit_sha": sha,
+            "error_type": post_result["error_type"],
             "validation": {
                 **validation,
                 "error": post_result["error"],
+                # Nested form RETAINED for backwards compatibility (issue #30
+                # AC2 ADDITIVE). Mirrors top-level error_type. Removal
+                # deferred — see docstring.
                 "error_type": post_result["error_type"],
             },
             "dry_run": False,
@@ -351,6 +381,7 @@ def submit_review(
     return {
         "status": "ok",
         "comment_url": post_result["comment_url"],
+        "commit_sha": sha,
         "validation": validation,
         "dry_run": False,
     }
