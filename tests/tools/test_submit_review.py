@@ -1104,6 +1104,32 @@ class TestTokenResolution:
         assert result["status"] == "error"
         assert result["error_type"] == "auth"
 
+    def test_gh_auth_unexpected_exception_returns_auth_error(self):
+        """env empty + ``gh auth token`` raises unexpected exception ->
+        auth error (NOT an unhandled crash that would kill the MCP server).
+
+        Per TMG verdict on 73f2672 (continuation 961b3109-72e1-4084-a370-
+        edf70824fa22): the gh-auth-token call is a precondition gate; any
+        failure mode there must produce a structured auth error, not bubble
+        up as an unhandled exception that crashes the stdio subprocess.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run", side_effect=RuntimeError("gh binary corrupted")),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
     def test_gh_auth_timeout_returns_auth_error(self):
         """env empty + ``gh auth token`` times out -> auth error (NOT network).
 
