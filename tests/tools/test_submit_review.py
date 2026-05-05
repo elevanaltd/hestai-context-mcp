@@ -469,10 +469,21 @@ class TestGitHubPosting:
         assert "github.com" in result["comment_url"]
 
     def test_missing_github_token_returns_error(self):
-        """Without GITHUB_TOKEN, posting should fail with auth error."""
+        """Without GITHUB_TOKEN/GH_TOKEN AND no usable ``gh auth token``,
+        posting should fail with an auth error.
+
+        Patches subprocess so the test is deterministic regardless of
+        whether the test host has ``gh`` installed and authenticated.
+        Issue #34 introduces a third lookup tier (``gh auth token``); this
+        test asserts the auth-error contract still holds when ALL three
+        tiers fail.
+        """
         from hestai_context_mcp.tools.submit_review import submit_review
 
-        with patch.dict("os.environ", {}, clear=True):
+        with (
+            patch("subprocess.run", side_effect=FileNotFoundError("gh not installed")),
+            patch.dict("os.environ", {}, clear=True),
+        ):
             result = submit_review(
                 repo="owner/repo",
                 pr_number=1,
@@ -776,10 +787,18 @@ class TestReturnShape:
         assert result["error_type"] == "validation"
 
     def test_error_path_missing_token_includes_top_level_commit_sha(self):
-        """Missing-token auth error exposes commit_sha at top level (echo)."""
+        """Missing-token auth error exposes commit_sha at top level (echo).
+
+        Patches subprocess to deterministically simulate ``gh`` being absent
+        so the third lookup tier (issue #34) cannot accidentally satisfy
+        the precondition on hosts where ``gh auth token`` would succeed.
+        """
         from hestai_context_mcp.tools.submit_review import submit_review
 
-        with patch.dict("os.environ", {}, clear=True):
+        with (
+            patch("subprocess.run", side_effect=FileNotFoundError("gh not installed")),
+            patch.dict("os.environ", {}, clear=True),
+        ):
             result = submit_review(
                 repo="owner/repo",
                 pr_number=1,
@@ -794,10 +813,17 @@ class TestReturnShape:
         assert result["commit_sha"] == "authtest456"
 
     def test_error_path_missing_token_includes_top_level_error_type(self):
-        """Missing-token auth error exposes error_type='auth' at top level."""
+        """Missing-token auth error exposes error_type='auth' at top level.
+
+        Patches subprocess to deterministically simulate ``gh`` being absent
+        (see sibling test for rationale).
+        """
         from hestai_context_mcp.tools.submit_review import submit_review
 
-        with patch.dict("os.environ", {}, clear=True):
+        with (
+            patch("subprocess.run", side_effect=FileNotFoundError("gh not installed")),
+            patch.dict("os.environ", {}, clear=True),
+        ):
             result = submit_review(
                 repo="owner/repo",
                 pr_number=1,
@@ -869,3 +895,316 @@ class TestReturnShape:
         )
         assert result["status"] == "ok"
         assert "error_type" not in result
+
+
+# ---------------------------------------------------------------------------
+# Token-resolution tests (issue #34)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestTokenResolution:
+    """Three-tier token lookup: GITHUB_TOKEN -> GH_TOKEN -> ``gh auth token``.
+
+    Per issue #34: the MCP server runs as a stdio subprocess and does not
+    inherit the operator's ``gh`` keyring credentials. Falling back to
+    ``gh auth token`` lets ``submit_review`` work whenever the operator has
+    authenticated their CLI, without requiring a manual env-var export.
+
+    Security invariants (must hold across ALL tests in this class):
+      - The resolved token MUST NOT appear in any returned dict field.
+      - The resolved token MUST NOT appear in any error message.
+      - Subprocess calls to the real ``gh`` binary MUST be mocked.
+    """
+
+    # The sentinel token value used across this class. Any test that
+    # exercises a successful resolution path MUST assert this string does
+    # NOT appear in the returned result.
+    SENSITIVE_TOKEN = "ghp_SENSITIVE_TOKEN_NEVER_LEAK_xxxxxxxxxxxxxxxx"
+
+    @staticmethod
+    def _post_success_completed(stdout_body: str = '{"html_url": "https://x/y"}'):
+        """Build a CompletedProcess-like double for a successful API post."""
+
+        class _CP:
+            returncode = 0
+            stdout = (
+                "HTTP/2 201 Created\ncontent-type: application/json\n\n" + stdout_body
+            )
+            stderr = ""
+
+        return _CP()
+
+    # ------------------------------------------------------------------
+    # Tier 1: GITHUB_TOKEN env wins; gh subprocess never invoked.
+    # ------------------------------------------------------------------
+    def test_github_token_env_skips_gh_auth_subprocess(self):
+        """When GITHUB_TOKEN is set, the gh-auth-token fallback MUST NOT run."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        recorded_calls: list[list[str]] = []
+
+        def _spy(cmd, *args, **kwargs):
+            recorded_calls.append(list(cmd))
+            return self._post_success_completed()
+
+        with (
+            patch("subprocess.run", side_effect=_spy),
+            patch.dict("os.environ", {"GITHUB_TOKEN": self.SENSITIVE_TOKEN}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        # Only the gh-api post call should be made; never `gh auth token`.
+        assert all(call[:3] != ["gh", "auth", "token"] for call in recorded_calls), (
+            f"gh auth token was unexpectedly invoked when GITHUB_TOKEN was set: "
+            f"{recorded_calls}"
+        )
+        assert result["status"] == "ok"
+
+    # ------------------------------------------------------------------
+    # Tier 2: GH_TOKEN env wins; gh subprocess never invoked.
+    # ------------------------------------------------------------------
+    def test_gh_token_env_skips_gh_auth_subprocess(self):
+        """When GH_TOKEN is set, the gh-auth-token fallback MUST NOT run."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        recorded_calls: list[list[str]] = []
+
+        def _spy(cmd, *args, **kwargs):
+            recorded_calls.append(list(cmd))
+            return self._post_success_completed()
+
+        with (
+            patch("subprocess.run", side_effect=_spy),
+            patch.dict("os.environ", {"GH_TOKEN": self.SENSITIVE_TOKEN}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        assert all(call[:3] != ["gh", "auth", "token"] for call in recorded_calls)
+        assert result["status"] == "ok"
+
+    # ------------------------------------------------------------------
+    # Tier 3: env empty, gh present, gh auth token succeeds.
+    # ------------------------------------------------------------------
+    def test_gh_auth_fallback_succeeds_when_env_empty(self):
+        """env empty + ``gh auth token`` returns 0 with token -> posting proceeds."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        gh_auth_returned = False
+
+        class _AuthCP:
+            returncode = 0
+            stdout = TestTokenResolution.SENSITIVE_TOKEN + "\n"
+            stderr = ""
+
+        def _router(cmd, *args, **kwargs):
+            nonlocal gh_auth_returned
+            if list(cmd[:3]) == ["gh", "auth", "token"]:
+                gh_auth_returned = True
+                return _AuthCP()
+            # API post call
+            return TestTokenResolution._post_success_completed()
+
+        with (
+            patch("subprocess.run", side_effect=_router),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        assert gh_auth_returned, "gh auth token fallback was not invoked"
+        assert result["status"] == "ok"
+
+    # ------------------------------------------------------------------
+    # Tier 3 failures: each should produce the auth error.
+    # ------------------------------------------------------------------
+    def test_gh_not_installed_returns_auth_error(self):
+        """env empty + gh not on PATH -> auth error (FileNotFoundError handled)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run", side_effect=FileNotFoundError("gh not found")),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
+    def test_gh_auth_nonzero_returns_auth_error(self):
+        """env empty + ``gh auth token`` returns non-zero -> auth error."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        class _AuthFailCP:
+            returncode = 1
+            stdout = ""
+            stderr = "not logged in"
+
+        with (
+            patch("subprocess.run", return_value=_AuthFailCP()),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
+    def test_gh_auth_empty_stdout_returns_auth_error(self):
+        """env empty + ``gh auth token`` returns 0 but stdout is whitespace
+        only -> auth error (empty token is not a valid credential)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        class _EmptyCP:
+            returncode = 0
+            stdout = "   \n\t  "
+            stderr = ""
+
+        with (
+            patch("subprocess.run", return_value=_EmptyCP()),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
+    def test_gh_auth_timeout_returns_auth_error(self):
+        """env empty + ``gh auth token`` times out -> auth error (NOT network).
+
+        The gh-auth-token call is a precondition gate, not the network
+        request; classifying its timeout as ``auth`` keeps retry strategies
+        from hammering an unreachable token resolver.
+        """
+        import subprocess as sp
+
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=sp.TimeoutExpired("gh", 5),
+            ),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
+    # ------------------------------------------------------------------
+    # Security: the resolved token must NEVER leak into the response.
+    # ------------------------------------------------------------------
+    def test_resolved_token_does_not_leak_into_response_env_path(self):
+        """Token from GITHUB_TOKEN env MUST NOT appear anywhere in the result."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run", return_value=self._post_success_completed()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": self.SENSITIVE_TOKEN}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert self.SENSITIVE_TOKEN not in repr(result)
+
+    def test_resolved_token_does_not_leak_into_response_gh_path(self):
+        """Token from ``gh auth token`` MUST NOT appear anywhere in the result."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        class _AuthCP:
+            returncode = 0
+            stdout = TestTokenResolution.SENSITIVE_TOKEN + "\n"
+            stderr = ""
+
+        def _router(cmd, *args, **kwargs):
+            if list(cmd[:3]) == ["gh", "auth", "token"]:
+                return _AuthCP()
+            return TestTokenResolution._post_success_completed()
+
+        with (
+            patch("subprocess.run", side_effect=_router),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert self.SENSITIVE_TOKEN not in repr(result)
+
+    # ------------------------------------------------------------------
+    # UX: auth error message names all three lookup paths so operators
+    # can fix the right one.
+    # ------------------------------------------------------------------
+    def test_auth_error_message_names_all_three_lookup_paths(self):
+        """The auth-error message must mention GITHUB_TOKEN, GH_TOKEN, and
+        ``gh auth token`` so operators can diagnose which tier failed."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run", side_effect=FileNotFoundError("gh not found")),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        message = result["validation"]["error"]
+        assert "GITHUB_TOKEN" in message
+        assert "GH_TOKEN" in message
+        assert "gh auth token" in message
