@@ -56,12 +56,18 @@ _AUTH_ERROR_MESSAGE = (
 #     ghp_ (personal), gho_ (OAuth), ghu_ (user-to-server),
 #     ghs_ (server-to-server), ghr_ (refresh) followed by ≥20
 #     [A-Za-z0-9_] characters.
+#   - Fine-grained personal access tokens (2022+): github_pat_ prefix
+#     followed by ≥20 [A-Za-z0-9_] characters. Added per cubic P1
+#     finding on PR #35 — without this alternation, ``gh auth token``
+#     returning a valid fine-grained PAT would be silently rejected.
 #   - Classic 40-char lowercase hex personal access tokens for
 #     accounts that have not rotated since the prefix scheme rolled
 #     out.
 #
 # Compiled once at import time to avoid per-call recompilation.
-_TOKEN_SHAPE_RE = re.compile(r"^(?:gh[pousr]_[A-Za-z0-9_]{20,}|[a-f0-9]{40})$")
+_TOKEN_SHAPE_RE = re.compile(
+    r"^(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|[a-f0-9]{40})$"
+)
 
 
 def _resolve_github_token() -> str | None:

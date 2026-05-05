@@ -1429,3 +1429,43 @@ class TestTokenResolution:
                 dry_run=False,
             )
         assert result["status"] == "ok"
+
+    def test_resolve_accepts_fine_grained_pat_prefix(self):
+        """Fine-grained personal access tokens (github_pat_, 2022+) MUST resolve.
+
+        Per cubic P1 finding on PR #35 HEAD e6382a7: the original guard
+        ``^(?:gh[pousr]_[A-Za-z0-9_]{20,}|[a-f0-9]{40})$`` rejected the
+        ``github_pat_`` prefix entirely, so ``gh auth token`` returning
+        a valid fine-grained PAT would be silently dropped — exactly
+        the false-negative failure mode the PERMISSIVE-on-accepts
+        directive was meant to prevent.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        # github_pat_ + 30 [A-Za-z0-9_] chars; well above the 20-char
+        # minimum the alternation requires.
+        fine_grained_pat = "github_pat_" + "A" * 30
+
+        class _AuthCP:
+            returncode = 0
+            stdout = fine_grained_pat + "\n"
+            stderr = ""
+
+        def _router(cmd, *args, **kwargs):
+            if list(cmd[:3]) == ["gh", "auth", "token"]:
+                return _AuthCP()
+            return TestTokenResolution._post_success_completed()
+
+        with (
+            patch("subprocess.run", side_effect=_router),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "ok"
