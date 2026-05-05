@@ -28,6 +28,68 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_tmg_approval,
 )
 
+# Timeout for the ``gh auth token`` precondition gate. Short by design:
+# the call is a local CLI invocation, not a network request, and a hang
+# here would block every submit_review call until the global gh-api
+# timeout (30 s) fires for an unrelated reason.
+_GH_AUTH_TIMEOUT_SECONDS = 5
+
+# Auth error message lists ALL three lookup tiers so operators can
+# diagnose which one needs configuring. The token value itself is NEVER
+# included in this message (security invariant — see _resolve_github_token).
+_AUTH_ERROR_MESSAGE = (
+    "GitHub credentials not found. Set GITHUB_TOKEN or GH_TOKEN environment "
+    "variable, or authenticate the gh CLI (so `gh auth token` returns a token)."
+)
+
+
+def _resolve_github_token() -> str | None:
+    """Resolve a GitHub token via three-tier lookup.
+
+    Lookup order (first hit wins):
+      1. ``GITHUB_TOKEN`` environment variable.
+      2. ``GH_TOKEN`` environment variable.
+      3. ``gh auth token`` subprocess (5 s timeout) — uses the operator's
+         authenticated ``gh`` CLI keyring. The MCP server runs as a stdio
+         subprocess and does NOT inherit gh keyring credentials, so this
+         tier is what makes the tool usable for agents who have not
+         exported a token into the launch environment. (Issue #34)
+
+    Returns:
+        The resolved token string, or ``None`` if no tier supplied a token.
+
+    Security:
+        The returned value is opaque — callers MUST NOT log it, embed it
+        in error messages, or include it in any structured response. This
+        helper exists precisely so that token handling is funneled through
+        a single audited code path.
+    """
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        return token
+
+    # Tier 3: ``gh auth token``. Catch ``Exception`` so any failure mode
+    # here (gh missing → FileNotFoundError, gh hung → TimeoutExpired,
+    # gh corrupted → OSError, anything else → unhandled) becomes a clean
+    # None return rather than an exception that would crash the stdio
+    # MCP server. ``BaseException`` is intentionally NOT caught — a
+    # KeyboardInterrupt or SystemExit during this call should propagate.
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=_GH_AUTH_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    candidate = (result.stdout or "").strip()
+    return candidate or None
+
 
 def _validate_inputs(
     repo: str,
@@ -167,11 +229,10 @@ def _post_comment(repo: str, pr_number: int, comment: str) -> dict[str, Any]:
     Returns:
         Dict with success status and comment URL or error info.
     """
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if not token:
+    if _resolve_github_token() is None:
         return {
             "success": False,
-            "error": "GITHUB_TOKEN or GH_TOKEN environment variable not set",
+            "error": _AUTH_ERROR_MESSAGE,
             "error_type": "auth",
         }
 
@@ -263,6 +324,24 @@ def submit_review(
     Supports dry-run validation without posting.
 
     Fail-closed: if format validation fails, the comment is NOT posted.
+
+    Authentication (issue #34):
+        When posting (``dry_run=False``), the tool resolves a GitHub token
+        via three-tier lookup, in order:
+
+          1. ``GITHUB_TOKEN`` environment variable.
+          2. ``GH_TOKEN`` environment variable.
+          3. ``gh auth token`` subprocess (5 s timeout) — uses the
+             operator's authenticated ``gh`` CLI keyring.
+
+        The MCP server runs as a stdio subprocess and does NOT inherit
+        the operator's ``gh`` keyring, so tier 3 is what makes the tool
+        usable for agents that have not exported a token into the launch
+        environment. The resolved token is opaque to the caller — it is
+        never logged, returned, or embedded in error messages. If all
+        three tiers fail, the call returns an ``auth`` error whose
+        message names all three lookup paths so the operator can
+        diagnose which tier needs configuring.
 
     Args:
         repo: Repository in owner/name format (e.g., 'elevanaltd/HestAI-MCP').

@@ -926,9 +926,7 @@ class TestTokenResolution:
 
         class _CP:
             returncode = 0
-            stdout = (
-                "HTTP/2 201 Created\ncontent-type: application/json\n\n" + stdout_body
-            )
+            stdout = "HTTP/2 201 Created\ncontent-type: application/json\n\n" + stdout_body
             stderr = ""
 
         return _CP()
