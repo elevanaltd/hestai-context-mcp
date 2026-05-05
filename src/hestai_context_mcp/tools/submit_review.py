@@ -11,6 +11,7 @@ Fail-closed: validates format before posting.
 
 import json
 import os
+import re
 import subprocess
 from typing import Any
 
@@ -41,6 +42,26 @@ _AUTH_ERROR_MESSAGE = (
     "GitHub credentials not found. Set GITHUB_TOKEN or GH_TOKEN environment "
     "variable, or authenticate the gh CLI (so `gh auth token` returns a token)."
 )
+
+# Token-shape sanity guard for the ``gh auth token`` tier (issue #34
+# CE rework). The aim is NOT cryptographic validation — it is to reject
+# obviously-malformed payloads (error text echoed to stdout, HTML
+# wrappers, multi-line junk) so the failure-mode contract collapses
+# inside _resolve_github_token rather than propagating to the GitHub
+# API. PERMISSIVE on accepts: a false negative breaks the user's
+# workflow on a perfectly valid credential.
+#
+# Accepted shapes:
+#   - Modern gh prefixes (per GitHub's published taxonomy, 2021-04+):
+#     ghp_ (personal), gho_ (OAuth), ghu_ (user-to-server),
+#     ghs_ (server-to-server), ghr_ (refresh) followed by ≥20
+#     [A-Za-z0-9_] characters.
+#   - Classic 40-char lowercase hex personal access tokens for
+#     accounts that have not rotated since the prefix scheme rolled
+#     out.
+#
+# Compiled once at import time to avoid per-call recompilation.
+_TOKEN_SHAPE_RE = re.compile(r"^(?:gh[pousr]_[A-Za-z0-9_]{20,}|[a-f0-9]{40})$")
 
 
 def _resolve_github_token() -> str | None:
@@ -88,7 +109,16 @@ def _resolve_github_token() -> str | None:
         return None
 
     candidate = (result.stdout or "").strip()
-    return candidate or None
+    if not candidate:
+        return None
+
+    # Shape sanity guard (CE rework): reject malformed payloads BEFORE
+    # they reach the GitHub API. Silent rejection — the candidate is
+    # NEVER logged or surfaced (security invariant).
+    if not _TOKEN_SHAPE_RE.match(candidate):
+        return None
+
+    return candidate
 
 
 def _validate_inputs(
