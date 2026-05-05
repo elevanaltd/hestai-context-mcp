@@ -1232,3 +1232,200 @@ class TestTokenResolution:
         assert "GITHUB_TOKEN" in message
         assert "GH_TOKEN" in message
         assert "gh auth token" in message
+
+    # ------------------------------------------------------------------
+    # Token-shape validation (CE rework on PR #35).
+    #
+    # Per CE CONDITIONAL verdict on commit 8732750: the helper must
+    # collapse a malformed ``gh auth token`` payload (error text echoed
+    # to stdout, HTML wrapper, multi-line junk, too-short candidate) to
+    # ``None`` BEFORE the precondition gate proceeds, rather than
+    # passing the malformed string through and letting it fail
+    # downstream at the GitHub API. Permissive on accepts (false
+    # negatives on a real token break the user's workflow); strict on
+    # obvious garbage.
+    #
+    # Accepted shapes:
+    #   - Modern gh prefixes: ghp_, gho_, ghu_, ghs_, ghr_ + ≥20
+    #     [A-Za-z0-9_] chars (covers ghp_ personal tokens, gho_ OAuth
+    #     tokens, ghu_ user-to-server, ghs_ server-to-server, ghr_
+    #     refresh tokens — per GitHub's published prefix taxonomy).
+    #   - Classic 40-char hex personal access tokens for accounts that
+    #     have not rotated since the prefix scheme rolled out.
+    # ------------------------------------------------------------------
+    def test_gh_auth_malformed_error_text_rejected(self):
+        """``gh auth token`` returning error text on stdout collapses to auth error."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        class _MalformedCP:
+            returncode = 0  # gh erroneously exited 0 with junk on stdout
+            stdout = "error: not authenticated. Run `gh auth login`.\n"
+            stderr = ""
+
+        with (
+            patch("subprocess.run", return_value=_MalformedCP()),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
+    def test_gh_auth_html_payload_rejected(self):
+        """``gh auth token`` returning an HTML wrapper collapses to auth error.
+
+        Defensive case: a misconfigured proxy or man-in-the-middle could
+        in principle cause gh to surface HTML on stdout. Token-shape
+        validation MUST reject it.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        class _HtmlCP:
+            returncode = 0
+            stdout = "<html><body>401 Unauthorized</body></html>"
+            stderr = ""
+
+        with (
+            patch("subprocess.run", return_value=_HtmlCP()),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
+    def test_gh_auth_multiline_payload_rejected(self):
+        """A multi-line stdout (token plus diagnostic chatter) collapses to
+        auth error — the helper must not echo a multi-line credential."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        class _MultilineCP:
+            returncode = 0
+            stdout = "ghp_validlookingtokenxxxxxxxxxxxxxxxx\nWARN: refresh recommended\n"
+            stderr = ""
+
+        with (
+            patch("subprocess.run", return_value=_MultilineCP()),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
+    def test_gh_auth_too_short_candidate_rejected(self):
+        """A candidate shorter than the minimum modern-prefix length is rejected."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        class _ShortCP:
+            returncode = 0
+            stdout = "ghp_short\n"  # ghp_ + 5 chars; modern prefix needs ≥20 trailing
+            stderr = ""
+
+        with (
+            patch("subprocess.run", return_value=_ShortCP()),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert result["error_type"] == "auth"
+
+    def test_gh_auth_classic_40hex_pat_accepted(self):
+        """Classic 40-char hex personal access tokens MUST still resolve.
+
+        Older gh installs that have not rotated credentials since the
+        prefix scheme rolled out (2021-04) still emit 40-hex PATs. We
+        MUST accept these; a false negative here breaks the user's
+        workflow on a perfectly valid credential.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        classic_pat = "0123456789abcdef0123456789abcdef01234567"  # 40 hex chars
+        assert len(classic_pat) == 40
+
+        class _AuthCP:
+            returncode = 0
+            stdout = classic_pat + "\n"
+            stderr = ""
+
+        def _router(cmd, *args, **kwargs):
+            if list(cmd[:3]) == ["gh", "auth", "token"]:
+                return _AuthCP()
+            return TestTokenResolution._post_success_completed()
+
+        with (
+            patch("subprocess.run", side_effect=_router),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "ok"
+
+    def test_gh_auth_modern_prefix_accepted(self):
+        """A canonical modern ``ghp_…`` token MUST resolve cleanly.
+
+        Belt-and-braces with the existing fallback success test, which
+        also uses a ghp_-prefixed sentinel; this test pins the contract
+        explicitly so a future change to the sentinel value does not
+        silently weaken the modern-prefix accept path.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        # ghp_ + 36 [A-Za-z0-9_] chars — comfortably above the 20-char
+        # minimum and within the realistic published shape.
+        modern_token = "ghp_" + "A" * 36
+
+        class _AuthCP:
+            returncode = 0
+            stdout = modern_token + "\n"
+            stderr = ""
+
+        def _router(cmd, *args, **kwargs):
+            if list(cmd[:3]) == ["gh", "auth", "token"]:
+                return _AuthCP()
+            return TestTokenResolution._post_success_completed()
+
+        with (
+            patch("subprocess.run", side_effect=_router),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+        assert result["status"] == "ok"
