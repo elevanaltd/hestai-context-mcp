@@ -534,7 +534,13 @@ class TestGitHubPosting:
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestReturnShape:
-    """Verify the return dict matches the ADR-0353 contract."""
+    """Verify the return dict matches the ADR-0353 contract.
+
+    Issue #30 extends the contract: top-level ``commit_sha`` on BOTH success and
+    error paths, top-level ``error_type`` on the error path. The nested
+    ``validation.error_type`` form is RETAINED additively for backwards
+    compatibility (deprecation deferred — see docstring).
+    """
 
     def test_success_return_shape(self):
         """Successful dry_run must have: status, comment_url, validation, dry_run."""
@@ -569,3 +575,297 @@ class TestReturnShape:
         assert result["status"] == "error"
         assert "validation" in result
         assert "error" in result["validation"]
+
+    # ------------------------------------------------------------------
+    # Issue #30 AC1: top-level commit_sha on BOTH success and error paths
+    # ------------------------------------------------------------------
+    def test_success_path_includes_top_level_commit_sha_echo(self):
+        """When commit_sha is provided, success returns echo it at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Verified.",
+            commit_sha="abc1234def5678",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "abc1234def5678"
+
+    def test_success_path_commit_sha_none_when_not_provided(self):
+        """When commit_sha is omitted, success path exposes commit_sha=None at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Verified.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert "commit_sha" in result
+        assert result["commit_sha"] is None
+
+    def test_error_path_input_validation_includes_top_level_commit_sha(self):
+        """Input-validation error path exposes commit_sha at top level (echo or None)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="bad-repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Test.",
+            commit_sha="deadbeef",
+        )
+        assert result["status"] == "error"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "deadbeef"
+
+    def test_error_path_post_failure_includes_top_level_commit_sha(self):
+        """Post-failure error path exposes commit_sha at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+        ):
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stdout = ""
+            mock_run.return_value.stderr = "rate limit exceeded"
+
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                commit_sha="abc1234",
+                dry_run=False,
+            )
+
+        assert result["status"] == "error"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "abc1234"
+
+    # ------------------------------------------------------------------
+    # Issue #30 AC2: top-level error_type on error path; nested form
+    # RETAINED additively for backwards compatibility (deprecation deferred)
+    # ------------------------------------------------------------------
+    def test_error_path_input_validation_includes_top_level_error_type(self):
+        """Input-validation errors expose error_type at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="bad-repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Test.",
+        )
+        assert result["status"] == "error"
+        assert "error_type" in result
+        assert result["error_type"] == "validation"
+
+    def test_error_path_post_failure_includes_top_level_error_type(self):
+        """Post-failure errors expose error_type at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+        ):
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stdout = ""
+            mock_run.return_value.stderr = "rate limit exceeded"
+
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=False,
+            )
+
+        assert result["status"] == "error"
+        assert "error_type" in result
+        assert result["error_type"] == "rate_limit"
+
+    def test_error_path_post_failure_retains_nested_error_type(self):
+        """AC2 ADDITIVE: nested validation.error_type is RETAINED for backwards compat."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+        ):
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stdout = ""
+            mock_run.return_value.stderr = "rate limit exceeded"
+
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=False,
+            )
+
+        assert result["status"] == "error"
+        # Nested form retained for backwards compatibility — DO NOT remove
+        # without coordinated workbench-team signal (see docstring).
+        assert "error_type" in result["validation"]
+        assert result["validation"]["error_type"] == "rate_limit"
+        # Top-level and nested values must agree while both forms coexist.
+        assert result["error_type"] == result["validation"]["error_type"]
+
+    # ------------------------------------------------------------------
+    # AC1 surface coverage: commit_sha echo on remaining error branches
+    # (gate-validation failure, missing token, timeout). Per TMG verdict
+    # on f6c6fdc — issue #30.
+    # ------------------------------------------------------------------
+    def test_error_path_gate_validation_failure_includes_top_level_commit_sha(self):
+        """Gate-validation error path exposes commit_sha at top level (echo)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        # Patch _check_would_clear_gate to force the format-validation
+        # error branch (status=error, validation.would_clear_gate=False).
+        with patch(
+            "hestai_context_mcp.tools.submit_review._check_would_clear_gate",
+            return_value=False,
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                commit_sha="gatefail123",
+                dry_run=True,
+            )
+        assert result["status"] == "error"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "gatefail123"
+
+    def test_error_path_gate_validation_failure_includes_top_level_error_type(self):
+        """Gate-validation errors expose error_type='validation' at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch(
+            "hestai_context_mcp.tools.submit_review._check_would_clear_gate",
+            return_value=False,
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=True,
+            )
+        assert result["status"] == "error"
+        assert "error_type" in result
+        assert result["error_type"] == "validation"
+
+    def test_error_path_missing_token_includes_top_level_commit_sha(self):
+        """Missing-token auth error exposes commit_sha at top level (echo)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                commit_sha="authtest456",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "authtest456"
+
+    def test_error_path_missing_token_includes_top_level_error_type(self):
+        """Missing-token auth error exposes error_type='auth' at top level."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch.dict("os.environ", {}, clear=True):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert "error_type" in result
+        assert result["error_type"] == "auth"
+
+    def test_error_path_timeout_includes_top_level_commit_sha(self):
+        """Timeout error path exposes commit_sha at top level (echo)."""
+        import subprocess as sp
+
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run", side_effect=sp.TimeoutExpired("gh", 30)),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                commit_sha="timeout789",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert "commit_sha" in result
+        assert result["commit_sha"] == "timeout789"
+
+    def test_error_path_timeout_includes_top_level_error_type(self):
+        """Timeout error path exposes error_type='network' at top level."""
+        import subprocess as sp
+
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with (
+            patch("subprocess.run", side_effect=sp.TimeoutExpired("gh", 30)),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+        ):
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=False,
+            )
+        assert result["status"] == "error"
+        assert "error_type" in result
+        assert result["error_type"] == "network"
+
+    def test_success_path_does_not_include_top_level_error_type(self):
+        """Top-level error_type appears ONLY on the error path."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Verified.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert "error_type" not in result
