@@ -33,3 +33,7 @@ mcp.tool(submit_review)
 def main() -> None:
     """Run the MCP server over stdio transport."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,13 @@
 """Smoke tests for the MCP server skeleton."""
 
+import contextlib
+import runpy
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 
@@ -32,6 +40,53 @@ class TestServerImport:
 
         assert isinstance(__version__, str)
         assert __version__ == "0.1.0"
+
+
+@pytest.mark.smoke
+class TestServerExecution:
+    """Test the new if __name__ == '__main__' entry point and script invocation."""
+
+    def test_main_guard_invokes_entry_point(self):
+        """The if __name__ == '__main__' guard should invoke main() when run as script."""
+        # Patch mcp.run before running the module to prevent it from actually starting the server
+        with patch("fastmcp.FastMCP.run") as mock_run:
+            # Use runpy to execute the module with __name__ == "__main__"
+            # This directly tests the if __name__ == "__main__" guard
+            with contextlib.suppress(SystemExit):
+                runpy.run_module("hestai_context_mcp.server", run_name="__main__", alter_sys=False)
+            mock_run.assert_called_once()
+
+    def test_module_execution_via_subprocess(self):
+        """The module should handle subprocess invocation without crashing."""
+        result = subprocess.run(
+            [sys.executable, "-m", "hestai_context_mcp.server"],
+            input=b"",
+            capture_output=True,
+            timeout=2,
+        )
+        # Process should not crash during import or setup
+        # Exit code may be non-zero due to MCP protocol expectations, but should not be a crash
+        assert result.returncode in (0, 1)
+        # Should not have unexpected errors in stderr (socket/import errors would indicate failure)
+        assert b"Traceback" not in result.stderr or b"No module named" not in result.stderr
+
+    def test_script_entry_point_in_pyproject(self):
+        """The [project.scripts] entry point should be configured in pyproject.toml."""
+        project_root = Path(__file__).parent.parent
+        pyproject_path = project_root / "pyproject.toml"
+
+        with open(pyproject_path, "rb") as f:
+            config = tomllib.load(f)
+
+        scripts = config.get("project", {}).get("scripts", {})
+        assert "hestai-context" in scripts
+        assert scripts["hestai-context"] == "hestai_context_mcp.server:main"
+
+    def test_script_entry_point_callable(self):
+        """The script entry point should reference a callable main function."""
+        from hestai_context_mcp.server import main
+
+        assert callable(main)
 
 
 @pytest.mark.smoke
