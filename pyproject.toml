@@ -31,6 +31,9 @@ dependencies = [
     "keyring>=25.0.0",
 ]
 
+[project.scripts]
+hestai-context = "hestai_context_mcp.server:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
