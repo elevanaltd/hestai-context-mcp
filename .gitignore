@@ -13,6 +13,11 @@ build/
 venv/
 ENV/
 
+# Environment variables (worktree-symlinked from main repo by SessionStart hook)
+.env
+.env.local
+.env.*.local
+
 # IDE
 .vscode/
 .idea/
