@@ -15,9 +15,9 @@ ADR_REFS::[ADR-0013,ADR-0060]
 ISSUE_REFS::[33,38,643]
 TOOL_NAMES::[octave_write,octave_secretary]
 FILE_PATHS::[
-  "/Volumes/HestAI-Projects/elevana-studio/.hestai-state/orchestration/multi-machine-collaborator-coordination-architecture.md",
-  ".hestai/decisions/DECISIONS.oct.md (elevana-studio canonical)",
-  ".hestai/decisions/inbound/<token>.oct.md (proposed CQRS write path)"
+  "elevana-studio:.hestai-state/orchestration/multi-machine-collaborator-coordination-architecture.md (LOCAL_MUTABLE; gitignored in elevana-studio)",
+  "elevana-studio:.hestai/decisions/DECISIONS.oct.md (canonical)",
+  "elevana-studio:.hestai/decisions/inbound/<token>.oct.md (proposed CQRS write path)"
 ]
 MUST_PRESERVE::[
   "Canonical read model unchanged: .hestai/decisions/DECISIONS.oct.md remains single source of truth",
@@ -32,7 +32,7 @@ MUST_PRESERVE::[
 
 ===SOURCE_REFS===
 [
-  "/Volumes/HestAI-Projects/elevana-studio/.hestai-state/orchestration/multi-machine-collaborator-coordination-architecture.md:1-44#full_doc"
+  "elevana-studio:.hestai-state/orchestration/multi-machine-collaborator-coordination-architecture.md:1-44#full_doc"
 ]
 ===END===
 
@@ -88,7 +88,7 @@ WHEN_NOT_TO_LOAD::[
 GLOBAL::"PROPOSED HO orchestration doc (token HO-MULTI-MACHINE-COORDINATION-20260429) extending gravity-tiered governance with bounded CQRS: canonical DECISIONS.oct.md unchanged as read model; inbound branch-local fragments compiled by octave-secretary; committed day-one seed for fresh clones."
 AGENT::"This doc resolves the elevana-studio DECISIONS.oct.md merge-conflict problem and the fresh-clone invisible-Tier-3 problem in one stroke. Read path unchanged. Write path: drop a fragment at .hestai/decisions/inbound/<token>.oct.md, octave-secretary compiles into canonical at ratification. Day-one seed (single committed file) handles bootstrap. PSS remote adapter is NOT required for this. Dispatch sequence laid out in §Dispatch sequence after ratification of the source doc. Lives in elevana-studio; this repo's RFC #38 builds on its principle."
 REVIEWER::"Validate: (a) jurisdiction boundary against visibility-rules v2.3, ADR-0060, ADR-0013, PROD I4 — does the proposed inbound model preserve I4 structured returns and avoid a hidden second source of truth? (b) Compile step automation must NOT precede TMG/CE review (risk: unsafe governance mutations). (c) Day-one seed must NOT become live-context replacement (risk: token weight migrates). Grandfather in-flight branches; do not force them into inbound."
-ONBOARDING::"This is the elevana-studio plan for handling decision-doc conflicts when multiple branches author concurrently, plus a day-one onboarding seed for fresh clones. It is PROPOSED, not yet ratified. Read the source doc at /Volumes/HestAI-Projects/elevana-studio/.hestai-state/orchestration/multi-machine-collaborator-coordination-architecture.md."
+ONBOARDING::"This is the elevana-studio plan for handling decision-doc conflicts when multiple branches author concurrently, plus a day-one onboarding seed for fresh clones. It is PROPOSED, not yet ratified. Read the source doc at elevana-studio:.hestai-state/orchestration/multi-machine-collaborator-coordination-architecture.md (gitignored local path within the elevana-studio repo checkout; SOURCE_REFS uses the repo-id-prefix convention to remain portable across machines)."
 ===END===
 
 ===EDGES===
