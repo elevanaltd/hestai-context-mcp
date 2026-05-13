@@ -148,7 +148,7 @@ BINDING_VERDICT_SOURCE::"cross-debate convergent verdict — operator-attached g
 ===END===
 
 ===VALIDATION===
-SOURCE_REF_RESOLVES::true
+SOURCE_REF_RESOLVES::false
 MARKERS_RESOLVE_TO_CARD::N/A
 CHANGED_MARKED_FILE_REQUIRES_REVIEW::true
 ===END===
