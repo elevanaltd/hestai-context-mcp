@@ -2081,7 +2081,7 @@ class StorageAdapter(Protocol):
     BLOCKER_005::"Do not use custom Git refs."
 
   COMPLETION_CRITERIA_FOR_B1
-    CRITERION_001::"BUILD-PLAN exists at .hestai/state/sessions/phase-pss-b1/BUILD-PLAN.oct.md."
+    CRITERION_001::"BUILD-PLAN exists at .hestai/decisions/phase-pss-b1/BUILD-PLAN.oct.md."
     CRITERION_002::"Plan scopes LocalFilesystemAdapter only."
     CRITERION_003::"Plan repeats R12 deferred items."
     CRITERION_004::"Plan includes concrete file layout."

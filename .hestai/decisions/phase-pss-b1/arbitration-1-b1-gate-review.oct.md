@@ -133,9 +133,9 @@
   TARGET::implementation-lead
   DIRECTIVE::"Execute B1 BUILD-PLAN under TDD RED-first discipline per §INTEGRATION_PLAN STEP_001..STEP_025. Honor all CE rulings, CRS conditions, and CIV RED-phase guardrails. Produce GREEN GROUP_001..GROUP_015 in order."
   CONTEXT::[
-    BUILD_PLAN_PATH::".hestai/state/sessions/phase-pss-b1/BUILD-PLAN.oct.md",
+    BUILD_PLAN_PATH::".hestai/decisions/phase-pss-b1/BUILD-PLAN.oct.md",
     ADR_PATH::"docs/adr/adr-0013-portable-session-state-via-storage-adapters.md",
-    ARBITRATION_RECORD::".hestai/state/sessions/phase-pss-b1/arbitration-1-b1-gate-review.oct.md"
+    ARBITRATION_RECORD::".hestai/decisions/phase-pss-b1/arbitration-1-b1-gate-review.oct.md"
   ]
   SUCCESS_CRITERIA::[
     "All ~120 tests across GROUP_001..GROUP_015 pass GREEN.",
