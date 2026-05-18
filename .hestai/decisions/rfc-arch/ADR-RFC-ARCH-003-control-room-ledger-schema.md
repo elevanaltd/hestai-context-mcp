@@ -1,4 +1,4 @@
-# ADR-RFC-ARCH-002 — Control-Room Ledger Schema (v1.x vs v2.x Resolution)
+# ADR-RFC-ARCH-003 — Control-Room Ledger Schema (v1.x vs v2.x Resolution)
 
 - **Status**: PROPOSED (awaiting CIV + SR review)
 - **Date**: 2026-05-18
@@ -99,7 +99,7 @@ No concrete v2.0 schema exists in this repository as of 2026-05-18. The carry-fo
 
 When a concrete v2.0 spec is surfaced, the migration path is:
 
-1. A new ADR (`ADR-RFC-ARCH-002.1` or successor) ratifies v2.0 with explicit field-by-field breaking-change list.
+1. A new ADR (`ADR-RFC-ARCH-003.1` or successor) ratifies v2.0 with explicit field-by-field breaking-change list.
 2. The new ADR marks this ADR's §2.1 schema **SUPERSEDED** with a forward link.
 3. Because the ledger is per-session ephemeral (PR-α), there is **no in-place migration of historical ledgers**. Existing v1.x ledgers remain readable by v1.x parsers; v2.x parsers do not have to read v1.x.
 4. The session lifecycle tools (`clock_in` / `clock_out`) are not consumers of this artifact and therefore require no migration.
