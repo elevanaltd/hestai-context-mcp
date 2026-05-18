@@ -42,7 +42,7 @@ A reference site that points into `ephemeral_session_state` or `optional_cache` 
 **Immediate (this ADR):**
 
 - The binding placement rule above is in force from ratification. PR reviewers cite this ADR to reject any new authoritative reference into a gitignored path.
-- **`ho-control-room` SKILL §3 correction (root cause)**: the SKILL at `.hestai-sys/library/skills/ho-control-room/SKILL.md` directs HO sessions to place BUILD-PLAN / completion / arbitration / handoff artifacts under `.hestai/state/sessions/…` (§3.DIRECT_WRITE_ALLOWED, §3.ARTIFACT_PLACEMENT_EXAMPLES, §5 ANCHOR_KERNEL `place_phase_artifacts_in_sessions_zone`). That convention is the proximate cause of the Mac B#1 governance leak. The correction MUST set committed-governance placement to `.hestai/decisions/` and committed context-card placement to `.hestai/context/`, leaving only ephemeral / FAST-tier / ledger state under `.hestai/state/sessions/`. **The SKILL file lives in the shared `.hestai-sys/` system-standard distribution (read-only, not tracked in this repository), so the correction is an upstream Vault change rather than an edit landable in PR-α.** The operator must route the SKILL amendment through the appropriate Vault PR; this ADR records the required substance so the amendment can be made verbatim. The cross-cutting binding finding in `.hestai/decisions/handoff/2026-05-16-rfc-40-mac-b1-carry-forward.md` is the authoritative description.
+- **`ho-control-room` SKILL §3 correction (root cause — LANDED upstream)**: the SKILL at `.hestai-sys/library/skills/ho-control-room/SKILL.md` previously directed HO sessions to place BUILD-PLAN / completion / arbitration / handoff artifacts under `.hestai/state/sessions/…` (§3.DIRECT_WRITE_ALLOWED, §3.ARTIFACT_PLACEMENT_EXAMPLES, §5 ANCHOR_KERNEL `place_phase_artifacts_in_sessions_zone`). That convention was the proximate cause of the Mac B#1 governance leak. **The corrective Vault PR has landed**: §3.DIRECT_WRITE_ALLOWED now lists `committed_governance` (`.hestai/decisions/`) and `committed_context_cards` (`.hestai/context/`) as primary write paths with ledger/coordination marked ephemeral; §3.ARTIFACT_PLACEMENT_EXAMPLES routes phase BUILD-PLAN / completion / arbitration / handoff / ADR to `.hestai/decisions/…` and facet cards to `.hestai/context/…`; §5 ANCHOR_KERNEL `MUST::` adds `place_committed_governance_in_decisions_zone` + `keep_only_ephemeral_state_in_sessions_zone`, and `NEVER::` adds `place_authoritative_artifact_in_gitignored_path_without_explicit_EPHEMERAL_marker`. The upstream SKILL cites ADR-RFC-ARCH-001 in its DIRECT_WRITE_ALLOWED REFS. The verbatim text §6 below is the historical ratified record. The cross-cutting binding finding in `.hestai/decisions/handoff/2026-05-16-rfc-40-mac-b1-carry-forward.md` is closed.
 
 **Sequenced (NOT in this ADR):**
 
@@ -77,9 +77,9 @@ The minimum verification for this ADR is review-only (TIER_3, facets [GOVERNANCE
 
 Until PR-F and PR-G land, enforcement is by review discipline: any PR touching `.hestai/state/sessions/…` or `.hestai/state/cache/…` that does not also carry an explicit `EPHEMERAL` / `NON_AUTHORITATIVE` marker at the reference site is rejected on placement grounds, citing this ADR.
 
-## 6. Required `ho-control-room` SKILL amendment (verbatim substance)
+## 6. Ratified `ho-control-room` SKILL amendment (verbatim — LANDED upstream)
 
-The upstream `.hestai-sys/library/skills/ho-control-room/SKILL.md` must be amended (Vault PR; not in this repo) with the following substance. Substance is mandatory; OCTAVE encoding may be refined by the Vault maintainer.
+The upstream `.hestai-sys/library/skills/ho-control-room/SKILL.md` has been amended with the following substance (Vault PR landed; the SKILL cites this ADR in its DIRECT_WRITE_ALLOWED REFS). Preserved here as the historical ratified record:
 
 **§3.DIRECT_WRITE_ALLOWED — replace current placement keys:**
 
