@@ -100,16 +100,16 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 `TOKEN` MUST match the regular expression:
 
 ```
-^[A-Z][A-Z0-9_]{2,127}-[0-9]{8}$
+^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$
 ```
 
 Three semantic parts, joined by `-`:
 
-1. Prefix: uppercase letters, digits, underscores; 3–128 chars total before the date; describes the decision's domain in agent-readable shorthand. Examples: `HO-CONTEXT-MCP-OWNS-AGR-STANDARD`, `HO-OCTAVE-WRITE-MULTI-ENVELOPE-WORKAROUND`.
+1. Prefix: uppercase letters, digits, underscores, and internal hyphens (hyphens are admissible as word-separators, e.g. `HO-DECISION-GOVERNANCE`); 3–128 chars total before the trailing date separator; MUST start with an uppercase letter and MUST NOT end with a hyphen (so the trailing `-` before the date is unambiguous). Examples: `HO-CONTEXT-MCP-OWNS-AGR-STANDARD`, `HO-OCTAVE-WRITE-MULTI-ENVELOPE-WORKAROUND`.
 2. Hyphen separator.
-3. Date suffix: `YYYYMMDD` (UTC), matching the `AUTHORED_AT` date.
+3. Date suffix: `YYYYMMDD` (UTC). MUST equal the UTC date portion of `AUTHORED_AT` — the validator (§4.1) enforces this consistency.
 
-This regex is a syntactic superset of elevana-studio's existing HO-token convention (e.g. `HO-DECISION-GOVERNANCE-GRAVITY-TIERED-20260428`); legacy tokens validate verbatim.
+This regex is a syntactic superset of elevana-studio's existing HO-token convention (e.g. `HO-DECISION-GOVERNANCE-GRAVITY-TIERED-20260428`); legacy tokens validate verbatim, including those whose prefix contains multiple hyphens.
 
 Uniqueness is enforced repo-wide by the validator (§4). A token collision is a hard error.
 
@@ -315,7 +315,7 @@ The chain starts at the requested token and follows `SUPERSEDED_BY` pointers to 
 
 When the requested token is found but has no `SUPERSEDED_BY` (it is itself terminal), the chain contains exactly one entry and `terminal_token == token`.
 
-### 3.5 `propose_decision_amendment(working_dir, token, patch, expected_version)` — OPTIONAL broker
+### 3.5 `propose_decision_amendment(working_dir, token, patch, expected_record_hash)` — OPTIONAL broker
 
 Creates a pull request proposing an amendment to an AGR. **Does not mutate the canonical store.** Per ADR-0013 substrate ruling; cited in §0.2.
 
@@ -325,12 +325,12 @@ Creates a pull request proposing an amendment to an AGR. **Does not mutate the c
 {
   "working_dir": "<path>",
   "token": "<TOKEN of the record to amend>",
-  "patch": { "field": "value", … },     // partial field updates
-  "expected_version": "<VERSION string read by the proposer>"  // optimistic concurrency
+  "patch": { "field": "value", … },                       // partial field updates
+  "expected_record_hash": "sha256:<64-hex-digits>"        // optimistic concurrency — per-record content hash
 }
 ```
 
-`expected_version` is the `VERSION` value the proposer read; the broker compares against the current on-disk `VERSION` and rejects on mismatch (concurrent edit detected — proposer must re-read).
+`expected_record_hash` is a SHA-256 over the canonical UTF-8 bytes of the AGR file as the proposer last read it (the full `.oct.md` file content, byte-for-byte, including OCTAVE envelope). The broker recomputes the hash from current on-disk content and rejects on mismatch (concurrent edit detected — proposer must re-read and recompute). Schema `VERSION` is **not** suitable here — it tracks schema-level breaking changes, not per-record edits, so two simultaneous amendments under the same `VERSION` (e.g. both `1.0`) would not be detected by a version-equality check. The content hash is the per-record CAS primitive.
 
 **Behaviour**: the broker creates a git branch, applies the patch, commits with a conventional-commits message, opens a pull request via the `gh` CLI (or equivalent), and returns the PR URL. It MUST NOT write to the canonical store path on the base branch directly.
 
@@ -341,18 +341,18 @@ Creates a pull request proposing an amendment to an AGR. **Does not mutate the c
   "ok": true,
   "pr_url": "<URL>",
   "branch": "<branch name>",
-  "head_sha": "<sha>",
+  "head_sha": "<git commit sha of the proposal branch HEAD>",
   "token": "<TOKEN>",
-  "from_version": "<prior VERSION>",
-  "to_version": "<proposed VERSION>"
+  "from_record_hash": "sha256:<64-hex>",                  // hash that matched expected_record_hash
+  "to_record_hash":   "sha256:<64-hex>"                   // hash of the file after the patch was applied
 }
 ```
 
 Error cases (PROD::I4-conformant):
 
-- `EXPECTED_VERSION_MISMATCH` — concurrent edit detected.
+- `EXPECTED_HASH_MISMATCH` — concurrent edit detected; returned with the current on-disk hash so the proposer can re-read.
 - `TOKEN_NOT_FOUND`.
-- `PATCH_REJECTED` — patch violates schema (e.g. would create cycle in supersession DAG, would introduce reserved field name).
+- `PATCH_REJECTED` — patch violates schema (e.g. would create cycle in supersession DAG, would introduce reserved field name, would change immutable fields such as `TOKEN` or `AUTHORED_AT`).
 - `GH_BROKER_FAILED` — wrapper for any `gh` CLI failure; includes upstream error message.
 
 This tool is OPTIONAL in PR-D′ / PR-H. Adopters MAY ship read tools only. The optionality is intentional — the broker is sugar over `gh pr create`; a workflow that pushes directly via standard git tooling remains supported.
@@ -369,7 +369,7 @@ The validator is a CLI tool (name suggestion: `validate_agent_readable_governanc
 
 1. **OCTAVE envelope** — `===DECISION_RECORD===` / `===END===` present, `META.TYPE::DECISION_RECORD`, `META.VERSION` is a parseable `MAJOR.MINOR` string.
 2. **Required fields present** — TYPE, VERSION, TOKEN, STATUS, TIER, DECISION, BECAUSE, AUTHORED_AT.
-3. **TOKEN format** — matches §1.3 regex.
+3. **TOKEN format and date consistency** — matches §1.3 regex AND the `YYYYMMDD` suffix equals the UTC date portion of `AUTHORED_AT` (per the §1.3 MUST). Mismatch is a hard error.
 4. **TOKEN uniqueness** — every TOKEN appears exactly once across `.hestai/decisions/**/*.oct.md`.
 5. **STATUS enum** — one of the four admissible values.
 6. **TIER enum** — one of the three admissible values.
