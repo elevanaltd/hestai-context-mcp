@@ -90,6 +90,8 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 | `EFFECTIVE_UNTIL` | ISO-8601 timestamp | When the decision lapses (independent of supersession). Optional. |
 | `ORIGIN_SESSION` | string | UUID of the session in which the decision was ratified, when known. Citations to control-room ledger SESSION_IDs land here. |
 | `ORIGIN_LEDGER_RD` | string | `RD<n>` identifier from the originating ledger, when known. Used by PR-E §2.5 promotion-by-citation pattern. |
+| `RATIFIED_BY` | string | Identity of the human or agent that ratified the record (e.g. `human:shaun.buswell@elevana.com`, `agent:HOLISTIC_ORCHESTRATOR`). Optional on `PROPOSED`. The validator (§4.1) emits a **warning** when `STATUS != PROPOSED` and `RATIFIED_BY` is absent. Recommended but not required for non-`PROPOSED` records (operator may close the loophole in a MINOR bump if TOKEN-squatting becomes a real problem; see §11 Q5). |
+| `RATIFIED_AT` | ISO-8601 timestamp | When the record entered its current non-`PROPOSED` STATUS. Optional. Independent of `AUTHORED_AT` (records may be authored as `PROPOSED` and ratified later). |
 
 #### Reserved (not yet defined; MUST NOT appear in v1.x records)
 
@@ -144,15 +146,20 @@ Rules:
 
 Current schema is `1.0`. Future additive extensions become `1.1`, `1.2`, etc.
 
+**Spec-only period**: Between this ADR's merge and the PR-D′/PR-H code landing, AGR records may be authored by hand. Such records MUST carry `VERSION::"1.0"` and conform to §1.1–§1.6 exactly as if the validator (§4) were running. When the validator subsequently lands, it MUST enforce v1.0 against every record under `.hestai/decisions/**/*.oct.md`, regardless of authoring date; there is no grandfather clause.
+
 ### 1.6 Supersession DAG semantics
 
-`SUPERSEDED_BY`, `EXTENDS`, and `AMENDS` together form a directed graph over TOKENs.
+`SUPERSEDED_BY`, `EXTENDS`, and `AMENDS` together form three **edge-typed** directed graphs over TOKENs. Acyclicity is enforced **per edge-type**, not globally — the three edge classes have distinct semantics and a record may legitimately appear in cycles when only the union graph is considered.
 
-- The validator (§4) MUST detect cycles and reject the offending write.
-- `SUPERSEDED_BY` edges form a chain (every `SUPERSEDED` record points at exactly one successor); the chain MUST terminate at a `PROPOSED`, `RATIFIED`, or `VOID` record.
-- `EXTENDS` and `AMENDS` may form arbitrary DAGs, but cycles are still rejected.
-- An `EXTENDS` edge does not imply `SUPERSEDED_BY`; an extension is additive.
-- An `AMENDS` edge does not by itself supersede; an amendment refines the cited record without retiring it. Combined `AMENDS` + `SUPERSEDED_BY` is admissible.
+- The validator (§4) MUST detect cycles **within each edge-type independently** and reject the offending write:
+  - `SUPERSEDED_BY` subgraph MUST be acyclic and MUST form a chain (every `SUPERSEDED` record points at exactly one successor); the chain MUST terminate at a `PROPOSED`, `RATIFIED`, or `VOID` record.
+  - `EXTENDS` subgraph MUST be acyclic. Arbitrary DAG shapes within `EXTENDS` are admissible.
+  - `AMENDS` subgraph MUST be acyclic. Arbitrary DAG shapes within `AMENDS` are admissible.
+- **Cross-edge interactions are NOT treated as cycles.** Specifically: an old record carrying `SUPERSEDED_BY=NEW` combined with the new record carrying `AMENDS=OLD` is **admissible** and is the canonical pattern for "this new record supersedes the old one and explicitly amends what it changed." The validator MUST NOT flag this as a cycle.
+- `EXTENDS` does not imply `SUPERSEDED_BY`; an extension is additive — both records remain live (`RATIFIED`).
+- `AMENDS` does not by itself supersede; an amendment refines the cited record without retiring it. Combined `AMENDS` + `SUPERSEDED_BY` (as above) is admissible.
+- Edges MUST reference TOKENs that exist in the same repository (cross-repo edges are out of scope for §1.6 enforcement; see §4.1 invariant #8 scoping note).
 
 ## 2. Placement, layer mapping, and projection rules
 
@@ -201,6 +208,26 @@ PR-D names four MCP tools:
 
 `get_context` is **not** modified by PR-D. PROD::I5 on `get_context` is preserved unconditionally.
 
+#### 3.1.1 Common error envelope (PROD::I4)
+
+Every tool in §3 — read or broker — MUST return errors in this envelope. The envelope is mandatory; opaque-blob errors are forbidden.
+
+```
+{
+  "ok": false,
+  "error": {
+    "code": "<error-code-from-tool-specific-list>",
+    "category": "input_validation" | "schema_violation" | "io_failure" | "concurrency" | "broker_failure",
+    "message": "<one-line human-readable explanation>",
+    "tool": "lookup_decision" | "list_decisions" | "trace_supersedure" | "propose_decision_amendment",
+    "context": { /* tool-specific structured payload — e.g. token, path, current_hash, broken_chain */ },
+    "contract_ref": "ADR-RFC-ARCH-004 §3.<n>"
+  }
+}
+```
+
+Implementations MAY add fields to `error` (e.g. timing, tool_version) but MUST NOT remove or rename the required keys. The same envelope shape applies to per-tool error lists below.
+
 ### 3.2 `lookup_decision(working_dir, token, audience?)`
 
 Resolves a single AGR by `TOKEN`. Pure read.
@@ -238,11 +265,12 @@ Resolves a single AGR by `TOKEN`. Pure read.
 }
 ```
 
-When the token is not found:
+**Error cases** (per §3.1.1 envelope):
 
-```
-{ "ok": false, "error": { "code": "TOKEN_NOT_FOUND", "token": "<TOKEN>", "contract_ref": "ADR-RFC-ARCH-004 §3.2" } }
-```
+- `TOKEN_NOT_FOUND` (category: `input_validation`) — no record at the requested TOKEN; `context.token` echoed.
+- `TOKEN_MALFORMED` (`input_validation`) — TOKEN does not match §1.3 regex.
+- `RECORD_PARSE_FAILED` (`schema_violation`) — file found but OCTAVE envelope or required fields fail to parse; `context.path` and `context.parse_error` populated. Implementation choice: treat as fatal for the read, do NOT silently skip.
+- `WORKING_DIR_INVALID` (`io_failure`) — path does not exist or is not a directory.
 
 ### 3.3 `list_decisions(working_dir, scope?, status?, tier?)`
 
@@ -281,6 +309,12 @@ Lists AGRs with optional filtering. Pure read.
 
 The list is sorted by `authored_at` descending. No paging in v1; implementations MUST handle the full set in a single response. If repository scale requires paging, that is a MINOR schema addition for v1.1.
 
+**Error cases** (per §3.1.1 envelope):
+
+- `FILTER_INVALID` (`input_validation`) — `status` or `tier` is non-null and not a member of the admissible enum; `context.field` and `context.value` populated.
+- `WORKING_DIR_INVALID` (`io_failure`) — as in §3.2.
+- `RECORD_PARSE_FAILED` (`schema_violation`) — any record under `.hestai/decisions/**` fails to parse. Implementation choice: fail the whole call (recommended) rather than silently dropping the bad record; consumers MUST be able to detect that the list is incomplete.
+
 ### 3.4 `trace_supersedure(working_dir, token)`
 
 Returns the supersession chain for a token. Pure read.
@@ -313,6 +347,13 @@ Returns the supersession chain for a token. Pure read.
 
 The chain starts at the requested token and follows `SUPERSEDED_BY` pointers to a record whose `SUPERSEDED_BY` is null. `terminal_status` is never `SUPERSEDED` (chain follows further) and is `VOID` only if the chain ends in retraction.
 
+**Error cases** (per §3.1.1 envelope):
+
+- `TOKEN_NOT_FOUND` (`input_validation`) — starting TOKEN does not exist.
+- `CHAIN_BROKEN` (`schema_violation`) — a record in the chain points `SUPERSEDED_BY` at a TOKEN that does not exist; `context.broken_at_token` and `context.missing_successor_token` populated. Distinct from `TOKEN_NOT_FOUND` so consumers can distinguish missing-start from missing-middle.
+- `CHAIN_CYCLE_DETECTED` (`schema_violation`) — `SUPERSEDED_BY` traversal revisited a TOKEN already in the chain; `context.cycle_at_token` populated. This SHOULD be unreachable if the validator (§4.1 #8) has been run, but the tool MUST fail closed rather than infinite-loop.
+- `WORKING_DIR_INVALID` (`io_failure`) — as in §3.2.
+
 When the requested token is found but has no `SUPERSEDED_BY` (it is itself terminal), the chain contains exactly one entry and `terminal_token == token`.
 
 ### 3.5 `propose_decision_amendment(working_dir, token, patch, expected_record_hash)` — OPTIONAL broker
@@ -330,9 +371,25 @@ Creates a pull request proposing an amendment to an AGR. **Does not mutate the c
 }
 ```
 
-`expected_record_hash` is a SHA-256 over the canonical UTF-8 bytes of the AGR file as the proposer last read it (the full `.oct.md` file content, byte-for-byte, including OCTAVE envelope). The broker recomputes the hash from current on-disk content and rejects on mismatch (concurrent edit detected — proposer must re-read and recompute). Schema `VERSION` is **not** suitable here — it tracks schema-level breaking changes, not per-record edits, so two simultaneous amendments under the same `VERSION` (e.g. both `1.0`) would not be detected by a version-equality check. The content hash is the per-record CAS primitive.
+`expected_record_hash` is a SHA-256 over the canonical UTF-8 bytes of the AGR file as the proposer last read it (the full `.oct.md` file content, byte-for-byte, including OCTAVE envelope). The broker recomputes the hash from current on-disk content **on the default/protected branch HEAD** (NOT from an arbitrary worktree state) and rejects on mismatch (concurrent edit detected — proposer must re-read and recompute). Schema `VERSION` is **not** suitable here — it tracks schema-level breaking changes, not per-record edits, so two simultaneous amendments under the same `VERSION` (e.g. both `1.0`) would not be detected by a version-equality check. The content hash is the per-record CAS primitive.
 
-**Behaviour**: the broker creates a git branch, applies the patch, commits with a conventional-commits message, opens a pull request via the `gh` CLI (or equivalent), and returns the PR URL. It MUST NOT write to the canonical store path on the base branch directly.
+**Behaviour (proposal-time)**: the broker:
+
+1. Fetches the repository's default/protected branch HEAD (configured at broker init; typically `main`).
+2. Reads the AGR file at that HEAD and computes its content hash; rejects with `EXPECTED_HASH_MISMATCH` if it differs from `expected_record_hash` (proposer is stale).
+3. Creates a git branch **from default-branch HEAD** (never from an arbitrary local state).
+4. Applies the patch, commits with a conventional-commits message.
+5. Opens a pull request via the `gh` CLI (or equivalent) **against the default/protected branch** (PR target is not caller-controlled — the broker pins it).
+6. Returns the PR URL plus the `from_record_hash` / `to_record_hash` pair.
+
+The broker MUST NOT write to the canonical store path on the base branch directly. The broker MUST NOT accept a caller-supplied PR target (no `branch_target` parameter); this prevents bypass via PR against a long-lived feature branch.
+
+**Behaviour (merge-time staleness)**: the proposal-time hash check is necessary but not sufficient — between PR open and merge, another PR could land that changes the same AGR file. PR-D′ / PR-H MUST land one of these two merge-time defenses:
+
+- **(a) Required merge-time recheck** — a GitHub Action triggered on `pull_request` events for paths under `.hestai/decisions/**/*.oct.md` that re-reads the touched AGRs at PR HEAD and at base branch HEAD, recomputes content hashes, and fails the PR check if the PR's claimed `from_record_hash` no longer equals the base-branch hash. This forces rebase-and-retest. **Recommended.**
+- **(b) Branch protection requiring up-to-date base** — GitHub branch protection setting "require branches to be up to date before merging" applied to the default branch. Coarser-grained than (a) (rebases on any change, not just AGR conflicts) but simpler.
+
+PR-D′ / PR-H MUST implement (a) OR document operator selection of (b). The choice is implementation-lane, but one of the two MUST be in force; without it the broker CAS protects only against simultaneous proposals, not against sequential stale merges.
 
 **Return shape**:
 
@@ -374,10 +431,11 @@ The validator is a CLI tool (name suggestion: `validate_agent_readable_governanc
 5. **STATUS enum** — one of the four admissible values.
 6. **TIER enum** — one of the three admissible values.
 7. **Reserved names** — `DEPENDS_ON`, `CONFLICTS_WITH`, `ARCHIVED_AT` MUST NOT appear in v1.x records.
-8. **Supersession DAG** — `SUPERSEDED_BY`, `EXTENDS`, `AMENDS` references resolve; no cycles; `SUPERSEDED_BY` chain is a chain not a tree.
+8. **Supersession DAG (same-repo only)** — `SUPERSEDED_BY`, `EXTENDS`, `AMENDS` references resolve to TOKENs that exist **in the same repository**; per §1.6 each edge-type subgraph is acyclic independently (cross-edge interactions per §1.6 are admissible and NOT cycles); `SUPERSEDED_BY` chain is a chain not a tree. Cross-repo edges (per §2.4) are **out of scope** for automated validation — the validator does not fetch remote repositories. This is consistent with ADR-RFC-ARCH-002 PE amendment 1 (CI gate scoped to LOCAL repo-relative paths only) and §2.4's "cross-repo reciprocity is advisory" stance. Cross-repo edge correctness is enforced by editorial review.
 9. **`SUPERSEDED_BY` invariant** — present iff `STATUS == SUPERSEDED`.
 10. **`ISSUE_REF` shape** — when present, parses as a GitHub URL or `repo:<repo-id>#<n>`.
 11. **`HUMAN_ADR_REF` resolution** — when present, the path resolves under the repository.
+12. **Ratification provenance (warning)** — when `STATUS != PROPOSED` and `RATIFIED_BY` is absent, the validator emits a **warning** (not error) per §4.2. Closes a portion of the TOKEN-squatting / lookalike-record gap without forcing legacy `HO-*` records into rework. May be promoted to error in a MINOR bump (see §11 Q5).
 
 ### 4.2 Severities
 
@@ -480,6 +538,7 @@ PR-D does **not** define, decide, or constrain:
 - **OCTAVE grammar additions or changes.** octave-mcp lane.
 - **Authorship of the RD15 / RD17 / RD18 AGR records.** Specified in §8; authorship is operator-discretionary follow-up.
 - **Closure of issue #25.** §7 specifies disposition; operator closes the issue.
+- **Session-extraction workflow (session-ledger → AGR promotion).** Deferred. The placement-layer fix (PR-α / PR-B) prevents *new* session content from being treated as authoritative, but operators making binding decisions mid-session still have no automated on-ramp to `.hestai/decisions/`. Until that workflow exists (separate PR, separate SKILL update), operators must manually author committed AGR records per §1; `ho-control-room` SKILL §3 already marks ledger content as ephemeral, which is the operational defense. The risk if this remains unfixed is that the issue #25 pattern reappears by accident — an operator writes a decision into the ledger, the session ends, the decision substance is provenance-only. Acceptable risk for PR-D ratification; tracked as an open workflow gap.
 
 ## 11. Open questions for the operator (non-blocking)
 
@@ -489,6 +548,8 @@ These do not block PR-D ratification. Operator answers may land as MINOR additio
 2. **`ISSUE_REF` on `RATIFIED`** — current draft makes `ISSUE_REF` optional even on `RATIFIED`. Should it be required when the originating decision was filed on the issue tracker? Recommendation: keep optional; mandatory would block hand-ratified HO-tokens that have no issue.
 3. **`EFFECTIVE_FROM` vs `AUTHORED_AT` divergence** — current draft permits `EFFECTIVE_FROM > AUTHORED_AT` (future-dated decisions). Acceptable, or should the validator reject as a foot-gun? Recommendation: permit; useful for staged rollouts.
 4. **Monolithic projection generation** — should the validator CLI ship `--emit-projection` in v1, or defer to a separate tool? Current draft leaves it OPTIONAL; PR-D′ / PR-H chooses.
+5. **TOKEN namespace authority / reserved prefixes** — §1.3 admits any uppercase-letter-led prefix and §4.1 #12 warns (not errors) on missing `RATIFIED_BY`. Should specific prefixes be reserved (e.g. `HO-` may only be authored by `agent:HOLISTIC_ORCHESTRATOR`; `OP-` only by `human:*`) with validator hard-error enforcement? Current draft does not; uniqueness + `RATIFIED_BY` warning is the operational floor. Promotion to a hard rule is a MINOR addition if TOKEN-squatting becomes observable.
+6. **Session-extraction workflow** — see §10 closing entry. When (if ever) the workflow exists, what is its shape: an `extract_decisions` tool in this service, a SKILL update in the Vault lane, or a manual operator-driven pattern? Operator decision; not specced here.
 
 ## 12. Supersession
 
