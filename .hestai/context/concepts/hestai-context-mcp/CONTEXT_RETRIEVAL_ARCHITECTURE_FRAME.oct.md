@@ -2,7 +2,7 @@
 TYPE::FRAME_CARD
 REPO_ID::hestai-context-mcp
 ID::CONTEXT_RETRIEVAL_ARCHITECTURE_FRAME
-STATUS::proposed
+STATUS::ratified
 CARD_SCHEMA_VERSION::1
 GENERATED_AT_COMMIT::"3c547af"
 SOURCE_HASH::"N/A_for_aggregator"
@@ -79,7 +79,7 @@ INTEGRATION_POINTS::[
   "Does not modify get_context (CE OPTION_C purity preserved)",
   "Does not require PSS remote adapter (issue #15 follow-up #1) — git is the distribution mechanism"
 ]
-CURRENT_STATUS::"PROPOSED via RFC #38 (operator-ratified architectural direction 2026-05-08). Pre-flight gates G1+G3+G4 in execution. NOT yet authorised for code. After gates land cleanly: draft architecture ADR, gate via TMG/CRS/CE/CIV, then v1 build."
+CURRENT_STATUS::"RATIFIED by ADR-RFC-ARCH-005 (2026-05-20) — the four-layer architecture (L1 canonical / L1S committed facet ABI / L2 optional acceleration / L3 pure retrieval) is binding governance for hestai-context-mcp. Pre-flight gates G1..G10 are bound by ADR-RFC-ARCH-005 §4 as preconditions for v1 code authorisation; G1, G3, G4 may execute in parallel. After gate-set closure: v1 build of L3 tools (lookup_concept, query_context, explain_context_selection) under implementation-lead via oa-router (PR-C′ / PR-J). get_context unchanged (PROD::I5 + RISK_003 OPTION_C)."
 WHEN_TO_LOAD::[
   "context retrieval architecture question",
   "facet ABI or concept card design",
