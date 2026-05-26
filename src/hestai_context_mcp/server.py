@@ -5,6 +5,7 @@ This MCP server provides session lifecycle and context management tools:
 - clock_out: Archive session transcript and extract learnings
 - get_context: Synthesize and return project context
 - submit_review: Submit structured review comments
+- submit_governance: Transduce prose into governance artefacts + open a PR
 
 Architecture:
 - Part of the three-service model (ADR-0353)
@@ -17,6 +18,7 @@ from fastmcp import FastMCP
 from hestai_context_mcp.tools.clock_in import clock_in
 from hestai_context_mcp.tools.clock_out import clock_out
 from hestai_context_mcp.tools.get_context import get_context
+from hestai_context_mcp.tools.submit_governance import submit_governance
 from hestai_context_mcp.tools.submit_review import submit_review
 
 mcp = FastMCP(
@@ -28,6 +30,7 @@ mcp.tool(clock_in)
 mcp.tool(clock_out)
 mcp.tool(get_context)
 mcp.tool(submit_review)
+mcp.tool(submit_governance)
 
 
 def main() -> None:

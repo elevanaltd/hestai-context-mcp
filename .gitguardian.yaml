@@ -1,0 +1,32 @@
+# GitGuardian configuration
+# Schema reference: https://docs.gitguardian.com/ggshield-docs/reference/config-file
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# tests/tools/test_submit_governance.py contains ADVERSARIAL CREDENTIAL FIXTURES
+# (AKIA-shaped literals) that exist solely to assert RedactionEngine strips them
+# before any submission to the goose adapter. Removing or weakening those fixtures
+# would erode test coverage for two North-Star invariants/assumptions:
+#
+#   * PROD::I2 CREDENTIAL_SAFETY — "zero credentials persist in archives,
+#     fail-closed redaction" (000-HESTAI-CONTEXT-MCP-NORTH-STAR-SUMMARY.oct.md §2).
+#     The test PROVES the invariant holds; the literal is the proof's evidence.
+#
+#   * PROD::A4 REDACTION_PATTERN_COVERAGE — "adversarial review each minor
+#     release or on new provider adapter" (same file, §3). The goose adapter is
+#     one such provider; this test is the adversarial review's executable form.
+#
+# Inline `# ggignore` markers remain on the literals for ggshield local-CLI runs
+# in dev (defense-in-depth). This file is what the GitGuardian SaaS GitHub-App
+# scanner reads on PR check.
+#
+# SCOPE DISCIPLINE
+# ----------------
+# Exclude EXACTLY ONE FILE. Do not broaden this list without re-justifying
+# against PROD::I2 / PROD::A4. A blanket exclusion would defeat the scanner's
+# purpose for real (non-adversarial) credential paths.
+
+version: 2
+secret:
+  ignored_paths:
+    - tests/tools/test_submit_governance.py

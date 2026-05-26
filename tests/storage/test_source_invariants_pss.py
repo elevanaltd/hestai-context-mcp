@@ -267,7 +267,16 @@ class TestLocalFilesystemAdapterHasNoKeyringImport:
 
 
 class TestNoNewToolRegistration:
-    """TEST_167 — server.py registers exactly the four B1 tools."""
+    """TEST_167 — server.py must not register publish/restore PSS plumbing tools.
+
+    The R5 / B2_START_BLOCKER_002 invariant is specifically about preventing
+    premature introduction of ``publish_portable_state`` /
+    ``restore_portable_state`` tools (the sibling test below pins those
+    names). The original allowlist was the four B1 tools at the time of
+    PSS B1 merge. RFC #53 (ratified) authorises ``submit_governance`` as
+    an additive write-side governance authoring tool that is orthogonal
+    to publish/restore PSS plumbing; it joins the allowlist here.
+    """
 
     def test_no_new_tool_registration_for_publish_or_restore(self) -> None:
         path = _SRC_ROOT / "server.py"
@@ -275,10 +284,16 @@ class TestNoNewToolRegistration:
         # Count mcp.tool(...) registrations.
         registrations = re.findall(r"^\s*mcp\.tool\(([\w_]+)\)", source, re.MULTILINE)
         assert sorted(registrations) == sorted(
-            ["clock_in", "clock_out", "get_context", "submit_review"]
+            [
+                "clock_in",
+                "clock_out",
+                "get_context",
+                "submit_review",
+                "submit_governance",  # RFC #53 ratified Symbiotic Intake Engine
+            ]
         ), (
             "B2_START_BLOCKER_002 / R5 violation — server.py must register exactly "
-            f"the four B1 tools; got {registrations}"
+            f"the sanctioned tool allowlist; got {registrations}"
         )
 
     def test_server_does_not_import_publish_or_restore_helpers(self) -> None:
