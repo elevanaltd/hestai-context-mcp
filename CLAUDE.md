@@ -74,11 +74,13 @@ Current coverage: ~89%.
 
 ## Octave Tooling
 
-**octave-mcp version in use: v1.13.0**
+**octave-mcp version in use: v1.13.1**
 
 All `.oct.md` files must be written via `mcp__octave__octave_write` (OCTAVE_WRITE_GATE — never use Write/Edit tools on `.oct.md` files).
 
-**v1.13.0 key changes:**
+**v1.13.1 note:** v1.13.1 is a pure internal refactor — the `write.py` god-object was decomposed into five peer modules (`write_detection`, `write_metrics`, `write_format`, `write_mutation`) with **zero behaviour change, byte-identical output, and an unchanged `octave_write` API**. No project usage changes; all v1.13.0 guidance below still applies verbatim.
+
+**v1.13.0 key changes (still current):**
 
 - `format_style='preserve'` is now available (Strategy A, GH#377). Span-aware mode that keeps clean nodes verbatim and only re-emits dirty/repaired nodes. Diff footprint ≤0.5% of file size on single-key edits. **Use this going forward.**
 - `format_style='expanded'` retains the old full canonical re-emit behaviour.
