@@ -71,3 +71,20 @@ Current coverage: ~89%.
 - Branch from `main`
 - Conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`
 - PRs require CI green
+
+## Octave Tooling
+
+**octave-mcp version in use: v1.13.0**
+
+All `.oct.md` files must be written via `mcp__octave__octave_write` (OCTAVE_WRITE_GATE — never use Write/Edit tools on `.oct.md` files).
+
+**v1.13.0 key changes:**
+
+- `format_style='preserve'` is now available (Strategy A, GH#377). Span-aware mode that keeps clean nodes verbatim and only re-emits dirty/repaired nodes. Diff footprint ≤0.5% of file size on single-key edits. **Use this going forward.**
+- `format_style='expanded'` retains the old full canonical re-emit behaviour.
+- `format_style=null` (explicit) now emits a `DeprecationWarning`. Omitting the parameter silently accepts the future default.
+- **v1.14.0 will flip the default** from full canonical re-emit to `preserve`. To be safe: always pass `format_style='preserve'` explicitly in new octave_write calls.
+
+**Multi-envelope workaround (RD18 token `HO-OCTAVE-WRITE-MULTI-ENVELOPE-WORKAROUND-20260513`):**
+
+`octave_write` with older defaults collapsed multi-envelope Facet ABI cards to META-only via `TN_RECONCILE_CANONICAL`. The workaround was to use direct `Write` tool for FRAME_CARD / CONCEPT_CARD authoring. With v1.13.0 `preserve` mode landing, this should be **retested** — `preserve` mode's span-aware approach may resolve the collapse. Until confirmed fixed, treat the workaround as still active. See `.hestai/decisions/handoff/2026-05-16-rfc-40-mac-b1-carry-forward.md` and octave-mcp #420.
