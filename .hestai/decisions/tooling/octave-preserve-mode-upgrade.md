@@ -1,6 +1,6 @@
 ---
 topic: octave-mcp upgrade
-octave_version: "1.13.0"
+octave_version: "1.13.1"
 date: "2026-05-28"
 branch: update-octave-1-13-1
 status: active
@@ -8,7 +8,11 @@ status: active
 
 # octave-mcp Upgrade: preserve Mode
 
-octave-mcp upgraded to v1.13.0. Key change: `format_style='preserve'` (Strategy A, GH#377) is now the recommended write mode. The default will flip from full canonical re-emit to `preserve` in v1.14.0.
+octave-mcp upgraded to v1.13.0, then to v1.13.1. Key change: `format_style='preserve'` (Strategy A, GH#377) is now the recommended write mode. The default will flip from full canonical re-emit to `preserve` in v1.14.0.
+
+## v1.13.1 (no behaviour change)
+
+v1.13.1 (2026-05-28) is a pure internal refactor: the `write.py` god-object (4887 LOC) was decomposed into five peer modules (`write_detection`, `write_metrics`, `write_format`, `write_mutation`), down to 3197 LOC. **Zero behaviour change, byte-identical output, unchanged `octave_write` API** — all 3614 tests preserved byte-identically. The only addition is octave-mcp's own skill docs (`TELEGRAPHIC_PHRASE`), which do not affect this project. Everything below (the v1.13.0 changes) remains current.
 
 ## Changes in v1.13.0
 
