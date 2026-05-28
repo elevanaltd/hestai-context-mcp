@@ -78,6 +78,7 @@ Mac B#1 surfaced three RDs from their ledger that carry durable binding content.
 - **Substance**: `octave_write` currently collapses multi-envelope Facet ABI cards to META-only via `TN_RECONCILE_CANONICAL`. Direct-write is the project-accepted workaround for FRAME_CARD / CONCEPT_CARD authoring until octave-mcp #420 lands. Two empirical reproductions on record (PR #39 × 5 cards, PR #42 × 2 reproductions on one card). OCTAVE_WRITE_GATE remains binding for all other `.oct.md` authoring.
 - **Cross-refs**: octave-mcp #420, PR #39, PR #42.
 - **Status**: provisional. Token should be `VOID`'d or `SUPERSEDED` when #420 lands.
+- **v1.13.0 addendum (2026-05-28)**: octave-mcp v1.13.0 ships `format_style='preserve'` (Strategy A, GH#377) — span-aware mode that keeps clean nodes verbatim and only re-emits dirty/repaired nodes. This is the most likely path to resolving the multi-envelope collapse. **Retest required**: author a FRAME_CARD or CONCEPT_CARD with multiple envelopes using `octave_write(format_style='preserve')` and verify all envelopes survive. If confirmed fixed, VOID this token. Until confirmed, workaround remains active. See `.hestai/decisions/tooling/octave-preserve-mode-upgrade.md`.
 
 ### Candidate 3 — RD15: Decisions-as-Context is Platform-Scope (historical)
 
