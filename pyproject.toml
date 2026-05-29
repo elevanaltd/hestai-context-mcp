@@ -43,6 +43,14 @@ dev = [
     "ruff~=0.15.0",
     "black==26.1.0",
 ]
+# Test-only dependency: the strict OCTAVE lexer is the ONLY reliable detector
+# for North Star UPOG grammar regressions (the bundled regex validator and the
+# `octave validate` CLI report the data-losing legacy form as "valid"). Used by
+# tests/unit/governance/test_north_star_upog_compliance.py. Not a runtime dep —
+# keeps PROD::I6 LEGACY_INDEPENDENCE / provider-agnostic runtime intact.
+test = [
+    "octave-mcp>=1.13",
+]
 
 [project.urls]
 Homepage = "https://github.com/elevanaltd/hestai-context-mcp"
