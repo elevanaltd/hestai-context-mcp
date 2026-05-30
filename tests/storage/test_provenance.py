@@ -233,14 +233,15 @@ class TestRedactionEngineVersionBumpContract:
             "aws_key",
             "bearer_token",
             "db_password",
+            "github_token",
             "private_key",
         ], (
             "RedactionEngine.PATTERNS changed — bump REDACTION_ENGINE_VERSION "
             "in core.redaction and update this snapshot."
         )
         # Version must be a non-empty string; bump cycle is human-driven
-        # (RISK_004). For B1 the documented value is '1'.
-        assert REDACTION_ENGINE_VERSION == "1"
+        # (RISK_004). For issue #43 Phase 1 (G1+G2+G7 hardening) the value is '2'.
+        assert REDACTION_ENGINE_VERSION == "2"
         # Ruleset hash is computed from PATTERNS — assert it matches a
         # stored snapshot. We don't pin the exact hex here (it would
         # over-couple to regex internals); we assert that toggling a

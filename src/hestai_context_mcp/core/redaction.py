@@ -26,10 +26,16 @@ REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
 #: Engine version embedded in artifact metadata (RISK_004 + G6 + A4).
 #: Bump this constant whenever PATTERNS or redaction semantics change so
 #: downstream readers can detect stale provenance and refuse to treat
-#: older redactor output as safe (PROD::I2 fail-closed). The B1
-#: arbitration record locks the value at '1' for the LocalFilesystem
-#: adapter ship.
-REDACTION_ENGINE_VERSION: str = "1"
+#: older redactor output as safe (PROD::I2 fail-closed).
+#:
+#: BUMP POLICY: Increment by 1 on every pattern addition or semantic change.
+#: Version history:
+#:   '1' — B1 LocalFilesystem adapter ship (ADR-0013): ai_api_key, aws_key,
+#:          private_key, bearer_token, db_password.
+#:   '2' — Phase 1 hardening (issue #43): G1 stream-mode PEM fix (full-buffer
+#:          copy_and_redact), G2 GitHub PAT patterns (classic + fine-grained),
+#:          G7 sk- character class widened to include hyphens/underscores.
+REDACTION_ENGINE_VERSION: str = "2"
 
 
 @dataclass(frozen=True)
@@ -53,11 +59,13 @@ class RedactionEngine:
     """Engine for detecting and redacting sensitive credentials from text.
 
     Detects the following credential patterns (high-confidence, low false-positive):
-    - AI API keys (sk-... with 20+ alphanumeric characters)
+    - AI API keys (sk-... including Anthropic sk-ant-* and OpenAI sk-proj-*/sk-svcacct-*)
     - AWS access keys (AKIA..., ASIA... with 16 uppercase alphanumeric)
     - PEM-encoded private keys (BEGIN/END PRIVATE KEY blocks)
     - Bearer authentication tokens
     - Database passwords in connection strings (scheme://user:password@host)
+    - GitHub Personal Access Tokens (classic ghp_/gho_/ghu_/ghs_/ghr_,
+      fine-grained github_pat_)
 
     Usage:
         engine = RedactionEngine()
@@ -72,10 +80,18 @@ class RedactionEngine:
 
     # Pre-compiled regex patterns for performance.
     # Each entry: pattern_name -> (compiled_regex, replacement_string)
+    #
+    # BUMP POLICY: When adding or changing any pattern here, also increment
+    # REDACTION_ENGINE_VERSION above. This ensures artifact provenance records
+    # accurately reflect which pattern set was active at archive time.
     PATTERNS: dict[str, tuple[Pattern[str], str]] = {
-        # AI API keys: sk- followed by 20+ alphanumeric chars
+        # AI API keys: sk- followed by 20+ alphanumeric, hyphen, or underscore chars.
+        # G7 fix: widened from [a-zA-Z0-9] to [a-zA-Z0-9\-_] to capture full tokens
+        # for Anthropic (sk-ant-api03-...) and OpenAI (sk-proj-..., sk-svcacct-...).
+        # Without hyphens/underscores in the character class the regex terminates at
+        # the first hyphen, leaving the entropy tail in cleartext.
         "ai_api_key": (
-            re.compile(r"sk-[a-zA-Z0-9]{20,}"),
+            re.compile(r"sk-[a-zA-Z0-9\-_]{20,}"),
             "[REDACTED_API_KEY]",
         ),
         # AWS access keys: AKIA or ASIA followed by 16 uppercase alphanumeric
@@ -85,7 +101,9 @@ class RedactionEngine:
         ),
         # PEM private keys: entire BEGIN/END block.
         # Uses [A-Z ]* (zero or more) to handle both qualified keys
-        # (e.g., "RSA PRIVATE KEY") and bare "PRIVATE KEY".
+        # (e.g., "RSA PRIVATE KEY") and bare "PRIVATE KEY").
+        # NOTE: DOTALL is required; this pattern only works on a full-buffer string.
+        # copy_and_redact uses full-buffer mode (G1 fix) to guarantee this pattern fires.
         "private_key": (
             re.compile(
                 r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
@@ -110,6 +128,17 @@ class RedactionEngine:
         "db_password": (
             re.compile(r"(\w+://[^:]+:)(.+)(@)(?=[^@]*$)"),
             r"\1[REDACTED_PASSWORD]\3",
+        ),
+        # GitHub Personal Access Tokens (G2).
+        # Classic PATs (40-char alphanumeric tail, introduced 2021):
+        #   ghp_ (personal), gho_ (OAuth app), ghu_ (user-to-server),
+        #   ghs_ (server-to-server), ghr_ (refresh token)
+        # Fine-grained PATs (82-char alphanumeric+underscore tail):
+        #   github_pat_
+        # GitHub recommends these prefixes for secret scanning since 2021.
+        "github_token": (
+            re.compile(r"gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}"),
+            "[REDACTED_GITHUB_TOKEN]",
         ),
     }
 
@@ -160,8 +189,23 @@ class RedactionEngine:
     def copy_and_redact(cls, src: Path, dst: Path) -> None:
         """Copy file from src to dst with redaction applied.
 
-        Stream-based processing for memory efficiency with large files.
-        Processes line-by-line to avoid loading entire file into memory.
+        G1 fix: Reads the entire source file into memory before redacting.
+        The previous line-by-line streaming approach silently missed multi-line
+        PEM blocks because the private_key DOTALL pattern requires seeing the
+        full BEGIN...END span, which never occurs within a single line.
+
+        For this use-case (transcript JSONL archives on a single-developer
+        laptop), files are bounded in size and full-buffer processing is safe.
+        The memory cost is acceptable; the correctness gain is mandatory
+        (PROD::I2: zero credentials persist in archives).
+
+        ADR-tier decision (issue #43 Phase 1): Option (c) — full-buffer read.
+        Options (a) look-back buffer and (b) BEGIN-marker accumulator were
+        considered but rejected: both require stateful line-iteration logic
+        that adds accumulative complexity without proportional benefit at this
+        scale. Option (c) eliminates the entire class of stream-fragmentation
+        bugs with minimal code change.
+
         Fail-closed: raises exception if source doesn't exist or redaction fails.
         If redaction fails, destination file is not created (or deleted if
         partially written).
@@ -178,13 +222,9 @@ class RedactionEngine:
             raise FileNotFoundError(f"Source file not found: {src}")
 
         try:
-            with (
-                open(src, encoding="utf-8") as src_file,
-                open(dst, "w", encoding="utf-8") as dst_file,
-            ):
-                for line in src_file:
-                    redacted_line = cls.redact_content(line)
-                    dst_file.write(redacted_line)
+            content = src.read_text(encoding="utf-8")
+            redacted = cls.redact_content(content)
+            dst.write_text(redacted, encoding="utf-8")
         except Exception:
             # Fail-closed: remove partial output if redaction failed
             if dst.exists():

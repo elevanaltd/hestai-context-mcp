@@ -524,16 +524,15 @@ class TestG1MultiLinePemStreamMode:
 # ---------------------------------------------------------------------------
 
 # Synthetic GitHub PAT shapes — NOT real tokens
-# Classic PAT prefixes: ghp_, gho_, ghu_, ghs_, ghr_ + 36 alphanumeric chars
-FAKE_GHP_TOKEN = "ghp_TESTONLYNotARealTokenAAAAAAAAAAAA"  # nosec: 36 chars after prefix
-FAKE_GHO_TOKEN = "gho_TESTONLYNotARealTokenBBBBBBBBBBBB"  # nosec: 36 chars after prefix
-FAKE_GHU_TOKEN = "ghu_TESTONLYNotARealTokenCCCCCCCCCCCC"  # nosec: 36 chars after prefix
-FAKE_GHS_TOKEN = "ghs_TESTONLYNotARealTokenDDDDDDDDDDDD"  # nosec: 36 chars after prefix
-FAKE_GHR_TOKEN = "ghr_TESTONLYNotARealTokenEEEEEEEEEEEE"  # nosec: 36 chars after prefix
-# Fine-grained PAT: github_pat_ + 82 alphanumeric/underscore chars
-FAKE_GITHUB_PAT_FG = (
-    "github_pat_TESTONLYNotARealFinegrainedTokenAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_BBBBBBBBBBB"
-)  # nosec: synthetic, 82 chars after github_pat_
+# Classic PAT prefixes: ghp_, gho_, ghu_, ghs_, ghr_ + exactly 36 alphanumeric chars
+# (GitHub classic PAT total length = prefix(4) + underscore(1) + 36 = 41 chars)
+FAKE_GHP_TOKEN = "ghp_TESTONLYNotARealTokenAAAAAAAAAAAAAAA"  # nosec: 36 chars after ghp_
+FAKE_GHO_TOKEN = "gho_TESTONLYNotARealTokenBBBBBBBBBBBBBBB"  # nosec: 36 chars after gho_
+FAKE_GHU_TOKEN = "ghu_TESTONLYNotARealTokenCCCCCCCCCCCCCCC"  # nosec: 36 chars after ghu_
+FAKE_GHS_TOKEN = "ghs_TESTONLYNotARealTokenDDDDDDDDDDDDDDD"  # nosec: 36 chars after ghs_
+FAKE_GHR_TOKEN = "ghr_TESTONLYNotARealTokenEEEEEEEEEEEEEEE"  # nosec: 36 chars after ghr_
+# Fine-grained PAT: github_pat_ + exactly 82 alphanumeric/underscore chars (total 93)
+FAKE_GITHUB_PAT_FG = "github_pat_TESTONLYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # nosec: synthetic, 82 chars after github_pat_
 
 
 class TestG2GitHubPATRedaction:
@@ -598,8 +597,12 @@ class TestG2GitHubPATRedaction:
 
 # Synthetic Anthropic / OpenAI key shapes with hyphens and underscores
 FAKE_ANT_KEY = "sk-ant-api03-TESTONLYNotARealKeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # nosec
-FAKE_PROJ_KEY = "sk-proj-TESTONLYNotARealProjectKeyBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"  # nosec
-FAKE_SVCACCT_KEY = "sk-svcacct-TESTONLYNotARealServiceKeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # nosec
+FAKE_PROJ_KEY = (
+    "sk-proj-TESTONLYNotARealProjectKeyBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"  # nosec
+)
+FAKE_SVCACCT_KEY = (
+    "sk-svcacct-TESTONLYNotARealServiceKeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # nosec
+)
 
 
 class TestG7WideSkPattern:
