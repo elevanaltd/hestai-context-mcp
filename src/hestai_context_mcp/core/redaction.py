@@ -207,8 +207,8 @@ class RedactionEngine:
         bugs with minimal code change.
 
         Fail-closed: raises exception if source doesn't exist or redaction fails.
-        If redaction fails, destination file is not created (or deleted if
-        partially written).
+        Only the temp file written by this attempt is removed on failure; a
+        pre-existing destination is preserved.
 
         Args:
             src: Source file path.
@@ -221,12 +221,13 @@ class RedactionEngine:
         if not src.exists():
             raise FileNotFoundError(f"Source file not found: {src}")
 
+        tmp = dst.with_suffix(dst.suffix + ".tmp")
         try:
             content = src.read_text(encoding="utf-8")
             redacted = cls.redact_content(content)
-            dst.write_text(redacted, encoding="utf-8")
+            tmp.write_text(redacted, encoding="utf-8")
+            tmp.replace(dst)
         except Exception:
-            # Fail-closed: remove partial output if redaction failed
-            if dst.exists():
-                dst.unlink()
+            if tmp.exists():
+                tmp.unlink()
             raise

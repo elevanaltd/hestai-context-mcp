@@ -430,6 +430,39 @@ class TestCopyAndRedact:
         # Fail-closed: dst should not exist
         assert not dst.exists()
 
+    @pytest.mark.unit
+    def test_copy_and_redact_preserves_preexisting_dst_on_read_failure(self, tmp_path) -> None:
+        """Pre-existing dst is NOT deleted when src.read_text() raises OSError.
+
+        Regression guard for the fail-closed regression introduced in the original
+        except block: if dst already existed before this call and src.read_text()
+        raises (before any write to dst occurs), the old except block deleted dst
+        even though this attempt never wrote to it.
+
+        The atomic temp-write fix ensures only the .tmp file written by this
+        attempt is removed on failure; a pre-existing destination is preserved.
+        """
+        from unittest.mock import patch
+
+        src = tmp_path / "source.jsonl"
+        dst = tmp_path / "redacted.jsonl"
+
+        # dst pre-exists with known content
+        dst.write_text("pre-existing content", encoding="utf-8")
+        # src must exist so the FileNotFoundError guard passes
+        src.write_text("some content", encoding="utf-8")
+
+        # Force src.read_text to raise OSError before any write to dst
+        with (
+            patch("pathlib.Path.read_text", side_effect=OSError("simulated read error")),
+            pytest.raises(OSError, match="simulated read error"),
+        ):
+            RedactionEngine.copy_and_redact(src, dst)
+
+        # dst must still exist with its original content
+        assert dst.exists(), "pre-existing dst was incorrectly deleted on src read failure"
+        assert dst.read_text(encoding="utf-8") == "pre-existing content"
+
 
 # ---------------------------------------------------------------------------
 # G1: Multi-line PEM block evasion (stream-mode CRITICAL gap)
