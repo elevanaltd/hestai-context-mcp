@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import pytest
 
-from hestai_context_mcp.core.redaction import RedactionEngine, RedactionResult
+from hestai_context_mcp.core.redaction import (
+    REDACTION_ENGINE_VERSION,
+    RedactionEngine,
+    RedactionResult,
+)
 
 # ---------------------------------------------------------------------------
 # Synthetic test credential factories (conftest-style, inline for clarity)
@@ -425,3 +429,324 @@ class TestCopyAndRedact:
             RedactionEngine.copy_and_redact(src, dst)
         # Fail-closed: dst should not exist
         assert not dst.exists()
+
+    @pytest.mark.unit
+    def test_copy_and_redact_preserves_preexisting_dst_on_read_failure(self, tmp_path) -> None:
+        """Pre-existing dst is NOT deleted when src.read_text() raises OSError.
+
+        Regression guard for the fail-closed regression introduced in the original
+        except block: if dst already existed before this call and src.read_text()
+        raises (before any write to dst occurs), the old except block deleted dst
+        even though this attempt never wrote to it.
+
+        The atomic temp-write fix ensures only the .tmp file written by this
+        attempt is removed on failure; a pre-existing destination is preserved.
+        """
+        from unittest.mock import patch
+
+        src = tmp_path / "source.jsonl"
+        dst = tmp_path / "redacted.jsonl"
+
+        # dst pre-exists with known content
+        dst.write_text("pre-existing content", encoding="utf-8")
+        # src must exist so the FileNotFoundError guard passes
+        src.write_text("some content", encoding="utf-8")
+
+        # Force src.read_text to raise OSError before any write to dst
+        with (
+            patch("pathlib.Path.read_text", side_effect=OSError("simulated read error")),
+            pytest.raises(OSError, match="simulated read error"),
+        ):
+            RedactionEngine.copy_and_redact(src, dst)
+
+        # dst must still exist with its original content
+        assert dst.exists(), "pre-existing dst was incorrectly deleted on src read failure"
+        assert dst.read_text(encoding="utf-8") == "pre-existing content"
+
+
+# ---------------------------------------------------------------------------
+# G1: Multi-line PEM block evasion (stream-mode CRITICAL gap)
+# ---------------------------------------------------------------------------
+
+# Synthetic PEM block bodies — NOT real keys
+_PEM_BODY_G1 = (
+    "MIIEowIBAAKTESTONLYNotARealKeyAAAAAAAAAAAAAAAAAAAAAAAA\n"
+    "TESTONLYBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBb=\n"
+    "TESTONLYCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCc="
+)  # nosec: synthetic test data
+
+_MULTILINE_RSA_PEM = (
+    "-----BEGIN RSA PRIVATE KEY-----\n" + _PEM_BODY_G1 + "\n-----END RSA PRIVATE KEY-----"
+)  # nosec: synthetic test data
+
+_MULTILINE_GENERIC_PEM = (
+    "-----BEGIN PRIVATE KEY-----\n" + _PEM_BODY_G1 + "\n-----END PRIVATE KEY-----"
+)  # nosec: synthetic test data
+
+
+class TestG1MultiLinePemStreamMode:
+    """G1: Verify multi-line PEM blocks are redacted via copy_and_redact (streaming path).
+
+    The CRITICAL bug: copy_and_redact iterated line-by-line, so the DOTALL regex
+    never saw a span from BEGIN to END. These tests prove the fix.
+    """
+
+    def test_multiline_pem_redacted_by_redact_method(self, engine: RedactionEngine) -> None:
+        """Baseline: engine.redact() handles multi-line PEM correctly (full buffer)."""
+        result = engine.redact(_MULTILINE_RSA_PEM)
+        assert "[REDACTED_PRIVATE_KEY]" in result.redacted_text
+        assert "TESTONLY" not in result.redacted_text
+        assert result.redaction_count >= 1
+
+    def test_multiline_pem_redacted_via_copy_and_redact(self, tmp_path) -> None:
+        """G1 adversarial: copy_and_redact MUST redact a multi-line PEM block.
+
+        This is the actual streaming path used by clock_out archival. A multi-line
+        PEM block that spans many lines must be fully redacted — not left verbatim.
+        """
+        src = tmp_path / "transcript.jsonl"
+        dst = tmp_path / "redacted.jsonl"
+        content = (
+            '{"role": "user", "content": "Here is my key:\\n'
+            + _MULTILINE_RSA_PEM.replace("\n", "\\n")
+            + '"}\n'
+            '{"role": "assistant", "content": "Received."}\n'
+        )
+        src.write_text(content, encoding="utf-8")
+        RedactionEngine.copy_and_redact(src, dst)
+        output = dst.read_text(encoding="utf-8")
+        assert "BEGIN RSA PRIVATE KEY" not in output
+        assert "END RSA PRIVATE KEY" not in output
+        assert "[REDACTED_PRIVATE_KEY]" in output
+
+    def test_multiline_pem_literal_newlines_via_copy_and_redact(self, tmp_path) -> None:
+        """G1 adversarial: PEM block with literal newlines across file lines.
+
+        When a PEM block is stored with real newlines (not escaped), the streaming
+        path must still redact it. This is the hardest case for a line-by-line reader.
+        """
+        src = tmp_path / "transcript_literal.jsonl"
+        dst = tmp_path / "redacted_literal.jsonl"
+        # Embed real newlines — this is what a pasted key in a transcript looks like
+        content = "prefix text\n" + _MULTILINE_RSA_PEM + "\nsuffix text\n"
+        src.write_text(content, encoding="utf-8")
+        RedactionEngine.copy_and_redact(src, dst)
+        output = dst.read_text(encoding="utf-8")
+        assert "BEGIN RSA PRIVATE KEY" not in output
+        assert "END RSA PRIVATE KEY" not in output
+        assert "TESTONLY" not in output
+        assert "[REDACTED_PRIVATE_KEY]" in output
+        # Surrounding content preserved
+        assert "prefix text" in output
+        assert "suffix text" in output
+
+    def test_generic_multiline_pem_via_copy_and_redact(self, tmp_path) -> None:
+        """G1 adversarial: Generic PRIVATE KEY PEM block with literal newlines."""
+        src = tmp_path / "generic_pem.jsonl"
+        dst = tmp_path / "generic_pem_redacted.jsonl"
+        content = "before\n" + _MULTILINE_GENERIC_PEM + "\nafter\n"
+        src.write_text(content, encoding="utf-8")
+        RedactionEngine.copy_and_redact(src, dst)
+        output = dst.read_text(encoding="utf-8")
+        assert "BEGIN PRIVATE KEY" not in output
+        assert "[REDACTED_PRIVATE_KEY]" in output
+
+
+# ---------------------------------------------------------------------------
+# G2: GitHub Personal Access Token patterns (CRITICAL gap)
+# ---------------------------------------------------------------------------
+
+# Synthetic GitHub PAT shapes — NOT real tokens
+# Classic PAT prefixes: ghp_, gho_, ghu_, ghs_, ghr_ + exactly 36 alphanumeric chars
+# (GitHub classic PAT total length = prefix(4) + underscore(1) + 36 = 41 chars)
+FAKE_GHP_TOKEN = "ghp_TESTONLYNotARealTokenAAAAAAAAAAAAAAA"  # nosec: 36 chars after ghp_
+FAKE_GHO_TOKEN = "gho_TESTONLYNotARealTokenBBBBBBBBBBBBBBB"  # nosec: 36 chars after gho_
+FAKE_GHU_TOKEN = "ghu_TESTONLYNotARealTokenCCCCCCCCCCCCCCC"  # nosec: 36 chars after ghu_
+FAKE_GHS_TOKEN = "ghs_TESTONLYNotARealTokenDDDDDDDDDDDDDDD"  # nosec: 36 chars after ghs_
+FAKE_GHR_TOKEN = "ghr_TESTONLYNotARealTokenEEEEEEEEEEEEEEE"  # nosec: 36 chars after ghr_
+# Fine-grained PAT: github_pat_ + exactly 82 alphanumeric/underscore chars (total 93)
+FAKE_GITHUB_PAT_FG = "github_pat_TESTONLYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # nosec: synthetic, 82 chars after github_pat_
+
+
+class TestG2GitHubPATRedaction:
+    """G2: GitHub Personal Access Token redaction (classic and fine-grained)."""
+
+    def test_ghp_classic_pat_redacted(self, engine: RedactionEngine) -> None:
+        """Classic PAT with ghp_ prefix must be redacted."""
+        result = engine.redact(f"token: {FAKE_GHP_TOKEN}")
+        assert FAKE_GHP_TOKEN not in result.redacted_text
+        assert "[REDACTED_GITHUB_TOKEN]" in result.redacted_text
+        assert result.redaction_count >= 1
+
+    def test_gho_classic_pat_redacted(self, engine: RedactionEngine) -> None:
+        """Classic PAT with gho_ prefix must be redacted."""
+        result = engine.redact(FAKE_GHO_TOKEN)
+        assert FAKE_GHO_TOKEN not in result.redacted_text
+        assert "[REDACTED_GITHUB_TOKEN]" in result.redacted_text
+
+    def test_ghu_classic_pat_redacted(self, engine: RedactionEngine) -> None:
+        """Classic PAT with ghu_ prefix must be redacted."""
+        result = engine.redact(FAKE_GHU_TOKEN)
+        assert FAKE_GHU_TOKEN not in result.redacted_text
+
+    def test_ghs_classic_pat_redacted(self, engine: RedactionEngine) -> None:
+        """Classic PAT with ghs_ prefix must be redacted."""
+        result = engine.redact(FAKE_GHS_TOKEN)
+        assert FAKE_GHS_TOKEN not in result.redacted_text
+
+    def test_ghr_classic_pat_redacted(self, engine: RedactionEngine) -> None:
+        """Classic PAT with ghr_ prefix must be redacted."""
+        result = engine.redact(FAKE_GHR_TOKEN)
+        assert FAKE_GHR_TOKEN not in result.redacted_text
+
+    def test_github_pat_fine_grained_redacted(self, engine: RedactionEngine) -> None:
+        """Fine-grained PAT with github_pat_ prefix must be redacted."""
+        result = engine.redact(f"gh auth token output: {FAKE_GITHUB_PAT_FG}")
+        assert FAKE_GITHUB_PAT_FG not in result.redacted_text
+        assert "[REDACTED_GITHUB_TOKEN]" in result.redacted_text
+
+    def test_github_pat_in_copy_and_redact(self, tmp_path) -> None:
+        """GitHub PAT must be redacted via the streaming copy_and_redact path."""
+        src = tmp_path / "transcript.jsonl"
+        dst = tmp_path / "redacted.jsonl"
+        src.write_text(
+            f'{{"output": "token {FAKE_GHP_TOKEN}"}}\n',
+            encoding="utf-8",
+        )
+        RedactionEngine.copy_and_redact(src, dst)
+        output = dst.read_text(encoding="utf-8")
+        assert FAKE_GHP_TOKEN not in output
+        assert "[REDACTED_GITHUB_TOKEN]" in output
+
+    def test_github_pat_type_in_redacted_types(self, engine: RedactionEngine) -> None:
+        """Redacted types must include 'github_token' when a PAT is found."""
+        result = engine.redact(FAKE_GHP_TOKEN)
+        assert "github_token" in result.redacted_types
+
+
+# ---------------------------------------------------------------------------
+# G7: Widened sk- pattern — hyphens and underscores in token body
+# ---------------------------------------------------------------------------
+
+# Synthetic Anthropic / OpenAI key shapes with hyphens and underscores
+FAKE_ANT_KEY = "sk-ant-api03-TESTONLYNotARealKeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # nosec
+FAKE_PROJ_KEY = (
+    "sk-proj-TESTONLYNotARealProjectKeyBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"  # nosec
+)
+FAKE_SVCACCT_KEY = (
+    "sk-svcacct-TESTONLYNotARealServiceKeyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # nosec
+)
+
+
+class TestG7WideSkPattern:
+    """G7: sk- pattern widened to include hyphens and underscores in token body.
+
+    Anthropic uses sk-ant-api03-... and OpenAI uses sk-proj-..., sk-svcacct-...
+    These have hyphens and underscores in the token body. The original pattern
+    [a-zA-Z0-9]{20,} would terminate at the first hyphen, leaving the entropy
+    tail in cleartext.
+    """
+
+    def test_anthropic_key_full_token_redacted(self, engine: RedactionEngine) -> None:
+        """Anthropic sk-ant-api03-... key: FULL token must be replaced, not just prefix."""
+        result = engine.redact(f"ANTHROPIC_API_KEY={FAKE_ANT_KEY}")
+        assert FAKE_ANT_KEY not in result.redacted_text
+        assert "[REDACTED_API_KEY]" in result.redacted_text
+        # The entropy tail must not survive
+        assert "TESTONLY" not in result.redacted_text
+
+    def test_openai_proj_key_full_token_redacted(self, engine: RedactionEngine) -> None:
+        """OpenAI sk-proj-... key: FULL token must be replaced."""
+        result = engine.redact(FAKE_PROJ_KEY)
+        assert FAKE_PROJ_KEY not in result.redacted_text
+        assert "[REDACTED_API_KEY]" in result.redacted_text
+
+    def test_openai_svcacct_key_full_token_redacted(self, engine: RedactionEngine) -> None:
+        """OpenAI sk-svcacct-... key: FULL token must be replaced."""
+        result = engine.redact(FAKE_SVCACCT_KEY)
+        assert FAKE_SVCACCT_KEY not in result.redacted_text
+
+    def test_sk_key_with_hyphens_entropy_tail_not_leaked(self, engine: RedactionEngine) -> None:
+        """Adversarial: confirm no partial match leaves entropy tail in cleartext."""
+        # This is the specific failure mode: regex stops at first hyphen
+        token = "sk-ant-api03-TESTONLYaabbccddeeffgghh"  # nosec: synthetic
+        result = engine.redact(token)
+        assert result.redacted_text == "[REDACTED_API_KEY]"
+
+    def test_sk_short_still_not_redacted(self, engine: RedactionEngine) -> None:
+        """Short sk- strings (below threshold) still must not be redacted (no regression)."""
+        result = engine.redact("sk-short is not a key")
+        assert result.redaction_count == 0
+
+    def test_sk_key_in_copy_and_redact(self, tmp_path) -> None:
+        """Anthropic key must be fully redacted via copy_and_redact streaming path."""
+        src = tmp_path / "transcript.jsonl"
+        dst = tmp_path / "redacted.jsonl"
+        src.write_text(
+            f'{{"api_key": "{FAKE_ANT_KEY}"}}\n',
+            encoding="utf-8",
+        )
+        RedactionEngine.copy_and_redact(src, dst)
+        output = dst.read_text(encoding="utf-8")
+        assert FAKE_ANT_KEY not in output
+        assert "[REDACTED_API_KEY]" in output
+
+
+# ---------------------------------------------------------------------------
+# Negative cases: must NOT redact (false-positive prevention)
+# ---------------------------------------------------------------------------
+
+
+class TestFalsePositivePrevention:
+    """Verify that common identifiers are NOT over-redacted.
+
+    These are the negative cases: strings that LOOK like they could match
+    but must pass through unchanged.
+    """
+
+    def test_uuid_not_redacted(self, engine: RedactionEngine) -> None:
+        """Standard UUID (8-4-4-4-12 hex) must not be redacted."""
+        uuid = "550e8400-e29b-41d4-a716-446655440000"
+        result = engine.redact(f"session_id: {uuid}")
+        assert uuid in result.redacted_text
+        assert result.redaction_count == 0
+
+    def test_git_commit_sha_not_redacted(self, engine: RedactionEngine) -> None:
+        """40-character hex git commit SHA must not be redacted."""
+        sha = "c019894a1b2c3d4e5f6789012345678901234567"
+        result = engine.redact(f"commit: {sha}")
+        assert sha in result.redacted_text
+        assert result.redaction_count == 0
+
+    def test_session_id_from_server_not_redacted(self, engine: RedactionEngine) -> None:
+        """Session IDs produced by this server (UUID format) must not be redacted."""
+        # Session IDs are UUIDs: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        session_id = "531a518f-48c1-4e4c-9e23-f8aa5fb5532e"
+        result = engine.redact(f"session_id: {session_id}")
+        assert session_id in result.redacted_text
+        assert result.redaction_count == 0
+
+    def test_short_hexadecimal_not_redacted(self, engine: RedactionEngine) -> None:
+        """Short hex strings (commit short SHAs) must not be redacted."""
+        short_sha = "c019894"
+        result = engine.redact(f"ref: {short_sha}")
+        assert short_sha in result.redacted_text
+        assert result.redaction_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Engine version integrity
+# ---------------------------------------------------------------------------
+
+
+class TestEngineVersion:
+    """Verify REDACTION_ENGINE_VERSION is correctly bumped after pattern additions."""
+
+    def test_engine_version_is_2(self) -> None:
+        """REDACTION_ENGINE_VERSION must be '2' after Phase 1 pattern additions.
+
+        Bump policy: increment on every pattern addition so downstream readers
+        can identify artifacts produced by an older (potentially incomplete)
+        redactor.
+        """
+        assert REDACTION_ENGINE_VERSION == "2"
