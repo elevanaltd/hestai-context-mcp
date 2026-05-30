@@ -146,6 +146,25 @@ class TestToolStubs:
         assert result["status"] == "ok"
         assert result["dry_run"] is True
 
+    def test_submit_governance_registered(self):
+        """submit_governance should be importable and registered (RFC #53 Gate A)."""
+        import asyncio
+
+        from hestai_context_mcp.tools.submit_governance import submit_governance
+
+        assert callable(submit_governance)
+        # Smoke: calling with invalid working_dir returns structured failure (PROD I4)
+        result = asyncio.run(
+            submit_governance(
+                working_dir="/nonexistent",
+                octave_content="not valid",
+                dry_run=True,
+            )
+        )
+        assert "success" in result
+        assert "validation_errors" in result
+        assert "dry_run" in result
+
 
 @pytest.mark.smoke
 class TestCoreModules:
