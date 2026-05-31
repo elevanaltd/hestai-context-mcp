@@ -22,7 +22,7 @@ _CONTEXT_BUDGET_CHARS = 25_000
 # Exact-match pattern for TOKEN or ID field assignment (OCTAVE form).
 # Matches:  TOKEN::"<value>"  or  ID::"<value>"  where <value> == the token.
 # Used instead of plain substring search to avoid prefix-match false positives.
-_FIELD_EXACT_RE_TEMPLATE = r'(?:TOKEN|ID)::\s*"{token}"'
+_FIELD_EXACT_RE_TEMPLATE = r'(?:TOKEN::\s*"{token}"|ID::\s*(?:"{token}"|{token})(?=\s|$))'
 
 
 def _search_manifest(manifest_path: Path, token: str) -> bool:

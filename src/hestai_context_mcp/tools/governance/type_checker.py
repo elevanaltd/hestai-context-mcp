@@ -55,6 +55,9 @@ _KNOWN_TYPES = frozenset([_DECISION_RECORD_TYPE]) | _FACET_CARD_TYPES
 # REPO_ID field for facet cards
 _REPO_ID_RE = re.compile(r"REPO_ID::([^\s]+)")
 
+# Safe slug pattern for REPO_ID validation (alphanumeric, hyphens, underscores only)
+_SAFE_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
 
 @dataclass
 class ValidationResult:
@@ -261,6 +264,13 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
             errors.append(
                 f"REPO_ID field is required for {card_type} but was not found. "
                 "Add REPO_ID::<repo-slug> to the META block."
+            )
+            return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
+
+        # --- Check 4b: REPO_ID slug safety (P1 cubic finding) ---
+        if not _SAFE_SLUG_RE.match(repo_id):
+            errors.append(
+                f"REPO_ID must be a safe slug (alphanumeric, hyphens, underscores only): {repo_id}"
             )
             return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
 

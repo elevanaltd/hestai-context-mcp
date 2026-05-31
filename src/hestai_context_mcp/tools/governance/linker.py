@@ -332,7 +332,7 @@ def run_linker(
     # Bug 4: path traversal guard -- verify target_path is inside working_dir
     try:
         target_path.resolve().relative_to(working_dir.resolve())
-    except ValueError:
+    except (ValueError, RuntimeError, OSError):
         return {
             "token": token,
             "card_type": card_type,
