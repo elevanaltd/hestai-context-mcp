@@ -4,7 +4,7 @@ Validates OCTAVE governance content using regex only. No AST parsing,
 no octave-mcp invocation, no external library imports.
 
 North Star boundary (PROD §4 IS_NOT: document format system — octave-mcp owns):
-  - Sentinel detection: r'===(TYPE_NAME)===' finds the opening envelope name.
+  - Sentinel detection: first line must be r'^===([A-Z_]+)===$' (document start).
   - TYPE field: r'TYPE::(WORD)' within the first ===META=== block.
   - TOKEN field: r'TOKEN::"([^"]+)"' for DECISION_RECORD.
   - ID field: r'ID::"([^"]+)"' for facet cards.
@@ -23,8 +23,9 @@ from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 # Regex patterns (compiled once at module load)
 # ---------------------------------------------------------------------------
 
-# OCTAVE sentinel: matches ===TYPENAME=== at the start of a line
-_SENTINEL_RE = re.compile(r"(?m)^===([A-Z_]+)===\s*$")
+# OCTAVE sentinel: must be at the very start of the document (Bug 7 fix).
+# Pattern: starts with ===TYPENAME=== on the very first line.
+_SENTINEL_RE = re.compile(r"\A===([A-Z_]+)===\s*(?:\r?\n|$)")
 
 # TYPE field in META block
 _TYPE_RE = re.compile(r"(?m)TYPE::(\w+)")
@@ -75,8 +76,12 @@ class ValidationResult:
 
 
 def _extract_sentinel(content: str) -> str | None:
-    """Extract the first OCTAVE envelope name (e.g. 'DECISION_RECORD')."""
-    m = _SENTINEL_RE.search(content)
+    """Extract the OCTAVE envelope name anchored to document start.
+
+    The sentinel must be the very first thing in the document.
+    Returns None if the document does not start with ===TYPE_NAME===.
+    """
+    m = _SENTINEL_RE.match(content)
     if m:
         return m.group(1)
     return None
@@ -129,8 +134,8 @@ def _compute_target_path(
     working_dir: Path,
     card_type: str,
     token: str,
-    content: str,
-) -> Path | None:
+    repo_id: str,
+) -> Path:
     """Compute the canonical target path per ADR-RFC-ARCH-001 placement rules.
 
     DECISION_RECORD → .hestai/decisions/{token}.oct.md
@@ -141,32 +146,31 @@ def _compute_target_path(
         working_dir: Project root directory.
         card_type: The card type string (e.g. 'DECISION_RECORD').
         token: The extracted TOKEN or ID value.
-        content: Raw OCTAVE content (for REPO_ID extraction in facet cards).
+        repo_id: The REPO_ID string (only used for facet cards).
 
     Returns:
-        Computed Path or None if placement cannot be determined.
+        Computed absolute Path.
     """
     if card_type == _DECISION_RECORD_TYPE:
         return working_dir / ".hestai" / "decisions" / f"{token}.oct.md"
 
-    if card_type in _FACET_CARD_TYPES:
-        repo_id = _extract_repo_id(content) or "unknown"
-        return working_dir / ".hestai" / "context" / "concepts" / repo_id / f"{token}.oct.md"
-
-    return None
+    # Facet card types
+    return working_dir / ".hestai" / "context" / "concepts" / repo_id / f"{token}.oct.md"
 
 
 def validate_octave_content(working_dir: Path, content: str) -> ValidationResult:
     """Validate OCTAVE governance content using regex-only checks.
 
     Performs these checks in order (early return on fundamental failures):
-      1. OCTAVE sentinel presence (===TYPE===).
+      1. OCTAVE sentinel at document start (===TYPE===).
       2. TYPE field extraction and known-type check.
+      2a. Sentinel↔TYPE consistency (sentinel name must equal TYPE value).
       3. TOKEN (DECISION_RECORD) or ID (facet cards) extraction.
       4. TOKEN/ID format validation.
+      4a. REPO_ID required for facet cards.
       5. SUPERSEDED_BY target existence check (if present).
       6. Token uniqueness check (must NOT already exist for new records).
-      7. Target path computation.
+      7. Path traversal guard + target path computation.
 
     Never raises on bad input. Always returns a ValidationResult.
 
@@ -188,10 +192,13 @@ def validate_octave_content(working_dir: Path, content: str) -> ValidationResult
 
 def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> ValidationResult:
     """Internal validation implementation."""
-    # --- Check 1: OCTAVE sentinel presence ---
+    # --- Check 1: OCTAVE sentinel at document start (Bug 7) ---
     sentinel = _extract_sentinel(content)
     if sentinel is None:
-        errors.append("No OCTAVE sentinel found. Content must start with ===TYPE=== envelope.")
+        errors.append(
+            "No OCTAVE sentinel found at document start. "
+            "Content must begin with ===TYPE_NAME=== on the very first line."
+        )
         return ValidationResult(valid=False, errors=errors)
 
     # --- Check 2: TYPE field extraction ---
@@ -206,8 +213,17 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
         )
         return ValidationResult(valid=False, errors=errors, card_type=card_type)
 
+    # --- Check 2a: Sentinel↔TYPE consistency (Bug 3) ---
+    if sentinel != card_type:
+        errors.append(
+            f"Sentinel '==={sentinel}===' does not match TYPE field '{card_type}'. "
+            "The opening envelope name and the META TYPE field must be identical."
+        )
+        return ValidationResult(valid=False, errors=errors, card_type=card_type)
+
     # --- Check 3: TOKEN / ID extraction ---
     token: str | None = None
+    repo_id: str | None = None
 
     if card_type == _DECISION_RECORD_TYPE:
         token = _extract_token(content)
@@ -239,6 +255,15 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
             )
             return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
 
+        # --- Check 4a: REPO_ID required for facet cards (Bug 8) ---
+        repo_id = _extract_repo_id(content)
+        if not repo_id:
+            errors.append(
+                f"REPO_ID field is required for {card_type} but was not found. "
+                "Add REPO_ID::<repo-slug> to the META block."
+            )
+            return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
+
     # --- Check 5: SUPERSEDED_BY target existence ---
     superseded_by = _extract_superseded_by(content)
     if superseded_by is not None and not lookup_token_deterministic(working_dir, superseded_by):
@@ -258,10 +283,11 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
     if errors:
         return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
 
-    # --- Check 7: Compute target path ---
+    # --- Check 7: Compute target path + path traversal guard (Bug 4 via caller) ---
     target_path: Path | None = None
     if token is not None:
-        target_path = _compute_target_path(working_dir, card_type, token, content)
+        effective_repo_id = repo_id or ""
+        target_path = _compute_target_path(working_dir, card_type, token, effective_repo_id)
 
     return ValidationResult(
         valid=True,

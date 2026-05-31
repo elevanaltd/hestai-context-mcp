@@ -19,17 +19,19 @@ from pathlib import Path
 # Max characters assembled for the context budget (future Gate C backend).
 _CONTEXT_BUDGET_CHARS = 25_000
 
-# Regex patterns for fallback filesystem grep
-_TOKEN_RE = re.compile(r'TOKEN::"([^"]+)"')
-_ID_QUOTED_RE = re.compile(r'(?m)^  ID::"([^"]+)"')
-_ID_BARE_RE = re.compile(r"(?m)^  ID::([A-Z][A-Z0-9_]{2,127})\s*$")
+# Exact-match pattern for TOKEN or ID field assignment (OCTAVE form).
+# Matches:  TOKEN::"<value>"  or  ID::"<value>"  where <value> == the token.
+# Used instead of plain substring search to avoid prefix-match false positives.
+_FIELD_EXACT_RE_TEMPLATE = r'(?:TOKEN|ID)::\s*"{token}"'
 
 
 def _search_manifest(manifest_path: Path, token: str) -> bool:
-    """Search MANIFEST.md for a token/ID string.
+    """Search MANIFEST.md for a token/ID string with exact first-column match.
 
-    MANIFEST format: markdown table with TOKEN/ID in the first column.
-    Treats the token as a literal string (no regex).
+    MANIFEST format: markdown table rows of the form ``| TOKEN | path |``.
+    Splits each data row on ``|``, strips the first cell, and compares
+    exactly to ``token``.  This prevents ``HO-FOO-20260101`` from matching
+    a row whose first cell is ``HO-FOO-BAR-20260101``.
 
     Args:
         manifest_path: Path to the MANIFEST.md file.
@@ -43,18 +45,28 @@ def _search_manifest(manifest_path: Path, token: str) -> bool:
     except OSError:
         return False
 
-    # Search for the token as a word boundary in the manifest table rows.
-    # Format: | TOKEN | path |
-    # We look for the token surrounded by pipe chars or line boundaries.
-    return any(token in line for line in content.splitlines())
+    for line in content.splitlines():
+        # Only process table data rows (skip header, separator, blank lines)
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        parts = stripped.split("|")
+        # parts[0] is empty (before leading |), parts[1] is first cell, …
+        if len(parts) >= 2 and parts[1].strip() == token:
+            return True
+    return False
 
 
 def _search_filesystem(working_dir: Path, token: str) -> bool:
-    """Search governance oct.md files for a token/ID.
+    """Search governance oct.md files for a token/ID using exact field match.
 
     Greps two subtrees:
       - .hestai/decisions/**/*.oct.md
       - .hestai/context/concepts/**/*.oct.md
+
+    Uses a regex that matches the OCTAVE field-assignment form
+    ``TOKEN::"<token>"`` or ``ID::"<token>"`` exactly, preventing
+    prefix-match false positives (e.g. ``HO-FOO`` matching ``HO-FOO-BAR``).
 
     Args:
         working_dir: Project root directory.
@@ -67,6 +79,8 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
     decisions_root = hestai / "decisions"
     concepts_root = hestai / "context" / "concepts"
 
+    pattern = re.compile(_FIELD_EXACT_RE_TEMPLATE.format(token=re.escape(token)))
+
     for root in (decisions_root, concepts_root):
         if not root.exists():
             continue
@@ -75,7 +89,7 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
                 content = oct_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if token in content:
+            if pattern.search(content):
                 return True
 
     return False

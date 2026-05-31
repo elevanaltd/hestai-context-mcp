@@ -1,6 +1,6 @@
 """MANIFEST generator for governance artifacts.
 
-Builds a flat TOKEN/ID → file_path index from:
+Builds a flat TOKEN/ID -> file_path index from:
   - .hestai/decisions/**/*.oct.md  (DECISION_RECORD, TOKEN field)
   - .hestai/context/concepts/**/*.oct.md  (facet cards, ID field)
 
@@ -10,7 +10,9 @@ Linker commit to keep the index fresh for lookup_token_deterministic.
 North Star boundary: no OCTAVE AST parsing — regex extraction only.
 """
 
+import os
 import re
+import tempfile
 from pathlib import Path
 
 # Regex to extract TOKEN from DECISION_RECORD
@@ -93,15 +95,28 @@ def get_manifest_path(working_dir: Path) -> Path:
 
 
 def write_manifest(working_dir: Path) -> None:
-    """Write the MANIFEST to the canonical path.
+    """Write the MANIFEST to the canonical path using an atomic temp-file rename.
 
     Builds the manifest from the current filesystem state and writes it
-    atomically to .hestai/MANIFEST.md.
+    atomically to .hestai/MANIFEST.md via a temporary file + os.replace()
+    so a concurrent reader never sees a partial write.
 
     Args:
         working_dir: Project root directory.
     """
     manifest_path = get_manifest_path(working_dir)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    content = build_manifest(working_dir)
-    manifest_path.write_text(content, encoding="utf-8")
+    new_content = build_manifest(working_dir)
+
+    # Atomic write: temp file in same directory + os.replace (Bug 6 fix)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        dir=manifest_path.parent,
+        delete=False,
+        suffix=".tmp",
+        encoding="utf-8",
+    ) as tmp_f:
+        tmp_f.write(new_content)
+        tmp_name = tmp_f.name
+
+    os.replace(tmp_name, manifest_path)

@@ -9,11 +9,12 @@ Accepts a ValidationResult + raw OCTAVE content, then:
 
 dry_run=True: skips all git/file operations, returns what WOULD happen.
 
-GitHub token resolution is lifted from tools/submit_review.py:73–127.
-That code is copied and adapted here — NOT imported — per task spec (PROD I6
+GitHub token resolution is lifted from tools/submit_review.py:73-127.
+That code is copied and adapted here -- NOT imported -- per task spec (PROD I6
 and to avoid coupling to submit_review internals).
 """
 
+import logging
 import os
 import re
 import subprocess
@@ -24,8 +25,10 @@ from typing import Any
 from hestai_context_mcp.tools.governance.manifest import write_manifest
 from hestai_context_mcp.tools.governance.type_checker import ValidationResult
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
-# GitHub token resolution (lifted from submit_review.py:73–127)
+# GitHub token resolution (lifted from submit_review.py:73-127)
 # ---------------------------------------------------------------------------
 
 _GH_AUTH_TIMEOUT_SECONDS = 5
@@ -47,7 +50,7 @@ def _resolve_github_token() -> str | None:
         The resolved token string, or None if no tier supplied a token.
 
     Security:
-        The returned value is opaque — callers MUST NOT log it, embed it
+        The returned value is opaque -- callers MUST NOT log it, embed it
         in error messages, or include it in any structured response.
     """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -209,13 +212,13 @@ def _open_pr(
     """
     title = f"feat(governance): add {token} [{card_type}]"
     body = (
-        f"## Governance Intake — Gate A Rails (RFC #53)\n\n"
+        f"## Governance Intake -- Gate A Rails (RFC #53)\n\n"
         f"- **Token/ID**: `{token}`\n"
         f"- **Type**: `{card_type}`\n"
         f"- **Branch**: `{branch_name}`\n\n"
-        f"Gate A only — no LLM, no AST. Dumb Type Checker = regex sentinel + path validation.\n"
-        f"Gate B will wire octave-mcp validator.\n\n"
-        f"Closes/References: RFC #53\n"
+        "Gate A only -- no LLM, no AST. Dumb Type Checker = regex sentinel + path validation.\n"
+        "Gate B will wire octave-mcp validator.\n\n"
+        "Closes/References: RFC #53\n"
     )
 
     env = dict(os.environ)
@@ -282,7 +285,10 @@ def run_linker(
     target_path = validation.target_path
 
     branch_name = _compute_branch_name(token)
-    target_path_str = str(target_path.relative_to(working_dir)) if target_path else None
+    try:
+        target_path_str = str(target_path.relative_to(working_dir)) if target_path else None
+    except ValueError:
+        target_path_str = str(target_path) if target_path else None
 
     if dry_run:
         return {
@@ -319,7 +325,24 @@ def run_linker(
             "target_path": None,
             "branch": branch_name,
             "pr_url": None,
-            "error": "target_path is None — cannot write file",
+            "error": "target_path is None -- cannot write file",
+            "dry_run": False,
+        }
+
+    # Bug 4: path traversal guard -- verify target_path is inside working_dir
+    try:
+        target_path.resolve().relative_to(working_dir.resolve())
+    except ValueError:
+        return {
+            "token": token,
+            "card_type": card_type,
+            "target_path": target_path_str,
+            "branch": branch_name,
+            "pr_url": None,
+            "error": (
+                f"target_path {target_path} is outside working_dir {working_dir} "
+                "-- path traversal rejected"
+            ),
             "dry_run": False,
         }
 
@@ -327,13 +350,14 @@ def run_linker(
     if err:
         errors.append(err)
 
-    # 3. Update MANIFEST
+    # 3. Update MANIFEST (best-effort -- failure is non-fatal, Bug 9 fix)
     if not errors:
         try:
             write_manifest(working_dir)
         except Exception as exc:  # noqa: BLE001
-            # MANIFEST update failure is non-fatal (best-effort)
-            errors.append(f"MANIFEST update failed (non-fatal): {exc}")
+            # Log warning instead of appending to errors; MANIFEST failure
+            # must not block the commit/PR flow (Bug 9: non-fatal).
+            logger.warning("MANIFEST update failed (non-fatal): %s", exc)
 
     # 4. Commit
     commit_message = f"chore(governance): add {token} [{card_type}]"

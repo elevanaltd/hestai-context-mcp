@@ -570,6 +570,223 @@ class TestSubmitGovernanceTool:
 
 
 # ---------------------------------------------------------------------------
+# Fix 3 tests: cubic P1/P2 review findings
+# ---------------------------------------------------------------------------
+
+
+class TestManifestPrefixFalsePositive:
+    """MANIFEST exact-match guard: shorter token must NOT match longer token row."""
+
+    @pytest.mark.unit
+    def test_prefix_token_does_not_match_longer_row(self, tmp_path: Path) -> None:
+        """HO-FOO-20260101 must NOT match a MANIFEST row whose first cell is HO-FOO-BAR-20260101.
+
+        Before the exact first-column match fix, a substring search would
+        incorrectly return True because 'HO-FOO-20260101' appears inside
+        'HO-FOO-BAR-20260101'.  The fix compares stripped cells exactly.
+        """
+        from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
+
+        manifest = tmp_path / ".hestai" / "MANIFEST.md"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            "| TOKEN/ID | path |\n"
+            "| --- | --- |\n"
+            "| HO-FOO-BAR-20260101 | .hestai/decisions/HO-FOO-BAR-20260101.oct.md |\n"
+        )
+
+        # The shorter token must NOT match the longer row
+        assert lookup_token_deterministic(tmp_path, "HO-FOO-20260101") is False
+
+    @pytest.mark.unit
+    def test_exact_token_still_found(self, tmp_path: Path) -> None:
+        """Exact token match is still found after the guard is in place."""
+        from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
+
+        manifest = tmp_path / ".hestai" / "MANIFEST.md"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            "| TOKEN/ID | path |\n"
+            "| --- | --- |\n"
+            "| HO-FOO-BAR-20260101 | .hestai/decisions/HO-FOO-BAR-20260101.oct.md |\n"
+        )
+
+        # The exact token must still be found
+        assert lookup_token_deterministic(tmp_path, "HO-FOO-BAR-20260101") is True
+
+
+class TestSentinelTypeMismatch:
+    """Sentinel name must equal the TYPE field value."""
+
+    @pytest.mark.unit
+    def test_sentinel_type_mismatch_produces_error(self, tmp_path: Path) -> None:
+        """===DECISION_RECORD=== envelope with TYPE::CONCEPT_CARD is rejected.
+
+        The sentinel (envelope name) and the META TYPE field must be identical.
+        A mismatch indicates a copy-paste error or malformed document.
+        """
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = """\
+===DECISION_RECORD===
+META:
+  TYPE::CONCEPT_CARD
+  REPO_ID::hestai-context-mcp
+  ID::"SOME_CONCEPT"
+===END===
+"""
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is False
+        assert any(
+            "DECISION_RECORD" in e or "CONCEPT_CARD" in e or "match" in e.lower()
+            for e in result.errors
+        )
+
+
+class TestPathTraversalGuard:
+    """Path traversal attempt via crafted TOKEN must be rejected by the linker."""
+
+    @pytest.mark.unit
+    def test_path_traversal_rejected(self, tmp_path: Path) -> None:
+        """A target_path that resolves outside working_dir is rejected.
+
+        The linker must call target_path.resolve().relative_to(working_dir.resolve())
+        and return an error (not raise) when the check fails.
+        """
+        import subprocess
+
+        from hestai_context_mcp.tools.governance.linker import run_linker
+        from hestai_context_mcp.tools.governance.type_checker import ValidationResult
+
+        # Set up a minimal git repo so branch creation is possible
+        subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=str(tmp_path),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=str(tmp_path),
+            check=True,
+            capture_output=True,
+        )
+        (tmp_path / "README.md").write_text("test")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "initial"],
+            cwd=str(tmp_path),
+            check=True,
+            capture_output=True,
+        )
+
+        # Construct a ValidationResult whose target_path escapes working_dir
+        outside_path = tmp_path.parent / "escape" / "evil.oct.md"
+        fake_validation = ValidationResult(
+            valid=True,
+            errors=[],
+            token="HO-ESCAPE-20260101",
+            card_type="DECISION_RECORD",
+            target_path=outside_path,
+        )
+
+        output = run_linker(
+            working_dir=tmp_path,
+            validation=fake_validation,
+            octave_content="===DECISION_RECORD===\n===END===\n",
+            dry_run=False,
+        )
+
+        assert output["error"] is not None
+        assert "outside" in output["error"].lower() or "traversal" in output["error"].lower()
+        # The evil file must NOT have been written
+        assert not outside_path.exists()
+
+
+class TestSentinelLeadingWhitespace:
+    """Non-OCTAVE content with === after leading whitespace must be rejected.
+
+    The sentinel regex is anchored to \\A (absolute document start).
+    A document with whitespace before === must fail Check 1.
+    """
+
+    @pytest.mark.unit
+    def test_indented_sentinel_rejected(self, tmp_path: Path) -> None:
+        """Leading whitespace before === sentinel must cause rejection."""
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = "  ===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n===END===\n"
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is False
+        assert any("sentinel" in e.lower() or "start" in e.lower() for e in result.errors)
+
+    @pytest.mark.unit
+    def test_newline_before_sentinel_rejected(self, tmp_path: Path) -> None:
+        """Newline before === sentinel must cause rejection."""
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = "\n===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n===END===\n"
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is False
+        assert any("sentinel" in e.lower() or "start" in e.lower() for e in result.errors)
+
+
+class TestFacetCardMissingRepoId:
+    """Facet card without REPO_ID field must be rejected with a clear error."""
+
+    @pytest.mark.unit
+    def test_concept_card_missing_repo_id_rejected(self, tmp_path: Path) -> None:
+        """CONCEPT_CARD without REPO_ID produces a validation error.
+
+        Before the fix, _extract_repo_id returning None would cause a silent
+        coerce to 'unknown' and place the file in .hestai/context/concepts/unknown/.
+        After the fix it returns a hard validation error.
+        """
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = """\
+===CONCEPT_CARD===
+META:
+  TYPE::CONCEPT_CARD
+  ID::"MISSING_REPO_CONCEPT"
+  STATUS::proposed
+  CARD_SCHEMA_VERSION::1
+  GENERATED_AT_COMMIT::"N/A"
+  SOURCE_HASH::"N/A"
+===END===
+"""
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is False
+        assert any("REPO_ID" in e for e in result.errors)
+
+    @pytest.mark.unit
+    def test_frame_card_missing_repo_id_rejected(self, tmp_path: Path) -> None:
+        """FRAME_CARD without REPO_ID produces a validation error."""
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = """\
+===FRAME_CARD===
+META:
+  TYPE::FRAME_CARD
+  ID::"MISSING_REPO_FRAME"
+  STATUS::proposed
+  CARD_SCHEMA_VERSION::1
+  GENERATED_AT_COMMIT::"N/A"
+  SOURCE_HASH::"N/A"
+===END===
+"""
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is False
+        assert any("REPO_ID" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
 # Integration test: real temp git repo (linker dry_run=False mock)
 # ---------------------------------------------------------------------------
 

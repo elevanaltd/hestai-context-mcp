@@ -276,7 +276,9 @@ class TestNoNewToolRegistration:
         registrations = re.findall(r"^\s*mcp\.tool\(([\w_]+)\)", source, re.MULTILINE)
         # RFC #53 Gate A: submit_governance is the approved additive tool (PROD I5 — additive only).
         # B2_START_BLOCKER_002 / R5 blocks publish/restore — NOT intake tools per RFC #53.
-        allowed = sorted(["clock_in", "clock_out", "get_context", "submit_review", "submit_governance"])
+        allowed = sorted(
+            ["clock_in", "clock_out", "get_context", "submit_review", "submit_governance"]
+        )
         assert sorted(registrations) == allowed, (
             "B2_START_BLOCKER_002 / R5 violation — server.py must register exactly "
             f"the five approved tools (RFC #53 Gate A additive); got {registrations}"
