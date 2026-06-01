@@ -13,10 +13,59 @@ Coverage targets:
 - MANIFEST generation from a fixture tree
 """
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _init_isolated_git_repo(repo: Path) -> None:
+    """Initialise a temp git repo isolated from the developer's global config.
+
+    Cross-environment robustness: a global ``init.templateDir`` /
+    ``core.hooksPath`` (e.g. a ``commit-msg`` hook that blocks commits to
+    ``main``) would otherwise fire inside this temp repo and break the linker
+    integration tests in some sandboxes (observed in goose's sandbox; passes in
+    CI and most dev envs). We pin ``core.hooksPath`` to a non-existent path on
+    the repo's OWN config so EVERY subsequent git invocation against this repo
+    -- including the commits run internally by ``run_linker`` -- runs with hooks
+    disabled, regardless of the developer's global git configuration.
+    """
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
+    # Disable hooks for this repo specifically (persists for all later git calls,
+    # including run_linker's internal checkout/add/commit).
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(repo / ".git" / "no-hooks")],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    (repo / "README.md").write_text("test")
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -654,33 +703,11 @@ class TestPathTraversalGuard:
         The linker must call target_path.resolve().relative_to(working_dir.resolve())
         and return an error (not raise) when the check fails.
         """
-        import subprocess
-
         from hestai_context_mcp.tools.governance.linker import run_linker
         from hestai_context_mcp.tools.governance.type_checker import ValidationResult
 
-        # Set up a minimal git repo so branch creation is possible
-        subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
-        (tmp_path / "README.md").write_text("test")
-        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "initial"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
+        # Minimal git repo (hooks disabled) so branch creation is possible.
+        _init_isolated_git_repo(tmp_path)
 
         # Construct a ValidationResult whose target_path escapes working_dir
         outside_path = tmp_path.parent / "escape" / "evil.oct.md"
@@ -896,31 +923,9 @@ class TestLinkerIntegration:
         gh pr create is mocked at the linker module level to avoid real GitHub
         interaction while allowing real git operations.
         """
-        import subprocess
-
-        # Set up a real git repo
-        subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
-        # Create initial commit so branch operations work
-        (tmp_path / "README.md").write_text("test")
-        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "initial"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
+        # Real git repo with hooks disabled so the linker's internal
+        # checkout/add/commit are not blocked by a developer's global git hooks.
+        _init_isolated_git_repo(tmp_path)
 
         from hestai_context_mcp.tools.governance.linker import run_linker
         from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
