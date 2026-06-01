@@ -13,10 +13,59 @@ Coverage targets:
 - MANIFEST generation from a fixture tree
 """
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _init_isolated_git_repo(repo: Path) -> None:
+    """Initialise a temp git repo isolated from the developer's global config.
+
+    Cross-environment robustness: a global ``init.templateDir`` /
+    ``core.hooksPath`` (e.g. a ``commit-msg`` hook that blocks commits to
+    ``main``) would otherwise fire inside this temp repo and break the linker
+    integration tests in some sandboxes (observed in goose's sandbox; passes in
+    CI and most dev envs). We pin ``core.hooksPath`` to a non-existent path on
+    the repo's OWN config so EVERY subsequent git invocation against this repo
+    -- including the commits run internally by ``run_linker`` -- runs with hooks
+    disabled, regardless of the developer's global git configuration.
+    """
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
+    # Disable hooks for this repo specifically (persists for all later git calls,
+    # including run_linker's internal checkout/add/commit).
+    subprocess.run(
+        ["git", "config", "core.hooksPath", str(repo / ".git" / "no-hooks")],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    (repo / "README.md").write_text("test")
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -654,33 +703,11 @@ class TestPathTraversalGuard:
         The linker must call target_path.resolve().relative_to(working_dir.resolve())
         and return an error (not raise) when the check fails.
         """
-        import subprocess
-
         from hestai_context_mcp.tools.governance.linker import run_linker
         from hestai_context_mcp.tools.governance.type_checker import ValidationResult
 
-        # Set up a minimal git repo so branch creation is possible
-        subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
-        (tmp_path / "README.md").write_text("test")
-        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "initial"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
+        # Minimal git repo (hooks disabled) so branch creation is possible.
+        _init_isolated_git_repo(tmp_path)
 
         # Construct a ValidationResult whose target_path escapes working_dir
         outside_path = tmp_path.parent / "escape" / "evil.oct.md"
@@ -786,6 +813,99 @@ META:
         assert any("REPO_ID" in e for e in result.errors)
 
 
+class TestFacetCardUnsafeRepoIdSlug:
+    """Adversarial REPO_ID slug rejection (P1 security guard, type_checker.py).
+
+    REPO_ID feeds directly into the facet-card target path
+    (.hestai/context/concepts/{repo_id}/{id}.oct.md). An attacker-controlled
+    REPO_ID containing path separators or ``..`` segments could direct the
+    linker to write OUTSIDE the governance tree (path traversal). The Dumb
+    Type Checker MUST reject any REPO_ID that is not a safe slug
+    (alphanumeric / hyphen / underscore only) BEFORE a target_path is ever
+    computed -- defence in depth ahead of the linker's resolve() guard.
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "unsafe_repo_id",
+        [
+            "../../../src/evil",  # classic relative traversal
+            "a/b",  # any path separator
+            "..",  # parent-dir segment
+            "../sibling",  # single-level escape
+            "/etc/passwd",  # absolute path
+            "repo;rm",  # shell-meta noise (semicolon)
+            "repo\x00null",  # NUL byte injection
+        ],
+    )
+    def test_unsafe_repo_id_rejected_no_target_path(
+        self, tmp_path: Path, unsafe_repo_id: str
+    ) -> None:
+        """An unsafe REPO_ID is rejected with a slug error and yields NO target_path.
+
+        This is the security regression guard for the P1 cubic finding. The
+        validator must:
+          1. mark the result invalid,
+          2. emit an error naming REPO_ID / slug,
+          3. NOT produce a target_path (so no path-traversing path escapes to
+             the linker), and
+          4. NOT have created the traversal directory on disk.
+        """
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = (
+            "===CONCEPT_CARD===\n"
+            "META:\n"
+            "  TYPE::CONCEPT_CARD\n"
+            f"  REPO_ID::{unsafe_repo_id}\n"
+            '  ID::"EVIL_CONCEPT"\n'
+            "  STATUS::proposed\n"
+            "  CARD_SCHEMA_VERSION::1\n"
+            "===END===\n"
+        )
+
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is False
+        assert any(
+            "REPO_ID" in e or "slug" in e.lower() for e in result.errors
+        ), f"expected a REPO_ID/slug rejection error, got: {result.errors}"
+        # Critical: a rejected REPO_ID must never yield a (path-traversing) target_path.
+        assert result.target_path is None
+        # And the validator (read-only) must not have created the traversal dir.
+        assert not (tmp_path / "src" / "evil").exists()
+        assert list(tmp_path.rglob("EVIL_CONCEPT.oct.md")) == []
+
+    @pytest.mark.unit
+    def test_safe_repo_id_still_accepted(self, tmp_path: Path) -> None:
+        """Control: a safe slug with hyphens/underscores still validates and stays in-tree.
+
+        Guards against the rejection being over-broad (rejecting legitimate
+        repo slugs). The computed target_path must remain inside the
+        .hestai/context/concepts tree.
+        """
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = (
+            "===CONCEPT_CARD===\n"
+            "META:\n"
+            "  TYPE::CONCEPT_CARD\n"
+            "  REPO_ID::hestai-context_mcp-2\n"
+            '  ID::"SAFE_CONCEPT"\n'
+            "  STATUS::proposed\n"
+            "  CARD_SCHEMA_VERSION::1\n"
+            "===END===\n"
+        )
+
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is True, result.errors
+        assert result.target_path is not None
+        # target_path must resolve inside working_dir (no traversal).
+        result.target_path.resolve().relative_to(tmp_path.resolve())
+        assert "hestai-context_mcp-2" in str(result.target_path)
+
+
 # ---------------------------------------------------------------------------
 # Integration test: real temp git repo (linker dry_run=False mock)
 # ---------------------------------------------------------------------------
@@ -803,31 +923,9 @@ class TestLinkerIntegration:
         gh pr create is mocked at the linker module level to avoid real GitHub
         interaction while allowing real git operations.
         """
-        import subprocess
-
-        # Set up a real git repo
-        subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
-        # Create initial commit so branch operations work
-        (tmp_path / "README.md").write_text("test")
-        subprocess.run(["git", "add", "."], cwd=str(tmp_path), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "initial"],
-            cwd=str(tmp_path),
-            check=True,
-            capture_output=True,
-        )
+        # Real git repo with hooks disabled so the linker's internal
+        # checkout/add/commit are not blocked by a developer's global git hooks.
+        _init_isolated_git_repo(tmp_path)
 
         from hestai_context_mcp.tools.governance.linker import run_linker
         from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
