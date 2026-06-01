@@ -786,6 +786,99 @@ META:
         assert any("REPO_ID" in e for e in result.errors)
 
 
+class TestFacetCardUnsafeRepoIdSlug:
+    """Adversarial REPO_ID slug rejection (P1 security guard, type_checker.py).
+
+    REPO_ID feeds directly into the facet-card target path
+    (.hestai/context/concepts/{repo_id}/{id}.oct.md). An attacker-controlled
+    REPO_ID containing path separators or ``..`` segments could direct the
+    linker to write OUTSIDE the governance tree (path traversal). The Dumb
+    Type Checker MUST reject any REPO_ID that is not a safe slug
+    (alphanumeric / hyphen / underscore only) BEFORE a target_path is ever
+    computed -- defence in depth ahead of the linker's resolve() guard.
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "unsafe_repo_id",
+        [
+            "../../../src/evil",  # classic relative traversal
+            "a/b",  # any path separator
+            "..",  # parent-dir segment
+            "../sibling",  # single-level escape
+            "/etc/passwd",  # absolute path
+            "repo;rm",  # shell-meta noise (semicolon)
+            "repo\x00null",  # NUL byte injection
+        ],
+    )
+    def test_unsafe_repo_id_rejected_no_target_path(
+        self, tmp_path: Path, unsafe_repo_id: str
+    ) -> None:
+        """An unsafe REPO_ID is rejected with a slug error and yields NO target_path.
+
+        This is the security regression guard for the P1 cubic finding. The
+        validator must:
+          1. mark the result invalid,
+          2. emit an error naming REPO_ID / slug,
+          3. NOT produce a target_path (so no path-traversing path escapes to
+             the linker), and
+          4. NOT have created the traversal directory on disk.
+        """
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = (
+            "===CONCEPT_CARD===\n"
+            "META:\n"
+            "  TYPE::CONCEPT_CARD\n"
+            f"  REPO_ID::{unsafe_repo_id}\n"
+            '  ID::"EVIL_CONCEPT"\n'
+            "  STATUS::proposed\n"
+            "  CARD_SCHEMA_VERSION::1\n"
+            "===END===\n"
+        )
+
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is False
+        assert any(
+            "REPO_ID" in e or "slug" in e.lower() for e in result.errors
+        ), f"expected a REPO_ID/slug rejection error, got: {result.errors}"
+        # Critical: a rejected REPO_ID must never yield a (path-traversing) target_path.
+        assert result.target_path is None
+        # And the validator (read-only) must not have created the traversal dir.
+        assert not (tmp_path / "src" / "evil").exists()
+        assert list(tmp_path.rglob("EVIL_CONCEPT.oct.md")) == []
+
+    @pytest.mark.unit
+    def test_safe_repo_id_still_accepted(self, tmp_path: Path) -> None:
+        """Control: a safe slug with hyphens/underscores still validates and stays in-tree.
+
+        Guards against the rejection being over-broad (rejecting legitimate
+        repo slugs). The computed target_path must remain inside the
+        .hestai/context/concepts tree.
+        """
+        from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+        content = (
+            "===CONCEPT_CARD===\n"
+            "META:\n"
+            "  TYPE::CONCEPT_CARD\n"
+            "  REPO_ID::hestai-context_mcp-2\n"
+            '  ID::"SAFE_CONCEPT"\n'
+            "  STATUS::proposed\n"
+            "  CARD_SCHEMA_VERSION::1\n"
+            "===END===\n"
+        )
+
+        result = validate_octave_content(tmp_path, content)
+
+        assert result.valid is True, result.errors
+        assert result.target_path is not None
+        # target_path must resolve inside working_dir (no traversal).
+        result.target_path.resolve().relative_to(tmp_path.resolve())
+        assert "hestai-context_mcp-2" in str(result.target_path)
+
+
 # ---------------------------------------------------------------------------
 # Integration test: real temp git repo (linker dry_run=False mock)
 # ---------------------------------------------------------------------------
