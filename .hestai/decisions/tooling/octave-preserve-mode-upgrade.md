@@ -118,6 +118,33 @@ full CST node set (`Document`, `Section`, `Block`, `Assignment`, …). So the va
 available **in-process as a library**, not only over MCP/stdio. The "Gate B over stdio" plan
 predates this and is now only one of two viable integration shapes.
 
+### Runtime OCTAVE usage map (review findings, 2026-06-01)
+
+The system consumes the OCTAVE **format** at runtime in five places, but depends on the
+octave-mcp **library** in none of them — it hand-rolls regex extractors. Distinguish "uses
+the format" (a notation we read) from "depends on the implementation" (the library). The
+table below records which consumers would genuinely benefit from the real parser:
+
+| Runtime consumer | OCTAVE operation | Needs octave-mcp? | Why |
+|---|---|---|---|
+| `core/north_star_parser.py` | Extract `IMMUTABLES` / `SCOPE_BOUNDARIES` | No | Shallow field extraction on project-controlled docs already canonicalized by `octave_write`. |
+| `core/context_steward.py` | Extract phase constraints from workflow docs | No | Same — targeted `KEY::value` / `[…]` pulls, not full AST. |
+| `core/phase.py` | Extract `PHASE::` declaration | No | Single line read. |
+| `tools/governance/lexer.py` | Token/ID existence lookup across `.oct.md` | No | String/regex search, not parsing. |
+| `tools/governance/type_checker.py` → **`submit_governance` (LIVE MCP tool)** | **Validate** operator-submitted OCTAVE (sentinel/TYPE/TOKEN, regex-only) | **YES** | Self-documented as "intentionally dumb by design"; defers real validation to "Gate B → octave-mcp over stdio". |
+
+**Conclusion:** exactly one runtime concern genuinely needs the real parser — **trustworthy
+validation of operator-submitted governance content** (`submit_governance` Gate A → Gate B).
+The four extraction consumers do not; regex is defensible there because inputs are
+project-authored (written through the OCTAVE_WRITE_GATE) and the extractions are shallow.
+
+**Live risk:** `submit_governance` is a registered, shipping MCP tool (`mcp.tool(submit_governance)`
+in `server.py`). Its Gate A checker can pass a regex-valid-but-semantically-broken OCTAVE doc
+and commit it — the same false-green class the pyproject test comment warns about ("the
+bundled regex validator … reports the data-losing legacy form as valid"). No North Star
+violation today (Gate A is documented as approximate), but this is the concrete motivation for
+scheduling Gate B, and Gate B is the point at which octave-mcp must leave the `test` extra.
+
 ### Options (decision deferred — not taken this pass)
 
 1. **Test-only pin bump (DONE this pass).** Keep octave-mcp test-only, pinned `>=1.15`.
@@ -163,5 +190,3 @@ claim to fix #420.
 
 **References**: octave-mcp #420, #460, #487, #488;
 `.hestai/decisions/handoff/2026-05-16-rfc-40-mac-b1-carry-forward.md` (RD18 candidate).
-</content>
-</invoke>
