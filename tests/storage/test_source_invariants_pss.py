@@ -267,18 +267,21 @@ class TestLocalFilesystemAdapterHasNoKeyringImport:
 
 
 class TestNoNewToolRegistration:
-    """TEST_167 — server.py registers exactly the four B1 tools."""
+    """TEST_167 — server.py registers the B1 tools plus RFC-53 Gate A submit_governance."""
 
     def test_no_new_tool_registration_for_publish_or_restore(self) -> None:
         path = _SRC_ROOT / "server.py"
         source = path.read_text(encoding="utf-8")
         # Count mcp.tool(...) registrations.
         registrations = re.findall(r"^\s*mcp\.tool\(([\w_]+)\)", source, re.MULTILINE)
-        assert sorted(registrations) == sorted(
-            ["clock_in", "clock_out", "get_context", "submit_review"]
-        ), (
+        # RFC #53 Gate A: submit_governance is the approved additive tool (PROD I5 — additive only).
+        # B2_START_BLOCKER_002 / R5 blocks publish/restore — NOT intake tools per RFC #53.
+        allowed = sorted(
+            ["clock_in", "clock_out", "get_context", "submit_review", "submit_governance"]
+        )
+        assert sorted(registrations) == allowed, (
             "B2_START_BLOCKER_002 / R5 violation — server.py must register exactly "
-            f"the four B1 tools; got {registrations}"
+            f"the five approved tools (RFC #53 Gate A additive); got {registrations}"
         )
 
     def test_server_does_not_import_publish_or_restore_helpers(self) -> None:
