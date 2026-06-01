@@ -49,7 +49,7 @@ dev = [
 # tests/unit/governance/test_north_star_upog_compliance.py. Not a runtime dep —
 # keeps PROD::I6 LEGACY_INDEPENDENCE / provider-agnostic runtime intact.
 test = [
-    "octave-mcp>=1.13",
+    "octave-mcp>=1.15",
 ]
 
 [project.urls]

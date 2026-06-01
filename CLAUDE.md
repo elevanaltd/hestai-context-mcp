@@ -74,19 +74,35 @@ Current coverage: ~89%.
 
 ## Octave Tooling
 
-**octave-mcp version in use: v1.13.1**
+**octave-mcp version in use: v1.15.0**
 
 All `.oct.md` files must be written via `mcp__octave__octave_write` (OCTAVE_WRITE_GATE — never use Write/Edit tools on `.oct.md` files).
 
-**v1.13.1 note:** v1.13.1 is a pure internal refactor — the `write.py` god-object was decomposed into five peer modules (`write_detection`, `write_metrics`, `write_format`, `write_mutation`) with **zero behaviour change, byte-identical output, and an unchanged `octave_write` API**. No project usage changes; all v1.13.0 guidance below still applies verbatim.
+Full upgrade detail: `.hestai/decisions/tooling/octave-preserve-mode-upgrade.md`.
 
-**v1.13.0 key changes (still current):**
+**Dependency status:** octave-mcp is a **test-only** optional dependency (`[project.optional-dependencies].test`, `octave-mcp>=1.15`), used only by `tests/unit/governance/test_north_star_upog_compliance.py`. Runtime code does **not** import it — real OCTAVE validation is deferred to a planned "Gate B", per North Star §4 (`document format system — octave-mcp owns`) and PROD::I6. The validator-integration options (test-only / optional `validation` extra / hard runtime dep) are assessed in the decision doc; promoting beyond test-only needs requirements-steward sign-off.
 
-- `format_style='preserve'` is now available (Strategy A, GH#377). Span-aware mode that keeps clean nodes verbatim and only re-emits dirty/repaired nodes. Diff footprint ≤0.5% of file size on single-key edits. **Use this going forward.**
-- `format_style='expanded'` retains the old full canonical re-emit behaviour.
-- `format_style=null` (explicit) now emits a `DeprecationWarning`. Omitting the parameter silently accepts the future default.
-- **v1.14.0 will flip the default** from full canonical re-emit to `preserve`. To be safe: always pass `format_style='preserve'` explicitly in new octave_write calls.
+**v1.15.0 (2026-05-31) — ⚠️ HARD BREAK to `octave_write` `changes`-mode value semantics (GH#487):**
 
-**Multi-envelope workaround (RD18 token `HO-OCTAVE-WRITE-MULTI-ENVELOPE-WORKAROUND-20260513`):**
+- A **bare dict** at a `changes` KEY now **fully replaces** that key — unmentioned children are **DROPPED**. To merge into an existing block you **MUST** send an explicit `{"$op": "MERGE", "value": {…}}`.
+- A **bare scalar** over a nested BLOCK = full replace in place (cures the old duplicate-keys footgun).
+- A `$op:MERGE` of a scalar over a child BLOCK is **rejected** with `E_OP_TARGET_MISMATCH`.
+- Bare dict with a **nested** dict value now emits canonical **BLOCK** form (no more `dict→InlineMap` coercion).
+- `$op:APPEND`/`$op:PREPEND` of nested list/dict elements now emit re-parseable OCTAVE (#488).
+- Read path (`octave_validate`) is unchanged. This project does not call `changes=` mode in source code, so the break is guidance for agents/skills doing surgical key edits.
 
-`octave_write` with older defaults collapsed multi-envelope Facet ABI cards to META-only via `TN_RECONCILE_CANONICAL`. The workaround was to use direct `Write` tool for FRAME_CARD / CONCEPT_CARD authoring. With v1.13.0 `preserve` mode landing, this should be **retested** — `preserve` mode's span-aware approach may resolve the collapse. Until confirmed fixed, treat the workaround as still active. See `.hestai/decisions/handoff/2026-05-16-rfc-40-mac-b1-carry-forward.md` and octave-mcp #420.
+**v1.14.0 (2026-05-30) — anchored paths + literal-zone fidelity (#460):**
+
+- `ANCHOR/KEY` anchored-path syntax disambiguates duplicate sibling keys (e.g. `changes={"I2/RATIONALE": …}`).
+- Literal-zone fence form is preserved on content edits and `$op MERGE` — content-only edits round-trip byte-identical under `format_style="preserve"` (PROD::I1).
+- Anchored-path `$op` descriptors are executed (e.g. `$op DELETE` actually removes), not written as data.
+
+**`format_style` (still current):**
+
+- `format_style='preserve'` is span-aware (clean nodes verbatim, dirty/repaired nodes re-emitted; ≤0.5% diff footprint on single-key edits). **Always pass it explicitly** in `octave_write` calls.
+- `format_style='expanded'` retains full canonical re-emit.
+- The predicted v1.14.0 "flip the default to `preserve`" did **not** land in the v1.14.0 or v1.15.0 changelogs — the default is unconfirmed, so do not rely on it; pass `'preserve'` explicitly.
+
+**Multi-envelope workaround (RD18 token `HO-OCTAVE-WRITE-MULTI-ENVELOPE-WORKAROUND-20260513`) — still active:**
+
+`octave_write` with older defaults collapsed multi-envelope Facet ABI cards to META-only via `TN_RECONCILE_CANONICAL` (octave-mcp #420). The workaround is to use the direct `Write` tool for FRAME_CARD / CONCEPT_CARD authoring. Neither v1.14.0 nor v1.15.0 claims to fix #420, so treat the workaround as **still active** until empirically retested with `format_style='preserve'`. See `.hestai/decisions/handoff/2026-05-16-rfc-40-mac-b1-carry-forward.md` and octave-mcp #420.
