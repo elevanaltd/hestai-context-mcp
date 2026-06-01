@@ -51,10 +51,15 @@ def _discover_ns_summaries() -> list[Path]:
     """Return every committed North Star OCTAVE summary in this repository.
 
     Skips the gitignored ``.hestai-sys/`` delivery tree (regenerated from the
-    Vault on restart -- not a source artefact this repo governs).
+    Vault on restart -- not a source artefact this repo governs) and any
+    ``worktrees/`` subtree. Sibling worktrees check out *other* branches whose
+    stale North Stars are not the artefact this branch governs; descending into
+    them makes the guard non-deterministic and fails on cross-branch state.
     """
     return sorted(
-        p for p in REPO_ROOT.glob("**/*NORTH-STAR-SUMMARY.oct.md") if ".hestai-sys" not in p.parts
+        p
+        for p in REPO_ROOT.glob("**/*NORTH-STAR-SUMMARY.oct.md")
+        if ".hestai-sys" not in p.parts and "worktrees" not in p.parts
     )
 
 
