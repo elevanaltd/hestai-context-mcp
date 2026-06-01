@@ -69,7 +69,7 @@ async def submit_governance(
           validation_errors: list[str] -- Empty on success.
           dry_run: bool -- Echoes the dry_run parameter.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # --- Validate working_dir (blocking path resolution) ---
     try:
