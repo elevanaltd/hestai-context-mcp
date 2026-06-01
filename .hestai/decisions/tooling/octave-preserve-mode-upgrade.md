@@ -167,7 +167,42 @@ Take Option 1 now (done). When Gate B is actually scheduled, prefer **Option 2**
 stdio-subprocess sketch: same capability, no subprocess management, and it keeps the default
 install free of octave-mcp so PROD::I6 independence holds for anyone not opting into
 validation. Option 3 should not be adopted without an explicit requirements-steward decision
-recorded against §4.
+recorded against §4. The dependency *declaration* (Options 1–3) is orthogonal to the
+integration *transport* analysed next — decide both.
+
+### Gate B integration shape (transport) — do NOT cargo-cult "over stdio"
+
+`type_checker.py`, `submit_governance.py`, and `governance/__init__.py` all carry the comment
+"Gate B (future) will wire the REAL OCTAVE validator to octave-mcp **over stdio**." That phrase
+predates the fact that octave-mcp ships a clean importable library API, and as written it means
+*this MCP server spawning the octave-mcp MCP server as a subprocess and speaking JSON-RPC to it*
+— one MCP server calling another. For a pure, deterministic, CPU-bound `text → result`
+validation function that is the **worst option**, and it should not be carried forward
+unexamined. Three shapes, ranked:
+
+1. **Client-side composition (PREFERRED default).** Neither server calls the other. The host/
+   agent already has both `mcp__octave__*` and `mcp__hestai-context__*` connected, so the
+   orchestrator calls `octave_validate` first and `submit_governance` only on a clean result.
+   Zero new coupling in this repo; §4-purest (octave-mcp owns validation, this server owns
+   placement/commit). Trade-off: not a self-guarding commit boundary — a caller can skip the
+   validate step.
+2. **In-process library import behind a port (use IF the commit boundary must self-guard).**
+   `submit_governance` calls `octave_mcp.Validator` / `parse_with_warnings` in-process for
+   defense-in-depth, via a thin internal `OctaveValidator` protocol (mirroring the existing
+   `ports/ai_client.py` adapter seam) so the rest of the code never imports `octave_mcp`
+   directly. Pairs with Option 2's optional `validation` extra + fail-soft. One process, one
+   failure domain, typed returns, trivially testable.
+3. **stdio server-to-server subprocess (REJECT).** Worst of both worlds: octave-mcp must still
+   be installed to be spawned (so the dependency is NOT avoided), *plus* you take on subprocess
+   lifecycle, stdio framing, JSON-RPC handshake, timeouts/hangs, and zombie cleanup — while
+   gaining none of MCP's actual value (capability discovery, host-mediated consent/auth), which
+   only applies at a host↔server boundary, not server↔server. More cost, more failure surface,
+   harder tests, for a plain function call.
+
+**Decision rule:** validation as a caller-orchestrated pre-step → Shape 1; validation as an
+enforced invariant of the commit boundary → Shape 2 (+ optional extra, behind a port); never
+Shape 3. When Gate B is scheduled, update the three `over stdio` code comments to match the
+chosen shape.
 
 ## Impact on RD18 — Multi-envelope workaround (still active)
 
