@@ -55,12 +55,25 @@ def _discover_ns_summaries() -> list[Path]:
     ``worktrees/`` subtree. Sibling worktrees check out *other* branches whose
     stale North Stars are not the artefact this branch governs; descending into
     them makes the guard non-deterministic and fails on cross-branch state.
+
+    Exclusions are tested against the path RELATIVE to ``REPO_ROOT``, never the
+    absolute parts. The repo itself may be checked out *inside* a directory
+    named ``worktrees`` (e.g. ``.../worktrees/issue-review``); an absolute-parts
+    check would then wrongly exclude the active checkout's OWN North Star and
+    leave discovery empty. The relative path of the active checkout's own file
+    is ``.hestai/north-star/...`` (no ``worktrees`` segment), so it is kept,
+    while a sibling worktree under the main-repo root has rel path
+    ``worktrees/<branch>/.hestai/...`` and is excluded.
     """
-    return sorted(
-        p
-        for p in REPO_ROOT.glob("**/*NORTH-STAR-SUMMARY.oct.md")
-        if ".hestai-sys" not in p.parts and "worktrees" not in p.parts
-    )
+    out: list[Path] = []
+    for p in REPO_ROOT.glob("**/*NORTH-STAR-SUMMARY.oct.md"):
+        rel_parts = p.relative_to(REPO_ROOT).parts
+        if ".hestai-sys" in rel_parts:
+            continue
+        if "worktrees" in rel_parts:
+            continue
+        out.append(p)
+    return sorted(out)
 
 
 NS_SUMMARIES = _discover_ns_summaries()
