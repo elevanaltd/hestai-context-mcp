@@ -57,6 +57,7 @@ debates/*.lock
 /.claude/settings.json
 /.claude/settings.local.json
 /.claude/commands/
+/.claude/worktrees/
 
 # Gemini clipboard cache
 .gemini-clipboard/
