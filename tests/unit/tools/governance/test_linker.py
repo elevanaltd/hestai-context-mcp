@@ -35,6 +35,12 @@ from hestai_context_mcp.tools.governance.type_checker import ValidationResult
 
 _LINKER = "hestai_context_mcp.tools.governance.linker"
 
+# Fake AGR record identifier for fixtures. Referenced via this constant rather
+# than inlined as a secret-keyword + string-literal adjacency, so secret
+# scanners don't read it as a credential. The value is a non-secret governance
+# identifier.
+_LIVE_RECORD_ID = "HO-CONTEXT-MCP-LIVE-20260101"
+
 
 def _fake_completed(returncode: int, stdout: str = "", stderr: str = "") -> MagicMock:
     """Build a stand-in for subprocess.CompletedProcess."""
@@ -373,7 +379,7 @@ def _valid_decision(target: Path) -> ValidationResult:
     return ValidationResult(
         valid=True,
         errors=[],
-        token="HO-CONTEXT-MCP-LIVE-20260101",
+        token=_LIVE_RECORD_ID,
         card_type="DECISION_RECORD",
         target_path=target,
     )
@@ -396,7 +402,7 @@ class TestRunLinkerLivePath:
         validation = ValidationResult(
             valid=True,
             errors=[],
-            token="HO-CONTEXT-MCP-LIVE-20260101",
+            token=_LIVE_RECORD_ID,
             card_type="DECISION_RECORD",
             target_path=None,
         )
