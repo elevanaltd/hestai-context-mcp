@@ -63,6 +63,60 @@ class TestResolveGithubToken:
             run.assert_not_called()
 
     @pytest.mark.unit
+    def test_whitespace_only_github_token_falls_through_to_gh(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A whitespace-only GITHUB_TOKEN is treated as absent (cubic P2).
+
+        A whitespace-only env value is truthy in Python, so the naive
+        ``if token: return token`` would poison downstream ``gh auth`` with
+        blank credentials. It must instead fall through to the ``gh auth
+        token`` tier.
+        """
+        monkeypatch.setenv("GITHUB_TOKEN", "   ")
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        valid = "ghp_" + "D" * 36
+        with patch(f"{_MOD}.subprocess.run", return_value=_fake_completed(0, stdout=valid)) as run:
+            assert resolve_github_token() == valid
+            run.assert_called_once()
+
+    @pytest.mark.unit
+    def test_whitespace_only_env_with_no_gh_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whitespace-only env in BOTH tiers + no usable gh -> None (cubic P2).
+
+        With no real credential anywhere, the resolver must report absence
+        (None) rather than returning a blank string.
+        """
+        monkeypatch.setenv("GITHUB_TOKEN", "   ")
+        monkeypatch.setenv("GH_TOKEN", "\t\n")
+        with patch(f"{_MOD}.subprocess.run", return_value=_fake_completed(1, stderr="no auth")):
+            assert resolve_github_token() is None
+
+    @pytest.mark.unit
+    def test_whitespace_only_github_token_falls_through_to_gh_token_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whitespace-only GITHUB_TOKEN falls through to a real GH_TOKEN (tier 2)."""
+        monkeypatch.setenv("GITHUB_TOKEN", "   ")
+        monkeypatch.setenv("GH_TOKEN", "gh-env-token")
+        with patch(f"{_MOD}.subprocess.run") as run:
+            assert resolve_github_token() == "gh-env-token"
+            run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_env_token_with_surrounding_whitespace_is_stripped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real env token padded with whitespace returns stripped (cubic P2)."""
+        monkeypatch.setenv("GITHUB_TOKEN", "  env-token-value  ")
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        with patch(f"{_MOD}.subprocess.run") as run:
+            assert resolve_github_token() == "env-token-value"
+            run.assert_not_called()
+
+    @pytest.mark.unit
     def test_gh_subprocess_success_with_valid_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A well-shaped token from ``gh auth token`` is accepted (tier 3)."""
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)

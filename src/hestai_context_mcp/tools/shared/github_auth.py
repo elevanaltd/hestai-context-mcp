@@ -75,9 +75,15 @@ def resolve_github_token() -> str | None:
         exists precisely so that token handling is funneled through a single
         audited code path.
     """
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
-        return token
+    # Tiers 1 & 2: env vars. Strip and require a non-empty result so a
+    # whitespace-only value (truthy in Python) does NOT poison downstream
+    # ``gh auth`` with blank credentials -- it falls through to tier 3 instead
+    # (cubic P2). An empty/whitespace guard is sufficient here; no shape regex
+    # is applied to env tokens, to avoid rejecting otherwise-valid credentials.
+    for env_var in ("GITHUB_TOKEN", "GH_TOKEN"):
+        candidate = (os.environ.get(env_var) or "").strip()
+        if candidate:
+            return candidate
 
     # Tier 3: ``gh auth token``. Catch ``Exception`` so any failure mode here
     # (gh missing -> FileNotFoundError, gh hung -> TimeoutExpired, gh corrupted
