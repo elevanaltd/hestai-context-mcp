@@ -1,13 +1,21 @@
-"""submit_governance MCP tool -- Gate A Rails (RFC #53).
+"""submit_governance MCP tool -- Gate A/B Rails + Gate C prose mode (RFC #53).
 
-Accepts operator-authored OCTAVE governance content, validates it via
-the Dumb Type Checker (regex-only, no AST), and creates a PR to place
-the artifact at the canonical path per ADR-RFC-ARCH-001.
+Two mutually-exclusive entry modes converge on ONE validate->link tail:
+
+  * ``octave_content`` -- operator pre-authored OCTAVE (Gate A regex + Gate B
+    real validator + linker). Behaviour is byte-stable vs post-#70 main.
+  * ``prose_input`` -- operator intent in prose. Stage 1 (context assembler) +
+    Stage 2 (prose->OCTAVE backend) author the OCTAVE, then the call REJOINS the
+    same Stage-3 gate + Stage-4 linker tail (Gate C). Adds a ``metrics`` field.
+
+EXACTLY ONE of ``octave_content`` / ``prose_input`` must be supplied.
 
 North Star invariants enforced:
   PROD I4: Structured return shape (always a dict with defined fields).
   PROD I5: get_context is UNTOUCHED. This tool is additive.
   PROD I6: No hestai_mcp imports. No new PyPI dependencies.
+  PROD I3: prose mode authors via the provider-agnostic AIClient port; output is
+           gated by the Stage-3 validator + human PR review (no auto-merge).
 
 Gate B: octave-mcp's REAL validator runs in-process as a library behind the
 OctaveValidator port (hestai_context_mcp.ports.octave_validator), gated by the
@@ -19,11 +27,13 @@ import asyncio
 from functools import partial
 from typing import Any
 
+from hestai_context_mcp.core.intake_pipeline import run_intake_to_pr
 from hestai_context_mcp.ports.octave_validator import (
     OctaveValidationResult,
     get_octave_validator,
 )
 from hestai_context_mcp.tools.clock_in import validate_working_dir
+from hestai_context_mcp.tools.governance.intake_context import assemble_intake_context
 from hestai_context_mcp.tools.governance.linker import run_linker
 from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
 
@@ -67,15 +77,23 @@ def _octave_errors_to_strings(result: OctaveValidationResult) -> list[str]:
 
 async def submit_governance(
     working_dir: str,
-    octave_content: str,
+    octave_content: str | None = None,
+    prose_input: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Submit an operator-authored OCTAVE governance artifact.
+    """Submit a governance artifact via OCTAVE content OR prose intent.
 
-    Gate A Rails: regex sentinel check + path placement + PR creation.
-    Gate B: octave-mcp's REAL validator runs in-process behind the
-    OctaveValidator port (additive to Gate A), gated by the optional
-    ``validation`` extra. No LLM. No in-repo OCTAVE AST. No stdio server.
+    EXACTLY ONE of ``octave_content`` / ``prose_input`` must be non-None.
+
+    ``octave_content`` mode (Gate A/B): regex sentinel check + real
+    OctaveValidator + path placement + PR creation. Byte-stable vs post-#70 main.
+
+    ``prose_input`` mode (Gate C): Stage 1 (context assembler) + Stage 2
+    (prose->OCTAVE backend over the provider-agnostic AIClient port) author the
+    OCTAVE, then the call REJOINS the same Stage-3 validator + Stage-4 linker
+    tail. The return dict additionally carries a ``metrics`` field
+    {tokens, cost, model}. Output is gated by the validator + human PR review
+    (no auto-merge); cost caps abort runaway calls with a structured error.
 
     Blocking I/O (filesystem reads, subprocess calls) and the CPU-bound
     in-process OCTAVE parse are offloaded to the default thread-pool
@@ -85,25 +103,62 @@ async def submit_governance(
     Args:
         working_dir: Absolute path to the project root directory.
         octave_content: The OCTAVE document text to validate and commit.
+        prose_input: Freeform operator intent to compile into OCTAVE.
         dry_run: If True, validates and computes placement but does not
                  create branch, write files, or open PR.
 
     Returns:
-        I4-conformant structured dict:
-          success: bool -- True if validation passed (and PR opened when not dry_run).
-          token: str | None -- Extracted TOKEN or ID.
-          card_type: str | None -- Extracted card type.
-          target_path: str | None -- Computed repo-relative target path.
-          branch: str | None -- Git branch name that was (or would be) created.
-          pr_url: str | None -- PR URL (None for dry_run or on failure).
-          validation_errors: list[str] -- Empty on success.
-          octave_validation: dict | None -- Structured real-validation result
-            {ok, errors, warnings, available} from the OctaveValidator port
-            (PROD I4). available=False means the optional ``validation`` extra
-            was absent and the pass degraded to regex-only (fail-soft). None
-            only when failure occurred before the real validator ran (e.g. an
-            invalid working_dir or a regex Gate A rejection).
-          dry_run: bool -- Echoes the dry_run parameter.
+        I4-conformant structured dict (see field docs in the module). In
+        ``prose_input`` mode the dict additionally contains ``metrics``.
+    """
+    # --- EXACTLY-ONE-OF guard (Gate C contract ruling) ---
+    if (octave_content is None) == (prose_input is None):
+        return _empty_result(
+            dry_run,
+            [
+                "Exactly one of 'octave_content' or 'prose_input' must be provided "
+                "(received neither or both)."
+            ],
+        )
+
+    if prose_input is not None:
+        return await _submit_prose_input(working_dir, prose_input, dry_run)
+
+    # The EXACTLY-ONE-OF guard above guarantees octave_content is non-None here.
+    assert octave_content is not None
+    return await _submit_octave_content(working_dir, octave_content, dry_run)
+
+
+async def _submit_prose_input(
+    working_dir: str,
+    prose_input: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Gate C prose mode: Stage 1 assemble -> Stage 2+3+4 via run_intake_to_pr.
+
+    Validates working_dir first (PROD I4 structured failure on bad path), then
+    assembles the Stage-1 context and delegates to the Stage 2->4 composition,
+    which rejoins the same validate->link tail as the octave_content path.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        wd = await loop.run_in_executor(None, validate_working_dir, working_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        return _empty_result(dry_run, [str(exc)])
+
+    intake_context = await loop.run_in_executor(None, assemble_intake_context, wd, prose_input)
+    return await run_intake_to_pr(wd, intake_context, dry_run=dry_run)
+
+
+async def _submit_octave_content(
+    working_dir: str,
+    octave_content: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Gate A/B path: operator-authored OCTAVE -> validate -> link.
+
+    Behaviour is byte-stable vs post-#70 main (Gate A regex + Gate B real
+    validator + linker; same I4 return keys, no ``metrics`` field).
     """
     loop = asyncio.get_running_loop()
 

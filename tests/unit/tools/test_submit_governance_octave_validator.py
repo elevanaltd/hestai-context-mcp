@@ -194,11 +194,17 @@ class TestFailSoftDoesNotBlock:
 
 class TestPublicContractUnchanged:
     @pytest.mark.unit
-    def test_input_signature_still_octave_content(self) -> None:
+    def test_input_signature_adds_prose_input_back_compatibly(self) -> None:
         import inspect
 
         from hestai_context_mcp.tools.submit_governance import submit_governance
 
         params = inspect.signature(submit_governance).parameters
-        # The Gate C prose intake is NOT part of this task.
-        assert set(params) == {"working_dir", "octave_content", "dry_run"}
+        # Gate C (T5) adds prose_input back-compatibly: octave_content becomes
+        # optional and prose_input is the second mode. The pre-existing params
+        # remain so octave_content callers are unaffected.
+        assert set(params) == {"working_dir", "octave_content", "prose_input", "dry_run"}
+        # Back-compat: octave_content is now optional (defaults to None) so the
+        # EXACTLY-ONE-OF guard can distinguish the two modes.
+        assert params["octave_content"].default is None
+        assert params["prose_input"].default is None
