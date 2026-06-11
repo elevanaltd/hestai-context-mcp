@@ -15,13 +15,19 @@ import re
 import tempfile
 from pathlib import Path
 
-# Regex to extract TOKEN from DECISION_RECORD
+# Regex to extract TOKEN from DECISION_RECORD (quoted form).
 _TOKEN_RE = re.compile(r'TOKEN::"([^"]+)"')
 
-# Regex to extract ID from facet cards
+# Quote-optional TOKEN: bare form TOKEN::VALUE (AGR canonical-form convergence).
+# Anchored to end-of-line so trailing content is not folded into the token.
+_TOKEN_BARE_RE = re.compile(r"(?m)^\s*TOKEN::([^\"\s]+)\s*$")
+
+# Regex to extract ID from facet cards (quoted form).
 _ID_RE = re.compile(r'(?m)^  ID::"([^"]+)"')
 
-# Alternative: bare ID:: without quotes (e.g. ID::SOME_CONSTANT)
+# Alternative: bare ID:: without quotes (e.g. ID::SOME_CONSTANT).
+# RETAINED per the AGR convergence ruling — convergence is on quote-optional,
+# NOT on removing bare support.
 _ID_BARE_RE = re.compile(r"(?m)^  ID::([A-Z][A-Z0-9_]{2,127})\s*$")
 
 
@@ -32,6 +38,10 @@ def _extract_token_or_id(content: str) -> str | None:
     Returns the extracted value or None if neither found.
     """
     m = _TOKEN_RE.search(content)
+    if m:
+        return m.group(1)
+
+    m = _TOKEN_BARE_RE.search(content)
     if m:
         return m.group(1)
 

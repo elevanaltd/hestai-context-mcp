@@ -19,10 +19,15 @@ from pathlib import Path
 # Max characters assembled for the context budget (future Gate C backend).
 _CONTEXT_BUDGET_CHARS = 25_000
 
-# Exact-match pattern for TOKEN or ID field assignment (OCTAVE form).
-# Matches:  TOKEN::"<value>"  or  ID::"<value>"  where <value> == the token.
-# Used instead of plain substring search to avoid prefix-match false positives.
-_FIELD_EXACT_RE_TEMPLATE = r'(?:TOKEN::\s*"{token}"|ID::\s*(?:"{token}"|{token})(?=\s|$))'
+# Exact-match pattern for TOKEN or ID field assignment (OCTAVE form),
+# quote-optional per the AGR canonical-form convergence ruling.
+# Matches the bare canonical form  TOKEN::<value> / ID::<value>  AND the legacy
+# quoted form  TOKEN::"<value>" / ID::"<value>"  where <value> == the token.
+# The bare alternatives use a trailing (?=\s|$) boundary so a shorter token
+# (e.g. HO-FOO-20260101) does not prefix-match a longer one (HO-FOO-BAR-...).
+_FIELD_EXACT_RE_TEMPLATE = (
+    r'(?:TOKEN::\s*(?:"{token}"|{token}(?=\s|$))' r'|ID::\s*(?:"{token}"|{token}(?=\s|$)))'
+)
 
 
 def _search_manifest(manifest_path: Path, token: str) -> bool:

@@ -30,11 +30,16 @@ _SENTINEL_RE = re.compile(r"\A===([A-Z_]+)===\s*(?:\r?\n|$)")
 # TYPE field in META block
 _TYPE_RE = re.compile(r"(?m)TYPE::(\w+)")
 
-# TOKEN field (DECISION_RECORD): quoted string
-_TOKEN_RE = re.compile(r'TOKEN::"([^"]+)"')
+# TOKEN field (DECISION_RECORD): quote-optional (AGR canonical-form convergence).
+# Accepts BOTH the bare canonical form  TOKEN::VALUE  and the legacy quoted form
+# TOKEN::"VALUE".  The bare alternative captures up to end-of-line / whitespace
+# so trailing content is never folded into the token; the §1.3 _TOKEN_FORMAT_RE
+# check still constrains the captured value (a malformed bare token is rejected).
+_TOKEN_RE = re.compile(r'(?m)TOKEN::(?:"([^"]+)"|([^"\s]+))')
 
-# ID field (facet cards): quoted string
-_ID_QUOTED_RE = re.compile(r'(?m)^  ID::"([^"]+)"')
+# ID field (facet cards): quote-optional. Accepts bare  ID::VALUE  and quoted
+# ID::"VALUE".  The _FACET_ID_FORMAT_RE check still constrains the value.
+_ID_QUOTED_RE = re.compile(r'(?m)^  ID::(?:"([^"]+)"|([^"\s]+)\s*$)')
 
 # SUPERSEDED_BY field: quoted string
 _SUPERSEDED_BY_RE = re.compile(r'SUPERSEDED_BY::"([^"]+)"')
@@ -99,18 +104,24 @@ def _extract_type(content: str) -> str | None:
 
 
 def _extract_token(content: str) -> str | None:
-    """Extract the TOKEN field (DECISION_RECORD style)."""
+    """Extract the TOKEN field (DECISION_RECORD style), quote-optional.
+
+    Group 1 holds the quoted value, group 2 the bare value; exactly one is set.
+    """
     m = _TOKEN_RE.search(content)
     if m:
-        return m.group(1)
+        return m.group(1) if m.group(1) is not None else m.group(2)
     return None
 
 
 def _extract_id(content: str) -> str | None:
-    """Extract the ID field (facet card style)."""
+    """Extract the ID field (facet card style), quote-optional.
+
+    Group 1 holds the quoted value, group 2 the bare value; exactly one is set.
+    """
     m = _ID_QUOTED_RE.search(content)
     if m:
-        return m.group(1)
+        return m.group(1) if m.group(1) is not None else m.group(2)
     return None
 
 
