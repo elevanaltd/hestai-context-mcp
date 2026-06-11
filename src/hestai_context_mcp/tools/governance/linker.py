@@ -9,14 +9,15 @@ Accepts a ValidationResult + raw OCTAVE content, then:
 
 dry_run=True: skips all git/file operations, returns what WOULD happen.
 
-GitHub token resolution is lifted from tools/submit_review.py:73-127.
-That code is copied and adapted here -- NOT imported -- per task spec (PROD I6
-and to avoid coupling to submit_review internals).
+GitHub token resolution is provided by the shared single-source-of-truth helper
+``tools.shared.github_auth`` (extracted to remove the CIV-flagged duplication
+that previously copied this logic from submit_review). It is re-exported here as
+``_resolve_github_token`` so ``run_linker`` resolves it as a module global
+(patchable in tests).
 """
 
 import logging
 import os
-import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,60 +25,11 @@ from typing import Any
 
 from hestai_context_mcp.tools.governance.manifest import write_manifest
 from hestai_context_mcp.tools.governance.type_checker import ValidationResult
-
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# GitHub token resolution (lifted from submit_review.py:73-127)
-# ---------------------------------------------------------------------------
-
-_GH_AUTH_TIMEOUT_SECONDS = 5
-
-_TOKEN_SHAPE_RE = re.compile(
-    r"^(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|[a-f0-9]{40})$"
+from hestai_context_mcp.tools.shared.github_auth import (
+    resolve_github_token as _resolve_github_token,
 )
 
-
-def _resolve_github_token() -> str | None:
-    """Resolve a GitHub token via three-tier lookup.
-
-    Lookup order (first hit wins):
-      1. GITHUB_TOKEN environment variable.
-      2. GH_TOKEN environment variable.
-      3. gh auth token subprocess (5 s timeout).
-
-    Returns:
-        The resolved token string, or None if no tier supplied a token.
-
-    Security:
-        The returned value is opaque -- callers MUST NOT log it, embed it
-        in error messages, or include it in any structured response.
-    """
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
-        return token
-
-    try:
-        result = subprocess.run(
-            ["gh", "auth", "token"],
-            capture_output=True,
-            text=True,
-            timeout=_GH_AUTH_TIMEOUT_SECONDS,
-        )
-    except Exception:  # noqa: BLE001
-        return None
-
-    if result.returncode != 0:
-        return None
-
-    candidate = (result.stdout or "").strip()
-    if not candidate:
-        return None
-
-    if not _TOKEN_SHAPE_RE.match(candidate):
-        return None
-
-    return candidate
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

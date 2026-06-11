@@ -5,8 +5,6 @@ tests/unit/tools/test_submit_governance.py::TestLinker and TestLinkerIntegration
 
 This module hardens the previously-untested branches by mocking the
 subprocess boundary (git / gh) and the filesystem write layer:
-  - _resolve_github_token: env-var hits, gh-subprocess success/failure,
-    timeout/exception, empty output, malformed-shape rejection.
   - _run_git: timeout and FileNotFoundError/OSError branches.
   - _create_branch / _git_add_and_commit failure paths.
   - _write_file OSError branch.
@@ -26,7 +24,6 @@ from hestai_context_mcp.tools.governance.linker import (
     _create_branch,
     _git_add_and_commit,
     _open_pr,
-    _resolve_github_token,
     _run_git,
     _write_file,
     run_linker,
@@ -51,78 +48,12 @@ def _fake_completed(returncode: int, stdout: str = "", stderr: str = "") -> Magi
     return result
 
 
-# ---------------------------------------------------------------------------
-# _resolve_github_token
-# ---------------------------------------------------------------------------
-
-
-class TestResolveGithubToken:
-    @pytest.mark.unit
-    def test_github_token_env_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """GITHUB_TOKEN is returned without invoking gh."""
-        monkeypatch.setenv("GITHUB_TOKEN", "env-token-value")
-        monkeypatch.delenv("GH_TOKEN", raising=False)
-        with patch(f"{_LINKER}.subprocess.run") as run:
-            assert _resolve_github_token() == "env-token-value"
-            run.assert_not_called()
-
-    @pytest.mark.unit
-    def test_gh_token_env_used_when_github_token_absent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """GH_TOKEN is the second-tier source."""
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.setenv("GH_TOKEN", "gh-env-token")
-        assert _resolve_github_token() == "gh-env-token"
-
-    @pytest.mark.unit
-    def test_gh_subprocess_success_with_valid_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A well-shaped token from `gh auth token` is accepted."""
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.delenv("GH_TOKEN", raising=False)
-        valid = "ghp_" + "A" * 36
-        with patch(f"{_LINKER}.subprocess.run", return_value=_fake_completed(0, stdout=valid)):
-            assert _resolve_github_token() == valid
-
-    @pytest.mark.unit
-    def test_gh_subprocess_nonzero_returncode(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Non-zero exit from gh -> None."""
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.delenv("GH_TOKEN", raising=False)
-        with patch(
-            f"{_LINKER}.subprocess.run", return_value=_fake_completed(1, stderr="not logged in")
-        ):
-            assert _resolve_github_token() is None
-
-    @pytest.mark.unit
-    def test_gh_subprocess_empty_output(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Empty stdout from gh -> None."""
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.delenv("GH_TOKEN", raising=False)
-        with patch(f"{_LINKER}.subprocess.run", return_value=_fake_completed(0, stdout="   ")):
-            assert _resolve_github_token() is None
-
-    @pytest.mark.unit
-    def test_gh_subprocess_malformed_shape_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A token that does not match the shape regex -> None (defensive)."""
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.delenv("GH_TOKEN", raising=False)
-        with patch(
-            f"{_LINKER}.subprocess.run",
-            return_value=_fake_completed(0, stdout="not-a-real-token-shape"),
-        ):
-            assert _resolve_github_token() is None
-
-    @pytest.mark.unit
-    def test_gh_subprocess_raises_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Any exception from the gh subprocess is swallowed -> None."""
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-        monkeypatch.delenv("GH_TOKEN", raising=False)
-        with patch(
-            f"{_LINKER}.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=5),
-        ):
-            assert _resolve_github_token() is None
+# NOTE: Direct tests for GitHub token resolution now live with the shared
+# single-source-of-truth helper at
+# tests/unit/tools/shared/test_github_auth.py. The linker re-exports
+# ``_resolve_github_token`` from ``tools.shared.github_auth``; the live-path
+# tests below patch ``{_LINKER}._resolve_github_token`` to exercise how
+# ``run_linker`` consumes the resolved token.
 
 
 # ---------------------------------------------------------------------------
