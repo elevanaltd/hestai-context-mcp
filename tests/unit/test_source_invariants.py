@@ -23,6 +23,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src" / "hestai_context_mcp"
 _PORTS_ROOT = _SRC_ROOT / "ports"
 
+# RFC #53 Gate C application-layer modules that must stay provider-agnostic
+# (PROD::I3). These are NOT ports, but they orchestrate the AIClient port and
+# must never name a provider in source (mirrors TestNoProviderSdkInPorts).
+_GATE_C_PROVIDER_AGNOSTIC_FILES: tuple[Path, ...] = (
+    _SRC_ROOT / "core" / "intake_compiler.py",
+    _SRC_ROOT / "tools" / "governance" / "intake_context.py",
+)
+
 
 def _iter_python_files(root: Path):
     for path in root.rglob("*.py"):
@@ -86,6 +94,75 @@ class TestNoProviderSdkInPorts:
                         offenders.append((py, lineno, pat.pattern, line.strip()))
         assert not offenders, "PROD::I3 violation — provider name in ports/:\n" + "\n".join(
             f"  {p}:{n} matched /{pat}/: {s}" for p, n, pat, s in offenders
+        )
+
+
+class TestGateCBackendIsProviderAgnostic:
+    """PROD::I3: RFC #53 Gate C app modules never name a provider in source.
+
+    The prose->OCTAVE compiler and context assembler consume the AIClient
+    port; provider/model/credential resolution lives below the port in
+    ``adapters/ai_config``. A vendor literal leaking into these files would
+    couple the write-side compiler to a provider — the exact coupling the
+    read-side ``TestNoProviderSdkInPorts`` forbids for ports.
+    """
+
+    _FORBIDDEN_PATTERNS: tuple[re.Pattern[str], ...] = (
+        re.compile(r"\bimport\s+anthropic\b"),
+        re.compile(r"\bfrom\s+anthropic\b"),
+        re.compile(r"\bimport\s+openai\b"),
+        re.compile(r"\bfrom\s+openai\b"),
+        re.compile(r"openrouter", re.IGNORECASE),
+        re.compile(r"api\.openai\.com", re.IGNORECASE),
+        re.compile(r"anthropic\.com", re.IGNORECASE),
+        re.compile(r"\bgemini\b", re.IGNORECASE),
+        re.compile(r"\bdeepseek\b", re.IGNORECASE),
+    )
+
+    def test_gate_c_modules_contain_no_provider_names(self):
+        offenders: list[tuple[Path, int, str, str]] = []
+        for py in _GATE_C_PROVIDER_AGNOSTIC_FILES:
+            if not py.exists():
+                continue
+            for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+                for pat in self._FORBIDDEN_PATTERNS:
+                    if pat.search(line):
+                        offenders.append((py, lineno, pat.pattern, line.strip()))
+        assert (
+            not offenders
+        ), "PROD::I3 violation — provider name in Gate C app module:\n" + "\n".join(
+            f"  {p}:{n} matched /{pat}/: {s}" for p, n, pat, s in offenders
+        )
+
+
+class TestGateCContextAssemblerHasNoHardcodedSystemPrompt:
+    """A9: the Stage-1 prompt is JIT-compiled from live repo state.
+
+    There must be no module-level hardcoded multi-line system-prompt
+    constant in ``intake_context.py`` — the prompt is assembled at call
+    time from the live corpus. We assert the absence of a long string
+    literal assigned to a SYSTEM_PROMPT-like module constant.
+    """
+
+    _CONTEXT_FILE = _SRC_ROOT / "tools" / "governance" / "intake_context.py"
+    # A module-level constant named like a baked system prompt.
+    _HARDCODED_PROMPT_RE = re.compile(
+        r"(?m)^_?[A-Z][A-Z0-9_]*(SYSTEM_PROMPT|JIT_PROMPT|PROMPT_TEMPLATE)\s*[:=]"
+    )
+
+    def test_no_module_level_system_prompt_constant(self):
+        if not self._CONTEXT_FILE.exists():
+            raise AssertionError(
+                f"intake_context.py missing at {self._CONTEXT_FILE} — T1 not implemented"
+            )
+        offenders: list[tuple[int, str]] = []
+        for lineno, line in enumerate(self._CONTEXT_FILE.read_text().splitlines(), start=1):
+            if self._HARDCODED_PROMPT_RE.match(line):
+                offenders.append((lineno, line.strip()))
+        assert not offenders, (
+            "A9 violation — hardcoded system-prompt constant in intake_context.py "
+            "(prompt must be JIT-compiled from live repo state):\n"
+            + "\n".join(f"  line {n}: {s}" for n, s in offenders)
         )
 
 
