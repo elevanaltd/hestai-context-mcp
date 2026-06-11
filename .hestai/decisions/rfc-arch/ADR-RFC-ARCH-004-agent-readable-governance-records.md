@@ -1,6 +1,7 @@
 # ADR-RFC-ARCH-004 — Agent-Readable Governance Records (AGR) — Format, Lifecycle, Tool Contracts
 
-- **Status**: PROPOSED (awaiting CIV + SR review)
+- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13)
+- **Ratified-by**: standards-reviewer + critical-implementation-validator (stamped close-out 2026-06-11), HO-orchestrated, operator-authorised
 - **Date**: 2026-05-19
 - **Scope**: `hestai-context-mcp` repository. Specifies the L1 AGR record format and consumer-side MCP tool contracts. Specification only; code implementation is deferred to a successor PR (PR-D′ / PR-H) routed via oa-router to implementation-lead.
 - **Sequence**: PR-D in the RFC-arch series. Subordinate to ADR-RFC-ARCH-002 (PR-B IA Contract §1.5 routing rules, §3 governance-class TYPE registry) and ADR-RFC-ARCH-001 (PR-α placement invariant). Adjacent to ADR-RFC-ARCH-003 (PR-E ledger schema, ephemerality preserved).
@@ -565,3 +566,35 @@ This ADR is **adjacent to** ADR-RFC-ARCH-003 (PR-E ledger schema) — AGRs and l
 This ADR **supersedes on direction** issue #25 (Decision Journal Light) per §7.
 
 A future v2.x AGR ADR would supersede §1 by explicit field-by-field breaking-change list, per §1.5 MAJOR-bump rules.
+
+## 13. Ratification record (2026-06-11)
+
+ADR-004 is **RATIFIED** via a stamped SR + CIV close-out. The substantive matter ruled was not merely the v1 schema but its convergence with the cross-repo AGR canonical form and the TIER projection.
+
+### 13.1 What changed before ratification
+
+- **§1.1 canonical form → BARE TOKEN** (merged PR #68, `396b888`). The operator-sanctioned writer `octave_write` dequotes identifiers under every `format_style`, so a quoted `TOKEN::"…"` is un-writable by the actual toolchain. Canonical form is therefore bare; Gate A readers (`type_checker`, `lexer`, `manifest`) are quote-optional and end-anchored (reject trailing-garbage TOKEN/ID lines). This heals the §1.1↔§1.6 split (§1.6 already used bare `AMENDS`/`EXTENDS`).
+- **§4.1 #8 lineage guard enforced** in the linker (`governance/lineage.py`): in-repo `AMENDS`/`EXTENDS`/`SUPERSEDED_BY` edges must resolve; dangling same-repo edges are reported as a structured finding (PROD I4), never a crash; cross-repo edges remain advisory (§2.4); cohort-isolation is a handled expected case.
+
+### 13.2 TIER crosswalk (3-row) — ratified
+
+The AGR `TIER` enum (semantic gravity: STRATEGIC/TACTICAL/OPERATIONAL) receives a projection from elevana-studio's storage/process-gravity tiers, defined by *their* RATIFIED gravity-tiered decision (`HO-DECISION-GOVERNANCE-GRAVITY-TIERED-20260428`). The crosswalk **EXTENDS** HestAI-MCP ADR-0060 (RFC/ADR alignment + ISSUE_REF compliance); it does **not** amend it — AGR retains `ISSUE_REF` and the cohort carries it, so ADR-0060's compliance contract is preserved. Amendment authority for the tier vocabulary sits on the elevana-studio side.
+
+| Source (process/storage gravity) | → AGR TIER (semantic gravity) | Empirical status |
+|---|---|---|
+| ARCHITECTURAL (issue + ISSUE_REF) | STRATEGIC | **PROVEN** — 5 cohort tokens, Gate-A clean |
+| CONVENTION (inline-only) | TACTICAL | ruled-by-reasoning (unexercised) |
+| MICRO (tooling + ENFORCEMENT_REF) | OPERATIONAL | ruled-by-reasoning (unexercised) |
+
+CONVENTION→TACTICAL and MICRO→OPERATIONAL are ratified **by reasoning** with empirically-unexercised status; the first CONVENTION/MICRO AGR record is the natural validation point.
+
+### 13.3 Evidence
+
+Post-#68 anchored readers re-validated against the real 5-token elevana-studio cohort (2026-06-11): all 5 bare-canonical tokens validate clean; lineage guard reports the dangling same-repo `AMENDS` edge as a structured finding by default and as expected cohort-isolation when declared. Full suite 1070 green; governance coverage `lineage` 100% / `lexer` 100% / `manifest` 94% / `type_checker` 95%.
+
+### 13.4 Sign-off
+
+- **SR (standards-reviewer)** — APPROVED: schema complete and non-contradictory; 3-row crosswalk structurally sound (monotone co-ranking preserves ordinal gravity); ADR-0060 preserved via EXTENDS + ISSUE_REF retention.
+- **CIV (critical-implementation-validator)** — APPROVED: merged implementation matches the spec (anchored quote-optional readers, lineage structured findings, ISSUE_REF retained); empirical cohort green; ready to ratify.
+
+Authority pack: `.hestai/state/coordination/2026-06-11-agr-tier-crosswalk-authority-pack.md`. Downstream: elevana-studio D6 gate unblocks on this RATIFIED status.
