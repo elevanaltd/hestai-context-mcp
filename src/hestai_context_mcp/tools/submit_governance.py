@@ -9,7 +9,10 @@ North Star invariants enforced:
   PROD I5: get_context is UNTOUCHED. This tool is additive.
   PROD I6: No hestai_mcp imports. No new PyPI dependencies.
 
-Gate B (future): wire octave-mcp validator over stdio for full OCTAVE validation.
+Gate B: octave-mcp's REAL validator runs in-process as a library behind the
+OctaveValidator port (hestai_context_mcp.ports.octave_validator), gated by the
+optional ``validation`` extra. When the extra is absent the port degrades to a
+structured "real-validation unavailable" signal and the regex Gate A still runs.
 """
 
 import asyncio

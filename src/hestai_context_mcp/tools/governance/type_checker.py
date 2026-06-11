@@ -9,8 +9,11 @@ North Star boundary (PROD §4 IS_NOT: document format system — octave-mcp owns
   - TOKEN field: r'TOKEN::"([^"]+)"' for DECISION_RECORD.
   - ID field: r'ID::"([^"]+)"' for facet cards.
 
-Gate B (future) will wire the REAL OCTAVE validator to octave-mcp over stdio.
-This file is intentionally dumb by design.
+Gate B wires the REAL OCTAVE validator as an in-process library behind the
+OctaveValidator port (hestai_context_mcp.ports.octave_validator), gated by the
+optional ``validation`` extra — not over stdio, and never an in-repo AST. This
+file stays intentionally dumb (regex-only) by design; the real validator is
+additive and runs alongside it at the submit_governance seam.
 """
 
 import re
