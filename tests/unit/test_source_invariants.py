@@ -29,6 +29,10 @@ _PORTS_ROOT = _SRC_ROOT / "ports"
 _GATE_C_PROVIDER_AGNOSTIC_FILES: tuple[Path, ...] = (
     _SRC_ROOT / "core" / "intake_compiler.py",
     _SRC_ROOT / "tools" / "governance" / "intake_context.py",
+    # Issue #77: the scoped SEMANTIC governance reviewer consumes the AIClient
+    # port at the analysis tier; like the other Gate C app modules it must
+    # never name a provider/model in source (PROD::I3).
+    _SRC_ROOT / "core" / "governance_reviewer.py",
 )
 
 

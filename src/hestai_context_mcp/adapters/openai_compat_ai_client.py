@@ -171,13 +171,20 @@ class OpenAICompatAIClient:
         return content
 
 
-def build_default_ai_client() -> AIClient | None:
+def build_default_ai_client(*, tier: str = "default") -> AIClient | None:
     """Build the default :class:`AIClient` from configuration.
 
     Reads provider, model, and API key via :mod:`ai_config`. Returns
     ``None`` when no credential is available — callers should treat
     ``None`` as "no AI synthesis possible; use the deterministic
     fallback".
+
+    Args:
+        tier: Model tier to resolve (issue #77). One of ``"default"``,
+            ``"analysis"``, ``"critical"``. The default keeps the
+            pre-#77 behaviour (the synthesis tier). Tier only selects the
+            *model identifier*; provider and credential resolution are
+            unchanged.
 
     This is the *single* env-reading site for AI client construction.
     Any other code reading ``HESTAI_AI_*`` or ``*_API_KEY`` is a
@@ -193,7 +200,7 @@ def build_default_ai_client() -> AIClient | None:
         # Misconfigured provider identifier — fail closed.
         logger.warning("Unknown HESTAI_AI_PROVIDER %r; cannot build AIClient", provider)
         return None
-    model = ai_config.resolve_model()
+    model = ai_config.resolve_model(tier)
     client = OpenAICompatAIClient(api_key=api_key, base_url=base_url, model=model)
     # Construction-time guard (CRS gemini follow-up
     # ``crs_review_pr9_followup_ceeaa71``): ``runtime_checkable`` Protocol
