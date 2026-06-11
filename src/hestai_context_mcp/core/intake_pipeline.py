@@ -24,9 +24,11 @@ Returns a structured dict (PROD::I4).
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+from functools import partial
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from hestai_context_mcp.core.intake_compiler import (
     CompileMetrics,
@@ -34,12 +36,13 @@ from hestai_context_mcp.core.intake_compiler import (
 )
 from hestai_context_mcp.ports.octave_validator import get_octave_validator
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
+from hestai_context_mcp.tools.governance.linker import run_linker
 from hestai_context_mcp.tools.governance.type_checker import (
     ValidationResult,
     validate_octave_content,
 )
 
-__all__ = ["PipelineResult", "run_intake_pipeline"]
+__all__ = ["PipelineResult", "run_intake_pipeline", "run_intake_to_pr"]
 
 # Exactly one retry on validation failure (RISK-3: bounded loop).
 _MAX_ATTEMPTS = 2
@@ -173,4 +176,78 @@ async def run_intake_pipeline(
         "validation_errors": last_errors,
         "metrics": last_metrics,
         "attempts": _MAX_ATTEMPTS,
+    }
+
+
+def _intake_failure_result(pipeline: PipelineResult, dry_run: bool) -> dict[str, Any]:
+    """Project an aborting PipelineResult into the I4 submit_governance shape."""
+    return {
+        "success": False,
+        "token": None,
+        "card_type": None,
+        "target_path": None,
+        "branch": None,
+        "pr_url": None,
+        "validation_errors": pipeline["validation_errors"],
+        "octave_validation": None,
+        "metrics": pipeline["metrics"],
+        "dry_run": dry_run,
+    }
+
+
+async def run_intake_to_pr(
+    working_dir: Path,
+    intake_context: IntakeContext,
+    *,
+    dry_run: bool = False,
+    max_output_tokens: int | None = None,
+    max_cost_usd: float | None = None,
+) -> dict[str, Any]:
+    """Stage 3 + Stage 4: validate prose->OCTAVE, then open a PR via the linker.
+
+    Runs the validate->retry->abort pipeline (Stage 3). On success the validated
+    OCTAVE + ValidationResult are passed into the EXISTING ``run_linker``
+    (Stage 4: branch->write->commit->PR). On abort, returns the structured
+    failure and NEVER calls the linker — re-asserting hallucination immunity at
+    the integration seam.
+
+    Human Primacy (PROD::I3): ``run_linker`` only opens a PR; it never merges and
+    never commits to main. No new git code is introduced here — the blocking
+    linker call is offloaded to the default executor (mirroring
+    ``submit_governance``).
+
+    Returns the I4-conformant submit_governance dict, extended with ``metrics``.
+    """
+    pipeline = await run_intake_pipeline(
+        working_dir,
+        intake_context,
+        max_output_tokens=max_output_tokens,
+        max_cost_usd=max_cost_usd,
+    )
+
+    if not pipeline["ok"] or pipeline["octave"] is None or pipeline["validation"] is None:
+        return _intake_failure_result(pipeline, dry_run)
+
+    loop = asyncio.get_running_loop()
+    linker_fn = partial(
+        run_linker,
+        working_dir=working_dir,
+        validation=pipeline["validation"],
+        octave_content=pipeline["octave"],
+        dry_run=dry_run,
+    )
+    linker_output = await loop.run_in_executor(None, linker_fn)
+
+    linker_error = linker_output.get("error")
+    return {
+        "success": linker_error is None,
+        "token": linker_output.get("token"),
+        "card_type": linker_output.get("card_type"),
+        "target_path": linker_output.get("target_path"),
+        "branch": linker_output.get("branch"),
+        "pr_url": linker_output.get("pr_url"),
+        "validation_errors": [linker_error] if linker_error else [],
+        "octave_validation": None,
+        "metrics": pipeline["metrics"],
+        "dry_run": dry_run,
     }

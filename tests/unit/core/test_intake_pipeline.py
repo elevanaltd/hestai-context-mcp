@@ -126,24 +126,18 @@ class TestAbortImmunity:
         after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
         assert before == after  # ZERO filesystem writes on double-fail
 
-    async def test_pipeline_module_never_invokes_linker(self) -> None:
-        # Structural invariant: the Stage-3 pipeline must not invoke the linker
-        # nor import it. Linker invocation belongs to Stage 4 (downstream of a
-        # passing gate). The docstring may *describe* this invariant, but no
-        # code line may import or call run_linker.
-        src_lines = Path(mod.__file__).read_text(encoding="utf-8").splitlines()
-        offenders = []
-        for line in src_lines:
-            stripped = line.strip()
-            # An actual call to run_linker, or an import statement pulling the
-            # linker module in. Prose in the docstring may name the concept.
-            if (
-                "run_linker(" in stripped
-                or stripped.startswith(("import ", "from "))
-                and "linker" in stripped
-            ):
-                offenders.append(line)
-        assert not offenders, f"Stage-3 pipeline invokes/imports the linker: {offenders}"
+    async def test_validate_retry_abort_loop_never_invokes_linker(self) -> None:
+        # Structural invariant: the Stage-3 validate->retry->abort LOOP
+        # (run_intake_pipeline) must never call the linker. The Stage-4
+        # composition (run_intake_to_pr) may call it, but only downstream of a
+        # *passing* gate — so we scope this assertion to the loop function body.
+        import inspect
+
+        loop_src = inspect.getsource(mod.run_intake_pipeline)
+        assert "run_linker(" not in loop_src
+        # And the loop must not write to disk itself.
+        assert "write_text" not in loop_src
+        assert "open(" not in loop_src
 
     async def test_backend_failure_aborts_without_retry_loop_writes(
         self, tmp_path: Path, stub_backend
