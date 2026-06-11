@@ -19,6 +19,10 @@ import asyncio
 from functools import partial
 from typing import Any
 
+from hestai_context_mcp.ports.octave_validator import (
+    OctaveValidationResult,
+    get_octave_validator,
+)
 from hestai_context_mcp.tools.clock_in import validate_working_dir
 from hestai_context_mcp.tools.governance.linker import run_linker
 from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
@@ -27,6 +31,7 @@ from hestai_context_mcp.tools.governance.type_checker import validate_octave_con
 def _empty_result(
     dry_run: bool,
     errors: list[str],
+    octave_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the I4-conformant failure shape with all fields present."""
     return {
@@ -37,8 +42,27 @@ def _empty_result(
         "branch": None,
         "pr_url": None,
         "validation_errors": errors,
+        "octave_validation": octave_validation,
         "dry_run": dry_run,
     }
+
+
+def _octave_errors_to_strings(result: OctaveValidationResult) -> list[str]:
+    """Flatten octave-mcp's structured errors into human-readable strings.
+
+    The structured detail is preserved verbatim under the ``octave_validation``
+    return field (PROD I4); this projection only feeds the flat
+    ``validation_errors`` list that callers already consume from Gate A.
+    """
+    messages: list[str] = []
+    for err in result.errors:
+        code = err.get("code", "")
+        message = err.get("message", "")
+        line = err.get("line", 0)
+        prefix = f"[{code}] " if code else ""
+        suffix = f" (line {line})" if line else ""
+        messages.append(f"{prefix}{message}{suffix}".strip())
+    return messages
 
 
 async def submit_governance(
@@ -49,11 +73,14 @@ async def submit_governance(
     """Submit an operator-authored OCTAVE governance artifact.
 
     Gate A Rails: regex sentinel check + path placement + PR creation.
-    No LLM. No OCTAVE AST parsing. No octave-mcp invocation.
+    Gate B: octave-mcp's REAL validator runs in-process behind the
+    OctaveValidator port (additive to Gate A), gated by the optional
+    ``validation`` extra. No LLM. No in-repo OCTAVE AST. No stdio server.
 
-    Blocking I/O (filesystem reads, subprocess calls) is offloaded to
-    the default thread-pool executor via run_in_executor so that the
-    async event loop is never blocked (Bug 5 fix).
+    Blocking I/O (filesystem reads, subprocess calls) and the CPU-bound
+    in-process OCTAVE parse are offloaded to the default thread-pool
+    executor via run_in_executor so that the async event loop is never
+    blocked (Bug 5 fix).
 
     Args:
         working_dir: Absolute path to the project root directory.
@@ -70,6 +97,12 @@ async def submit_governance(
           branch: str | None -- Git branch name that was (or would be) created.
           pr_url: str | None -- PR URL (None for dry_run or on failure).
           validation_errors: list[str] -- Empty on success.
+          octave_validation: dict | None -- Structured real-validation result
+            {ok, errors, warnings, available} from the OctaveValidator port
+            (PROD I4). available=False means the optional ``validation`` extra
+            was absent and the pass degraded to regex-only (fail-soft). None
+            only when failure occurred before the real validator ran (e.g. an
+            invalid working_dir or a regex Gate A rejection).
           dry_run: bool -- Echoes the dry_run parameter.
     """
     loop = asyncio.get_running_loop()
@@ -90,6 +123,30 @@ async def submit_governance(
 
     if not validation.valid:
         return _empty_result(dry_run, validation.errors)
+
+    # --- Gate B: REAL OCTAVE validation (in-process library behind the port) ---
+    # octave-mcp's real validator runs here, ADDITIVE to the regex Gate A above.
+    # It catches AST/lexer defects (e.g. unbalanced brackets, structural errors)
+    # that the regex checker is blind to. The call is offloaded to the executor
+    # because the in-process parse is CPU-bound. The port is feature-detected and
+    # fail-soft: when the optional ``validation`` extra is absent it returns
+    # ok=True/available=False with a structured signal, so the tool degrades to
+    # regex-only rather than crashing or blocking (PROD I6; North Star §4).
+    octave_validator = get_octave_validator()
+    octave_result = await loop.run_in_executor(
+        None,
+        octave_validator.validate,
+        octave_content,
+    )
+    octave_validation = octave_result.to_dict()
+
+    if not octave_result.ok:
+        # Real validation failed: structured error, no PR / no write.
+        return _empty_result(
+            dry_run,
+            _octave_errors_to_strings(octave_result),
+            octave_validation=octave_validation,
+        )
 
     # --- Linker (blocking: git subprocess + file writes) ---
     linker_fn = partial(
@@ -114,5 +171,6 @@ async def submit_governance(
         "branch": linker_output.get("branch"),
         "pr_url": linker_output.get("pr_url"),
         "validation_errors": errors,
+        "octave_validation": octave_validation,
         "dry_run": dry_run,
     }
