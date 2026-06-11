@@ -15,13 +15,23 @@ import re
 import tempfile
 from pathlib import Path
 
-# Regex to extract TOKEN from DECISION_RECORD
-_TOKEN_RE = re.compile(r'TOKEN::"([^"]+)"')
+# Regex to extract TOKEN from DECISION_RECORD (quoted form).
+# Line-anchored (\s*$) so a trailing-garbage line  TOKEN::"<value>" junk  is not
+# indexed as a clean token (cubic P2 — keep manifest consistent with the
+# authoritative Gate A readers in type_checker/lexer).
+_TOKEN_RE = re.compile(r'(?m)^\s*TOKEN::"([^"]+)"\s*$')
 
-# Regex to extract ID from facet cards
-_ID_RE = re.compile(r'(?m)^  ID::"([^"]+)"')
+# Quote-optional TOKEN: bare form TOKEN::VALUE (AGR canonical-form convergence).
+# Anchored to end-of-line so trailing content is not folded into the token.
+_TOKEN_BARE_RE = re.compile(r"(?m)^\s*TOKEN::([^\"\s]+)\s*$")
 
-# Alternative: bare ID:: without quotes (e.g. ID::SOME_CONSTANT)
+# Regex to extract ID from facet cards (quoted form). Line-anchored (\s*$) so
+# ID::"<value>"garbage is not indexed (cubic P2 — quoted branch consistency).
+_ID_RE = re.compile(r'(?m)^  ID::"([^"]+)"\s*$')
+
+# Alternative: bare ID:: without quotes (e.g. ID::SOME_CONSTANT).
+# RETAINED per the AGR convergence ruling — convergence is on quote-optional,
+# NOT on removing bare support.
 _ID_BARE_RE = re.compile(r"(?m)^  ID::([A-Z][A-Z0-9_]{2,127})\s*$")
 
 
@@ -32,6 +42,10 @@ def _extract_token_or_id(content: str) -> str | None:
     Returns the extracted value or None if neither found.
     """
     m = _TOKEN_RE.search(content)
+    if m:
+        return m.group(1)
+
+    m = _TOKEN_BARE_RE.search(content)
     if m:
         return m.group(1)
 

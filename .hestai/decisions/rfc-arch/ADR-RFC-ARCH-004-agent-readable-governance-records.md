@@ -46,20 +46,22 @@ An AGR record is a single OCTAVE document committed at:
 
 where `<token>` is the record's `TOKEN` value (see §1.2). Sub-grouping under `.hestai/decisions/<group>/<token>.oct.md` is admissible when a coherent group exists (e.g. `.hestai/decisions/rfc-arch/HO-ARCH-…`); the validator MUST treat both layouts as equivalent and resolve `<token>` to whichever path holds it.
 
-OCTAVE envelope:
+OCTAVE envelope (canonical form is **bare** `TOKEN`):
 
 ```
 ===DECISION_RECORD===
 META:
   TYPE::DECISION_RECORD
   VERSION::"1.0"
-  TOKEN::"<TOKEN>"
+  TOKEN::<TOKEN>
   AUTHORED_AT::"<ISO-8601-UTC>"
 …
 ===END===
 ```
 
 The opening sentinel `===DECISION_RECORD===` and closing `===END===` are required; they signal governance-class to PR-B §3.2.2.
+
+**Canonical TOKEN form (AGR canonical-form convergence)**: `TOKEN` is written **bare** — `TOKEN::<TOKEN>`, not `TOKEN::"<TOKEN>"`. This reconciles §1.1 with §1.6, where the `AMENDS` / `EXTENDS` (and `SUPERSEDED_BY`) edge references are bare TOKENs; a record's own `TOKEN` declaration and the TOKENs it cites in its lineage edges therefore share one canonical form. Gate A readers are **quote-optional**: the legacy quoted form `TOKEN::"<TOKEN>"` continues to validate verbatim (preserving the §0.2 schema-superset commitment over elevana-studio's existing HO-token convention), but bare is canonical for new records. The §1.3 TOKEN-format regex constrains the value identically in either form — quote-optionality does not relax §1.3.
 
 ### 1.2 Fields
 
