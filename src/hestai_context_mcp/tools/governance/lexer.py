@@ -23,10 +23,14 @@ _CONTEXT_BUDGET_CHARS = 25_000
 # quote-optional per the AGR canonical-form convergence ruling.
 # Matches the bare canonical form  TOKEN::<value> / ID::<value>  AND the legacy
 # quoted form  TOKEN::"<value>" / ID::"<value>"  where <value> == the token.
-# The bare alternatives use a trailing (?=\s|$) boundary so a shorter token
-# (e.g. HO-FOO-20260101) does not prefix-match a longer one (HO-FOO-BAR-...).
+# Compiled with re.MULTILINE; EVERY branch (quoted and bare) ends with a
+# (?:\s*$) line-end anchor (only trailing whitespace, then end-of-line) so that:
+#   - a shorter token (HO-FOO-20260101) never prefix-matches a longer one, and
+#   - a trailing-garbage line (TOKEN::"<value>" junk) is NOT counted as a clean
+#     existence hit (cubic P2 — the quoted branches were previously unanchored,
+#     and a (?=\s|$) lookahead was satisfied by the leading space of the junk).
 _FIELD_EXACT_RE_TEMPLATE = (
-    r'(?:TOKEN::\s*(?:"{token}"|{token}(?=\s|$))' r'|ID::\s*(?:"{token}"|{token}(?=\s|$)))'
+    r'(?m)(?:TOKEN::\s*(?:"{token}"|{token})\s*$' r'|ID::\s*(?:"{token}"|{token})\s*$)'
 )
 
 

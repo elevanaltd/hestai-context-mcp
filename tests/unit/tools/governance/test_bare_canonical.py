@@ -222,3 +222,139 @@ class TestManifestBareToken:
         (concepts / f"{_BARE_ID}.oct.md").write_text(_concept_card(_BARE_ID, quoted=False))
         manifest = build_manifest(tmp_path)
         assert _BARE_ID in manifest
+
+
+# ---------------------------------------------------------------------------
+# Trailing-garbage rejection (cubic P2 — asymmetric strictness fix)
+#
+# A TOKEN/ID line with trailing content after a valid value MUST be rejected.
+# The end-anchor (\s*$) lives OUTSIDE the quote alternation so BOTH the quoted
+# and bare branches are line-anchored — neither silently captures a valid value
+# and ignores the trailing garbage.
+# ---------------------------------------------------------------------------
+
+# Valid §1.3 token used as the "clean" part before injected garbage.
+_VALID_TOKEN = "HO-CONTEXT-MCP-TRAILING-GUARD-20260513"
+_VALID_ID = "GATE_A_TRAILING_GUARD"
+
+
+def _decision_record_raw_token_line(token_line: str) -> str:
+    """Build a DECISION_RECORD with a caller-supplied raw TOKEN field line.
+
+    ``token_line`` is the exact text after the two-space indent (e.g.
+    ``TOKEN::"HO-...-20260513" garbage``).
+    """
+    return (
+        "===DECISION_RECORD===\n"
+        "META:\n"
+        "  TYPE::DECISION_RECORD\n"
+        '  VERSION::"1.0"\n'
+        f"  {token_line}\n"
+        "  STATUS::PROPOSED\n"
+        "  TIER::OPERATIONAL\n"
+        '  DECISION::"Trailing-garbage guard."\n'
+        '  BECAUSE::"AGR canonical-form convergence."\n'
+        '  AUTHORED_AT::"2026-05-13T00:00:00Z"\n'
+        "===END===\n"
+    )
+
+
+def _concept_card_raw_id_line(id_line: str) -> str:
+    """Build a CONCEPT_CARD with a caller-supplied raw ID field line."""
+    return (
+        "===CONCEPT_CARD===\n"
+        "META:\n"
+        "  TYPE::CONCEPT_CARD\n"
+        "  REPO_ID::hestai-context-mcp\n"
+        f"  {id_line}\n"
+        "  STATUS::proposed\n"
+        "  CARD_SCHEMA_VERSION::1\n"
+        '  GENERATED_AT_COMMIT::"N/A"\n'
+        '  SOURCE_HASH::"N/A"\n'
+        "===END===\n"
+    )
+
+
+class TestTypeCheckerTrailingGarbageRejected:
+    @pytest.mark.unit
+    def test_quoted_token_trailing_garbage_rejected(self, tmp_path: Path) -> None:
+        """TOKEN::"valid" garbage must NOT validate (quoted branch anchored)."""
+        content = _decision_record_raw_token_line(f'TOKEN::"{_VALID_TOKEN}" EXTRA STUFF')
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        # Rejected at TOKEN extraction (no clean line match) → required-field error.
+        assert any("TOKEN" in e for e in result.errors)
+
+    @pytest.mark.unit
+    def test_bare_token_trailing_garbage_rejected(self, tmp_path: Path) -> None:
+        """TOKEN::HO-...-20260513 EXTRA STUFF must NOT validate (bare anchored)."""
+        content = _decision_record_raw_token_line(f"TOKEN::{_VALID_TOKEN} EXTRA STUFF")
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+
+    @pytest.mark.unit
+    def test_quoted_id_trailing_garbage_rejected(self, tmp_path: Path) -> None:
+        """ID::"VALUE"garbage must NOT validate (quoted ID branch anchored)."""
+        content = _concept_card_raw_id_line(f'ID::"{_VALID_ID}"garbage')
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+
+    @pytest.mark.unit
+    def test_bare_id_trailing_garbage_rejected(self, tmp_path: Path) -> None:
+        """ID::VALUE garbage must NOT validate (bare ID branch anchored)."""
+        content = _concept_card_raw_id_line(f"ID::{_VALID_ID} garbage")
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+
+    @pytest.mark.unit
+    def test_clean_quoted_token_still_accepted(self, tmp_path: Path) -> None:
+        """The clean quoted TOKEN line (no trailing junk) still validates."""
+        content = _decision_record_raw_token_line(f'TOKEN::"{_VALID_TOKEN}"')
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+        assert result.token == _VALID_TOKEN
+
+    @pytest.mark.unit
+    def test_clean_bare_token_still_accepted(self, tmp_path: Path) -> None:
+        """The clean bare TOKEN line (no trailing junk) still validates."""
+        content = _decision_record_raw_token_line(f"TOKEN::{_VALID_TOKEN}")
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+        assert result.token == _VALID_TOKEN
+
+
+class TestLexerTrailingGarbageRejected:
+    @pytest.mark.unit
+    def test_quoted_token_trailing_garbage_not_resolved(self, tmp_path: Path) -> None:
+        """A trailing-garbage quoted TOKEN line does not resolve the clean token.
+
+        ``TOKEN::"<valid>" garbage`` on disk must NOT make
+        ``lookup_token_deterministic(<valid>)`` return True — the lexer is
+        authoritative Gate A and must reject the malformed line, not match it.
+        """
+        decisions = tmp_path / ".hestai" / "decisions"
+        decisions.mkdir(parents=True)
+        (decisions / "malformed.oct.md").write_text(
+            _decision_record_raw_token_line(f'TOKEN::"{_VALID_TOKEN}" EXTRA STUFF')
+        )
+        assert lookup_token_deterministic(tmp_path, _VALID_TOKEN) is False
+
+    @pytest.mark.unit
+    def test_bare_token_trailing_garbage_not_resolved(self, tmp_path: Path) -> None:
+        """A trailing-garbage bare TOKEN line does not resolve the clean token."""
+        decisions = tmp_path / ".hestai" / "decisions"
+        decisions.mkdir(parents=True)
+        (decisions / "malformed.oct.md").write_text(
+            _decision_record_raw_token_line(f"TOKEN::{_VALID_TOKEN} EXTRA STUFF")
+        )
+        assert lookup_token_deterministic(tmp_path, _VALID_TOKEN) is False
+
+    @pytest.mark.unit
+    def test_clean_token_line_still_resolves(self, tmp_path: Path) -> None:
+        """A clean quoted/bare TOKEN line still resolves (no regression)."""
+        decisions = tmp_path / ".hestai" / "decisions"
+        decisions.mkdir(parents=True)
+        (decisions / "clean_quoted.oct.md").write_text(
+            _decision_record_raw_token_line(f'TOKEN::"{_VALID_TOKEN}"')
+        )
+        assert lookup_token_deterministic(tmp_path, _VALID_TOKEN) is True

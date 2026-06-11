@@ -32,14 +32,18 @@ _TYPE_RE = re.compile(r"(?m)TYPE::(\w+)")
 
 # TOKEN field (DECISION_RECORD): quote-optional (AGR canonical-form convergence).
 # Accepts BOTH the bare canonical form  TOKEN::VALUE  and the legacy quoted form
-# TOKEN::"VALUE".  The bare alternative captures up to end-of-line / whitespace
-# so trailing content is never folded into the token; the §1.3 _TOKEN_FORMAT_RE
-# check still constrains the captured value (a malformed bare token is rejected).
-_TOKEN_RE = re.compile(r'(?m)TOKEN::(?:"([^"]+)"|([^"\s]+))')
+# TOKEN::"VALUE".  The end-anchor (\s*$) lives OUTSIDE the alternation so BOTH
+# branches are line-anchored: a trailing-garbage line such as
+# TOKEN::"HO-…-20260513" EXTRA  or  TOKEN::HO-…-20260513 EXTRA  does NOT match
+# (cubic P2 — the §1.3 _TOKEN_FORMAT_RE only checks the captured value, so it
+# cannot catch trailing junk; the anchor must).
+_TOKEN_RE = re.compile(r'(?m)TOKEN::(?:"([^"]+)"|([^"\s]+))\s*$')
 
 # ID field (facet cards): quote-optional. Accepts bare  ID::VALUE  and quoted
-# ID::"VALUE".  The _FACET_ID_FORMAT_RE check still constrains the value.
-_ID_QUOTED_RE = re.compile(r'(?m)^  ID::(?:"([^"]+)"|([^"\s]+)\s*$)')
+# ID::"VALUE".  The end-anchor (\s*$) lives OUTSIDE the alternation so BOTH the
+# quoted and bare branches are line-anchored — ID::"VALUE"garbage is rejected
+# (cubic P2 — the quoted branch was previously unanchored).
+_ID_QUOTED_RE = re.compile(r'(?m)^  ID::(?:"([^"]+)"|([^"\s]+))\s*$')
 
 # SUPERSEDED_BY field: quoted string
 _SUPERSEDED_BY_RE = re.compile(r'SUPERSEDED_BY::"([^"]+)"')
