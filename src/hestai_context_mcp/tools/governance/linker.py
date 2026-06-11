@@ -5,7 +5,8 @@ Accepts a ValidationResult + raw OCTAVE content, then:
   2. Writes OCTAVE content to the computed target_path
   3. Commits with: chore(governance): add {token} [{card_type}]
   4. Updates MANIFEST (write_manifest)
-  5. Opens PR via gh pr create
+  5. Pushes the branch to origin (git push -u origin <branch>)
+  6. Opens PR via gh pr create
 
 dry_run=True: skips all git/file operations, returns what WOULD happen.
 
@@ -102,6 +103,22 @@ def _create_branch(working_dir: Path, branch_name: str) -> str | None:
     code, _, stderr = _run_git(["checkout", "-b", branch_name], working_dir)
     if code != 0:
         return f"Failed to create branch '{branch_name}': {stderr}"
+    return None
+
+
+def _push_branch(working_dir: Path, branch_name: str) -> str | None:
+    """Push the new branch to origin, setting upstream.
+
+    Runs ``git push -u origin <branch>``. This MUST happen before
+    ``gh pr create`` -- otherwise gh aborts with "you must first push the
+    current branch to a remote" (issue #73).
+
+    Returns an error string on failure, None on success. A push failure is
+    surfaced as a structured error (PROD I4) and never swallowed.
+    """
+    code, _, stderr = _run_git(["push", "-u", "origin", branch_name], working_dir)
+    if code != 0:
+        return f"Failed to push branch '{branch_name}' to origin: {stderr}"
     return None
 
 
@@ -320,7 +337,15 @@ def run_linker(
         if err:
             errors.append(err)
 
-    # 5. Open PR
+    # 5. Push branch to origin (REQUIRED before gh pr create -- issue #73).
+    #    gh aborts PR creation if the branch is not on a remote. A push
+    #    failure is a structured error (PROD I4) and skips PR creation.
+    if not errors:
+        err = _push_branch(working_dir, branch_name)
+        if err:
+            errors.append(err)
+
+    # 6. Open PR
     pr_url: str | None = None
     if not errors:
         gh_token = _resolve_github_token()

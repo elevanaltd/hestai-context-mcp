@@ -939,11 +939,20 @@ class TestLinkerIntegration:
         result = validate_octave_content(tmp_path, decision_record_octave)
         assert result.valid is True
 
-        # Mock only _open_pr in the linker module to avoid real GitHub interaction
+        # Mock the remote boundary (push + _open_pr) in the linker module to
+        # avoid real network/GitHub interaction while exercising real git-local
+        # operations (branch/write/commit). The temp repo has no `origin`
+        # remote, so the push must be stubbed (issue #73 added the push step).
         pr_url = "https://github.com/elevanaltd/hestai-context-mcp/pull/999"
-        with patch(
-            "hestai_context_mcp.tools.governance.linker._open_pr",
-            return_value=(pr_url, None),
+        with (
+            patch(
+                "hestai_context_mcp.tools.governance.linker._push_branch",
+                return_value=None,
+            ),
+            patch(
+                "hestai_context_mcp.tools.governance.linker._open_pr",
+                return_value=(pr_url, None),
+            ),
         ):
             output = run_linker(
                 working_dir=tmp_path,
