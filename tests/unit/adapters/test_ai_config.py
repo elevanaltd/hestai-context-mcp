@@ -66,6 +66,8 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "HESTAI_AI_PROVIDER",
         "HESTAI_AI_MODEL",
+        "HESTAI_AI_MODEL_ANALYSIS",
+        "HESTAI_AI_MODEL_CRITICAL",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
     ):
@@ -126,6 +128,76 @@ class TestResolveModel:
 
         monkeypatch.setenv("HESTAI_AI_MODEL", "some/other-model")
         assert resolve_model() == "some/other-model"
+
+
+class TestResolveModelTierAware:
+    """Issue #77: ``resolve_model(tier)`` maps a tier to its env var.
+
+    Tiers and their env vars:
+        * ``default``  -> ``HESTAI_AI_MODEL``
+        * ``analysis`` -> ``HESTAI_AI_MODEL_ANALYSIS``
+        * ``critical`` -> ``HESTAI_AI_MODEL_CRITICAL``
+
+    Fallback chain for the non-default tiers when their specific var is
+    unset: tier var -> ``HESTAI_AI_MODEL`` -> ``DEFAULT_MODEL``. The
+    zero-arg call (``resolve_model()``) keeps its pre-#77 default-tier
+    behaviour exactly (back-compatibility).
+    """
+
+    def test_default_tier_is_backcompat_zero_arg(self, clean_env):
+        from hestai_context_mcp.adapters.ai_config import DEFAULT_MODEL, resolve_model
+
+        # No arg and tier="default" must agree, and both equal the legacy default.
+        assert resolve_model() == DEFAULT_MODEL
+        assert resolve_model("default") == DEFAULT_MODEL
+
+    def test_default_tier_reads_hestai_ai_model(self, monkeypatch: pytest.MonkeyPatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL", "base/model")
+        assert resolve_model() == "base/model"
+        assert resolve_model("default") == "base/model"
+
+    def test_analysis_tier_reads_analysis_var(self, monkeypatch: pytest.MonkeyPatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL", "base/model")
+        monkeypatch.setenv("HESTAI_AI_MODEL_ANALYSIS", "analysis/model")
+        assert resolve_model("analysis") == "analysis/model"
+        # The default tier is unaffected by the analysis var.
+        assert resolve_model("default") == "base/model"
+
+    def test_critical_tier_reads_critical_var(self, monkeypatch: pytest.MonkeyPatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL_CRITICAL", "critical/model")
+        assert resolve_model("critical") == "critical/model"
+
+    def test_analysis_falls_back_to_hestai_ai_model_when_unset(
+        self, monkeypatch: pytest.MonkeyPatch, clean_env
+    ):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        # Analysis-specific var unset -> falls back to HESTAI_AI_MODEL.
+        monkeypatch.setenv("HESTAI_AI_MODEL", "base/model")
+        assert resolve_model("analysis") == "base/model"
+
+    def test_analysis_falls_back_to_default_model_when_all_unset(self, clean_env):
+        from hestai_context_mcp.adapters.ai_config import DEFAULT_MODEL, resolve_model
+
+        # Neither the analysis var nor HESTAI_AI_MODEL set -> DEFAULT_MODEL.
+        assert resolve_model("analysis") == DEFAULT_MODEL
+
+    def test_critical_falls_back_to_default_model_when_all_unset(self, clean_env):
+        from hestai_context_mcp.adapters.ai_config import DEFAULT_MODEL, resolve_model
+
+        assert resolve_model("critical") == DEFAULT_MODEL
+
+    def test_unknown_tier_raises_value_error(self, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        with pytest.raises(ValueError):
+            resolve_model("nonsense-tier")
 
 
 class TestProviderBaseUrl:

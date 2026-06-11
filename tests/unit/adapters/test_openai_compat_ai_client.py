@@ -427,3 +427,60 @@ class TestBuildDefaultFactory:
         monkeypatch.setattr(adapter_mod, "OpenAICompatAIClient", _BrokenClient)
         with pytest.raises(TypeError, match="async def"):
             adapter_mod.build_default_ai_client()
+
+
+class TestBuildDefaultFactoryTierAware:
+    """Issue #77: ``build_default_ai_client(tier=...)`` selects the tier model.
+
+    The factory remains the single env-reading site; passing ``tier`` makes
+    it resolve the model via ``ai_config.resolve_model(tier)``. The default
+    (no ``tier`` arg) stays back-compatible with the pre-#77 behaviour.
+    """
+
+    @staticmethod
+    def _no_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+        import hestai_context_mcp.adapters.ai_config as cfg
+
+        class _NoKR:
+            def get_password(self, *_a, **_kw):
+                return None
+
+            def set_password(self, *_a, **_kw):
+                return None
+
+            def delete_password(self, *_a, **_kw):
+                return None
+
+        monkeypatch.setattr(cfg, "keyring", _NoKR(), raising=True)
+
+    def test_analysis_tier_builds_client_with_analysis_model(self, monkeypatch: pytest.MonkeyPatch):
+        self._no_keyring(monkeypatch)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ENV_KEY")
+        monkeypatch.setenv("HESTAI_AI_MODEL", "base/model")
+        monkeypatch.setenv("HESTAI_AI_MODEL_ANALYSIS", "analysis/model")
+
+        from hestai_context_mcp.adapters.openai_compat_ai_client import (
+            OpenAICompatAIClient,
+            build_default_ai_client,
+        )
+
+        client = build_default_ai_client(tier="analysis")
+        assert isinstance(client, OpenAICompatAIClient)
+        # The constructed adapter carries the analysis-tier model.
+        assert client._model == "analysis/model"
+
+    def test_default_tier_backcompat(self, monkeypatch: pytest.MonkeyPatch):
+        self._no_keyring(monkeypatch)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ENV_KEY")
+        monkeypatch.setenv("HESTAI_AI_MODEL", "base/model")
+        monkeypatch.setenv("HESTAI_AI_MODEL_ANALYSIS", "analysis/model")
+
+        from hestai_context_mcp.adapters.openai_compat_ai_client import (
+            OpenAICompatAIClient,
+            build_default_ai_client,
+        )
+
+        # No tier arg -> default tier -> HESTAI_AI_MODEL (not the analysis var).
+        client = build_default_ai_client()
+        assert isinstance(client, OpenAICompatAIClient)
+        assert client._model == "base/model"

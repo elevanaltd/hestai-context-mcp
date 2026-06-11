@@ -55,6 +55,17 @@ KEYRING_SERVICE: str = "hestai-context-mcp"
 DEFAULT_PROVIDER: str = "openrouter"
 DEFAULT_MODEL: str = "google/gemini-2.0-flash-lite"
 
+# Tier -> env-var name for that tier's model. The ``default`` tier reads the
+# base ``HESTAI_AI_MODEL``; richer tiers read their own var and fall back to
+# the base var, then ``DEFAULT_MODEL`` (see :func:`resolve_model`). Tiers are
+# orthogonal to provider: a tier only changes *which model identifier* is sent
+# to whatever provider is configured (PROD::I3 — no vendor coupling).
+_TIER_ENV_VARS: dict[str, str] = {
+    "default": "HESTAI_AI_MODEL",
+    "analysis": "HESTAI_AI_MODEL_ANALYSIS",
+    "critical": "HESTAI_AI_MODEL_CRITICAL",
+}
+
 # Provider → base URL. Constant (NOT env-configurable) so a rogue env
 # var cannot redirect traffic to an attacker host.
 _PROVIDER_BASE_URLS: dict[str, str] = {
@@ -74,8 +85,36 @@ def resolve_provider() -> str:
     return os.environ.get("HESTAI_AI_PROVIDER", DEFAULT_PROVIDER)
 
 
-def resolve_model() -> str:
-    """Return the configured model identifier."""
+def resolve_model(tier: str = "default") -> str:
+    """Return the configured model identifier for ``tier``.
+
+    Tiers (issue #77):
+        * ``"default"``  -> ``HESTAI_AI_MODEL``
+        * ``"analysis"`` -> ``HESTAI_AI_MODEL_ANALYSIS``
+        * ``"critical"`` -> ``HESTAI_AI_MODEL_CRITICAL``
+
+    Resolution for a tier is a fallback chain: the tier's own env var, then
+    the base ``HESTAI_AI_MODEL``, then :data:`DEFAULT_MODEL`. For the
+    ``"default"`` tier this collapses to the pre-#77 behaviour exactly
+    (``HESTAI_AI_MODEL`` else :data:`DEFAULT_MODEL`), so the zero-arg call
+    remains back-compatible.
+
+    Args:
+        tier: One of ``"default"``, ``"analysis"``, ``"critical"``.
+
+    Raises:
+        ValueError: if ``tier`` is not a recognised tier.
+    """
+    try:
+        tier_var = _TIER_ENV_VARS[tier]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown model tier: {tier!r} (expected one of {sorted(_TIER_ENV_VARS)})"
+        ) from exc
+    # Tier var first; fall back to the base model var, then the hard default.
+    tier_value = os.environ.get(tier_var)
+    if tier_value:
+        return tier_value
     return os.environ.get("HESTAI_AI_MODEL", DEFAULT_MODEL)
 
 
