@@ -51,6 +51,18 @@ dev = [
 test = [
     "octave-mcp>=1.15",
 ]
+# Optional runtime extra (RFC #53 Gate B): promotes octave-mcp from a test-only
+# tool to an OPTIONAL real-validation backend behind the OctaveValidator port
+# (hestai_context_mcp.ports.octave_validator). The port is feature-detected and
+# fail-soft: with this extra installed, submit_governance runs octave-mcp's REAL
+# in-process AST validator alongside the regex Gate A; WITHOUT it, the tool
+# degrades gracefully to regex-only. NEVER a hard runtime dependency — the
+# default install stays octave-mcp-free, preserving PROD::I6 LEGACY_INDEPENDENCE
+# and North Star §4 (octave-mcp owns the OCTAVE format; this repo never reinvents
+# an OCTAVE AST).
+validation = [
+    "octave-mcp>=1.15",
+]
 
 [project.urls]
 Homepage = "https://github.com/elevanaltd/hestai-context-mcp"
