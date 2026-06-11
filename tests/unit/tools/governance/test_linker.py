@@ -24,6 +24,7 @@ from hestai_context_mcp.tools.governance.linker import (
     _create_branch,
     _git_add_and_commit,
     _open_pr,
+    _push_branch,
     _run_git,
     _write_file,
     run_linker,
@@ -225,6 +226,31 @@ class TestGitAddAndCommit:
 
 
 # ---------------------------------------------------------------------------
+# _push_branch
+# ---------------------------------------------------------------------------
+
+
+class TestPushBranch:
+    @pytest.mark.unit
+    def test_success_returns_none_and_pushes_upstream(self, tmp_path: Path) -> None:
+        """A 0-exit push returns None and uses `push -u origin <branch>`."""
+        with patch(f"{_LINKER}._run_git", return_value=(0, "", "")) as run:
+            err = _push_branch(tmp_path, "governance/x")
+        assert err is None
+        argv = run.call_args.args[0]
+        assert argv == ["push", "-u", "origin", "governance/x"]
+
+    @pytest.mark.unit
+    def test_failure_returns_error_string(self, tmp_path: Path) -> None:
+        """A non-zero push surfaces as a structured error string (PROD I4)."""
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "permission denied")):
+            err = _push_branch(tmp_path, "governance/x")
+        assert err is not None
+        assert "governance/x" in err
+        assert "permission denied" in err
+
+
+# ---------------------------------------------------------------------------
 # _open_pr
 # ---------------------------------------------------------------------------
 
@@ -369,6 +395,7 @@ class TestRunLinkerLivePath:
             patch(f"{_LINKER}._write_file", return_value=None),
             patch(f"{_LINKER}.write_manifest", side_effect=RuntimeError("manifest boom")),
             patch(f"{_LINKER}._git_add_and_commit", return_value=None),
+            patch(f"{_LINKER}._push_branch", return_value=None),
             patch(f"{_LINKER}._resolve_github_token", return_value=None),
             patch(f"{_LINKER}._open_pr", return_value=("http://pr", None)),
         ):
@@ -401,6 +428,7 @@ class TestRunLinkerLivePath:
             patch(f"{_LINKER}._write_file", return_value=None),
             patch(f"{_LINKER}.write_manifest"),
             patch(f"{_LINKER}._git_add_and_commit", return_value=None),
+            patch(f"{_LINKER}._push_branch", return_value=None),
             patch(f"{_LINKER}._resolve_github_token", return_value="ghp_x"),
             patch(f"{_LINKER}._open_pr", return_value=(None, "pr boom")),
         ):
@@ -409,14 +437,91 @@ class TestRunLinkerLivePath:
         assert out["pr_url"] is None
 
     @pytest.mark.unit
-    def test_full_live_success(self, tmp_path: Path) -> None:
-        """Happy live path: branch + write + manifest + commit + PR all succeed."""
+    def test_push_failure_aggregates_and_skips_pr(self, tmp_path: Path) -> None:
+        """A push failure surfaces as a structured error and aborts before PR (PROD I4)."""
         target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         with (
             patch(f"{_LINKER}._create_branch", return_value=None),
             patch(f"{_LINKER}._write_file", return_value=None),
             patch(f"{_LINKER}.write_manifest"),
             patch(f"{_LINKER}._git_add_and_commit", return_value=None),
+            patch(f"{_LINKER}._push_branch", return_value="push boom"),
+            patch(f"{_LINKER}._open_pr") as pr,
+        ):
+            out = run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", False)
+        assert out["error"] == "push boom"
+        assert out["pr_url"] is None
+        # PR creation must NOT be attempted when the push fails.
+        pr.assert_not_called()
+
+    @pytest.mark.unit
+    def test_push_precedes_pr_create_at_subprocess_boundary(self, tmp_path: Path) -> None:
+        """ORDERING: the branch push reaches the subprocess boundary BEFORE `gh pr create`.
+
+        This is the regression guard for issue #73 -- run_linker must push the
+        feature branch to origin before invoking `gh pr create`, otherwise gh
+        aborts ("you must first push the current branch to a remote").
+
+        We let the real `_push_branch` and `_open_pr` run, stubbing only the
+        shared `subprocess.run` boundary, and assert the recorded git-push call
+        precedes the gh-pr-create call.
+        """
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        calls: list[list[str]] = []
+
+        def record(cmd: list[str], *args: object, **kwargs: object) -> MagicMock:
+            calls.append(cmd)
+            if cmd[:1] == ["gh"]:
+                return _fake_completed(0, stdout="http://pr/1")
+            return _fake_completed(0)
+
+        with (
+            patch(f"{_LINKER}._create_branch", return_value=None),
+            patch(f"{_LINKER}._write_file", return_value=None),
+            patch(f"{_LINKER}.write_manifest"),
+            patch(f"{_LINKER}._git_add_and_commit", return_value=None),
+            patch(f"{_LINKER}._resolve_github_token", return_value=None),
+            patch(f"{_LINKER}.subprocess.run", side_effect=record),
+        ):
+            out = run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", False)
+
+        assert out["error"] is None
+        assert out["pr_url"] == "http://pr/1"
+
+        push_idx = next(
+            (i for i, c in enumerate(calls) if c[:1] == ["git"] and "push" in c),
+            None,
+        )
+        pr_idx = next(
+            (i for i, c in enumerate(calls) if c[:3] == ["gh", "pr", "create"]),
+            None,
+        )
+        assert push_idx is not None, f"no git push reached the boundary: {calls}"
+        assert pr_idx is not None, f"no gh pr create reached the boundary: {calls}"
+        assert push_idx < pr_idx, f"push (idx {push_idx}) must precede pr-create (idx {pr_idx})"
+
+    @pytest.mark.unit
+    def test_dry_run_neither_pushes_nor_creates_pr(self, tmp_path: Path) -> None:
+        """dry_run must touch NO subprocess: no push, no PR (PROD I5 / Human Primacy)."""
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        with patch(f"{_LINKER}.subprocess.run") as run:
+            out = run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", True)
+        assert out["dry_run"] is True
+        assert out["pr_url"] is None
+        assert out["error"] is None
+        # No git push and no gh pr create -- in fact no subprocess at all.
+        run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_full_live_success(self, tmp_path: Path) -> None:
+        """Happy live path: branch + write + manifest + commit + push + PR all succeed."""
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        with (
+            patch(f"{_LINKER}._create_branch", return_value=None),
+            patch(f"{_LINKER}._write_file", return_value=None),
+            patch(f"{_LINKER}.write_manifest"),
+            patch(f"{_LINKER}._git_add_and_commit", return_value=None),
+            patch(f"{_LINKER}._push_branch", return_value=None) as push,
             patch(f"{_LINKER}._resolve_github_token", return_value="ghp_x"),
             patch(f"{_LINKER}._open_pr", return_value=("http://pr/1", None)) as pr,
         ):
@@ -424,6 +529,8 @@ class TestRunLinkerLivePath:
         assert out["error"] is None
         assert out["pr_url"] == "http://pr/1"
         assert out["branch"].startswith("governance/")
+        # The branch was pushed before the PR was opened.
+        push.assert_called_once()
         # gh_token resolution feeds _open_pr.
         assert pr.call_args.args[-1] == "ghp_x" or pr.call_args.kwargs.get("gh_token") == "ghp_x"
 
