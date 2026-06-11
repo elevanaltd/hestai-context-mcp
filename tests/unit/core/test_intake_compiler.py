@@ -178,3 +178,53 @@ class TestCostCaps:
         await compile_prose_to_octave(_ctx())
         assert stub.request is not None
         assert stub.request.max_tokens == 256
+
+
+class TestMetricsAccounting:
+    """The reported tokens metric = input estimate + ACTUAL output (no out_cap)."""
+
+    async def test_actual_tokens_excludes_output_ceiling(self, patch_client, monkeypatch) -> None:
+        from hestai_context_mcp.core.intake_compiler import _CHARS_PER_TOKEN
+
+        # Deterministic pricing so cost follows tokens linearly.
+        monkeypatch.setenv("HESTAI_INTAKE_USD_PER_1K_TOKENS", "1.0")
+        monkeypatch.setenv("HESTAI_INTAKE_MAX_COST_USD", "1000000")  # never abort
+
+        ctx = _ctx(prose="record a routing decision")
+        raw = "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n===END==="
+        stub = _StubClient(text=raw)
+        patch_client(stub)
+
+        out_cap = 8000
+        result = await compile_prose_to_octave(ctx, max_output_tokens=out_cap)
+
+        def _ceil(n: int) -> int:
+            return (n + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+
+        input_tokens = _ceil(len(ctx.prompt) + len(ctx.prose_input))
+        output_tokens = _ceil(len(raw))
+        expected = input_tokens + output_tokens
+
+        assert result["ok"] is True
+        # Exact: input estimate + ACTUAL output, NOT the output ceiling.
+        assert result["metrics"]["tokens"] == expected
+        # Regression guard: the old double-counting added out_cap on top.
+        assert result["metrics"]["tokens"] < expected + out_cap
+        assert result["metrics"]["tokens"] != input_tokens + out_cap + output_tokens
+        # Cost tracks the (non-double-counted) token total at 1.0/1k.
+        assert result["metrics"]["cost"] == pytest.approx(expected / 1000.0)
+
+    async def test_prose_counted_once_in_input_estimate(self, patch_client, monkeypatch) -> None:
+        # After the duplication fix, the system prompt does NOT contain the
+        # prose, so input = len(prompt) + len(prose) with the prose counted once.
+        from hestai_context_mcp.core.intake_compiler import (
+            _CHARS_PER_TOKEN,
+            _estimate_input_tokens,
+        )
+
+        ctx = _ctx(prose="a short prose request")
+        # The helper's input estimate must equal prompt + prose exactly once.
+        expected = (
+            len(ctx.prompt) + len(ctx.prose_input) + _CHARS_PER_TOKEN - 1
+        ) // _CHARS_PER_TOKEN
+        assert _estimate_input_tokens(ctx) == expected

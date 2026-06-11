@@ -127,9 +127,23 @@ class TestAssembleIntakeContext:
         ctx = assemble_intake_context(tmp_path, "provider routing")
         # The prompt is JIT-compiled from live repo state: it must reference the
         # actual exemplar corpus, not be a static constant detached from the repo.
-        assert "CONCEPT_CARD" in ctx.prompt or "CONCEPT_CARD" in ctx.corpus
-        # Prose is delimited inside the prompt assembly surface.
-        assert ctx.prose_input in ctx.prompt or ctx.prose_input == "provider routing"
+        assert "BEGIN_EXEMPLAR_CORPUS" in ctx.prompt
+        assert "CONCEPT_CARD" in ctx.prompt
+        assert "CONCEPT_CARD" in ctx.corpus
+
+    def test_system_prompt_does_not_embed_prose(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        # Use a distinctive prose marker so the absence check is unambiguous.
+        marker = "ZZ_DISTINCTIVE_PROSE_MARKER_QWERTY"
+        ctx = assemble_intake_context(tmp_path, f"please {marker} record a decision")
+        # FIX: the prose must NOT be embedded in the SYSTEM prompt — it is sent
+        # exactly once, as the user_prompt, by the Stage-2 compiler. Embedding it
+        # here too would duplicate it in every call.
+        assert marker not in ctx.prompt
+        assert ctx.prose_input not in ctx.prompt
+        # And the prose is still preserved verbatim on the context for the
+        # user-prompt path.
+        assert marker in ctx.prose_input
 
     def test_relevant_tokens_greps_prose_relevant_ids(self, tmp_path: Path) -> None:
         _seed_repo(tmp_path)

@@ -134,11 +134,30 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _project_tokens(intake_context: IntakeContext, max_output_tokens: int) -> int:
-    """Project total tokens for the call: input estimate + max output ceiling."""
+def _ceil_div(numerator: int, denominator: int) -> int:
+    """Ceiling integer division."""
+    return (numerator + denominator - 1) // denominator
+
+
+def _estimate_input_tokens(intake_context: IntakeContext) -> int:
+    """Estimate input tokens from the system prompt + the prose user prompt.
+
+    After the prose-duplication fix the system prompt no longer embeds the
+    prose, so ``len(prompt) + len(prose_input)`` is the correct, non-duplicative
+    input size: the system prompt (instructions + corpus) plus the prose carried
+    by the user prompt.
+    """
     input_chars = len(intake_context.prompt) + len(intake_context.prose_input)
-    input_tokens = (input_chars + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
-    return input_tokens + max_output_tokens
+    return _ceil_div(input_chars, _CHARS_PER_TOKEN)
+
+
+def _project_tokens(intake_context: IntakeContext, max_output_tokens: int) -> int:
+    """Pre-call cost projection: input estimate + max output CEILING.
+
+    Used only by the pre-call cost guard (worst case = full output budget).
+    Unchanged by the metrics fix.
+    """
+    return _estimate_input_tokens(intake_context) + max_output_tokens
 
 
 def _failure(model: str, error: str, tokens: int = 0) -> CompileResult:
@@ -227,10 +246,14 @@ async def compile_prose_to_octave(
     if not isinstance(raw, str) or not raw.strip():
         return _failure(model, "Backend returned empty response; no OCTAVE produced.")
 
-    actual_tokens = (len(raw) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN + projected_tokens
+    # Reported metric = input estimate + ACTUAL output (NOT the output ceiling).
+    # The pre-call guard used out_cap as a worst case; the post-call metric must
+    # reflect the real output size so tokens/cost are not double-counted.
+    actual_output_tokens = _ceil_div(len(raw), _CHARS_PER_TOKEN)
+    actual_tokens = _estimate_input_tokens(intake_context) + actual_output_tokens
     cost = (actual_tokens / 1000.0) * price_per_1k
     logger.info(
-        "intake compile ok: model=%s projected_tokens=%d est_cost=$%.4f",
+        "intake compile ok: model=%s actual_tokens=%d est_cost=$%.4f",
         model,
         actual_tokens,
         cost,

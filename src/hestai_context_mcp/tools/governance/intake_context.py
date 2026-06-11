@@ -134,13 +134,15 @@ def _relevant_tokens(working_dir: Path, prose_input: str, corpus: str) -> tuple[
     return tuple(sorted(found))
 
 
-def _compile_jit_prompt(corpus: str, prose_input: str, relevant_tokens: tuple[str, ...]) -> str:
+def _compile_jit_prompt(corpus: str, relevant_tokens: tuple[str, ...]) -> str:
     """Compile the system prompt from live repo state at call time.
 
     Deliberately assembled here (NOT a module-level constant) so the prompt
     always reflects the current corpus — the autocatalytic feed and exemplar
-    schema in force *now*. The prose is embedded inside a delimited block; the
-    instruction tells the backend to treat the corpus as reference-only.
+    schema in force *now*. The system prompt is instructions + token_note + the
+    exemplar corpus ONLY. The operator's prose is NOT embedded here — it is
+    delivered as the *user* prompt by the Stage-2 compiler, so the prose is sent
+    exactly once (no duplication across system + user prompts).
     """
     token_note = (
         f"Known existing tokens referenced by the request: {', '.join(relevant_tokens)}."
@@ -157,9 +159,6 @@ def _compile_jit_prompt(corpus: str, prose_input: str, relevant_tokens: tuple[st
         "BEGIN_EXEMPLAR_CORPUS\n"
         f"{corpus}\n"
         "END_EXEMPLAR_CORPUS\n"
-        "BEGIN_REQUEST\n"
-        f"{prose_input}\n"
-        "END_REQUEST\n"
     )
 
 
@@ -179,7 +178,7 @@ def assemble_intake_context(working_dir: Path, prose_input: str) -> IntakeContex
     # newest AGRs (the autocatalytic feed). Budget clip retains in this order.
     corpus = _clip_to_budget([*exemplars, *agrs], _CONTEXT_BUDGET_CHARS)
     relevant = _relevant_tokens(working_dir, prose_input, corpus)
-    prompt = _compile_jit_prompt(corpus, prose_input, relevant)
+    prompt = _compile_jit_prompt(corpus, relevant)
     return IntakeContext(
         prose_input=prose_input,
         corpus=corpus,
