@@ -1,0 +1,3 @@
+| TOKEN/ID | path |
+| --- | --- |
+| HO-CONTEXT-MCP-ADOPTS-AGR-DOGFOOD-20260611 | .hestai/decisions/HO-CONTEXT-MCP-ADOPTS-AGR-DOGFOOD-20260611.oct.md |
