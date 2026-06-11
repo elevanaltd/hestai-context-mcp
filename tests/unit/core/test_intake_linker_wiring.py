@@ -24,11 +24,20 @@ from hestai_context_mcp.core.intake_pipeline import run_intake_to_pr
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 from hestai_context_mcp.tools.governance.type_checker import ValidationResult
 
+# Non-secret AGR governance TOKEN fixture. Defined as a plainly-named module
+# constant (NOT token/secret/key-named) and referenced everywhere so no quoted
+# governance-token literal sits adjacent to a token keyword or field assignment
+# — that adjacency is what GitGuardian's generic detector flags as a possible
+# secret (false positive; carry-forward of the #63 policy). The detector stays
+# live on this file (no path-ignore).
+RECORD_TOKEN = "HO-CONTEXT-MCP-NEWREC-20260601"
+RECORD_PATH = f".hestai/decisions/{RECORD_TOKEN}.oct.md"
+
 _VALID_OCTAVE = (
     "===DECISION_RECORD===\n"
     "META:\n"
     "  TYPE::DECISION_RECORD\n"
-    '  TOKEN::"HO-CONTEXT-MCP-NEWREC-20260601"\n'
+    f'  TOKEN::"{RECORD_TOKEN}"\n'
     "===END===\n"
 )
 
@@ -44,9 +53,9 @@ def _pipeline_ok() -> dict[str, Any]:
         "validation": ValidationResult(
             valid=True,
             errors=[],
-            token="HO-CONTEXT-MCP-NEWREC-20260601",
+            token=RECORD_TOKEN,
             card_type="DECISION_RECORD",
-            target_path=Path(".hestai/decisions/HO-CONTEXT-MCP-NEWREC-20260601.oct.md"),
+            target_path=Path(RECORD_PATH),
         ),
         "validation_errors": [],
         "metrics": {"tokens": 10, "cost": 0.01, "model": "test-model"},
@@ -87,7 +96,7 @@ def spy_linker(monkeypatch: pytest.MonkeyPatch):
             return {
                 "token": kwargs["validation"].token,
                 "card_type": kwargs["validation"].card_type,
-                "target_path": ".hestai/decisions/HO-CONTEXT-MCP-NEWREC-20260601.oct.md",
+                "target_path": RECORD_PATH,
                 "branch": "governance/20260601-ho-context-mcp-newrec-20260601",
                 "pr_url": None if kwargs["dry_run"] else "https://example/pr/1",
                 "error": None,
@@ -110,7 +119,7 @@ class TestSuccessWiresLinker:
         call = spy_linker.calls[0]
         # The EXACT validated OCTAVE + ValidationResult flow into the linker.
         assert call["octave_content"] == _VALID_OCTAVE
-        assert call["validation"].token == "HO-CONTEXT-MCP-NEWREC-20260601"
+        assert call["validation"].token == RECORD_TOKEN
         assert call["dry_run"] is True
 
     async def test_result_includes_metrics_and_pr_fields(
@@ -118,7 +127,7 @@ class TestSuccessWiresLinker:
     ) -> None:
         stub_pipeline(_pipeline_ok())
         result = await run_intake_to_pr(tmp_path, _ctx(), dry_run=False)
-        assert result["token"] == "HO-CONTEXT-MCP-NEWREC-20260601"
+        assert result["token"] == RECORD_TOKEN
         assert result["card_type"] == "DECISION_RECORD"
         assert result["branch"]
         assert result["pr_url"] == "https://example/pr/1"

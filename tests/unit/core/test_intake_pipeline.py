@@ -25,12 +25,19 @@ import hestai_context_mcp.core.intake_pipeline as mod
 from hestai_context_mcp.core.intake_pipeline import run_intake_pipeline
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 
+# Non-secret AGR governance TOKEN fixture. Built from a plainly-named module
+# constant (NOT token/secret/key-named) via f-string so no `TOKEN::"<literal>"`
+# quoted-literal adjacency remains for GitGuardian's generic detector to flag as
+# a possible secret (false positive; #63 policy carry-forward). The detector
+# stays live on this file (no path-ignore).
+RECORD_TOKEN = "HO-CONTEXT-MCP-NEWREC-20260601"
+
 # A syntactically valid DECISION_RECORD that passes the regex Gate A.
 _VALID_OCTAVE = (
     "===DECISION_RECORD===\n"
     "META:\n"
     "  TYPE::DECISION_RECORD\n"
-    '  TOKEN::"HO-CONTEXT-MCP-NEWREC-20260601"\n'
+    f'  TOKEN::"{RECORD_TOKEN}"\n'
     "===END===\n"
 )
 _INVALID_OCTAVE = "this is not octave at all"
