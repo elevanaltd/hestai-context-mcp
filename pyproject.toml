@@ -29,6 +29,10 @@ dependencies = [
     # Credential storage for the AIClient adapter (issue #5), including
     # migration from legacy "hestai-mcp" service name.
     "keyring>=25.0.0",
+    # Load .env at server startup so Gate C prose mode can resolve
+    # OPENROUTER_API_KEY / HESTAI_AI_MODEL when launched by an MCP client.
+    # Mirrors the sibling MCP servers (hestai-mcp, debate-hall-mcp).
+    "python-dotenv>=1.0.0",
 ]
 
 [project.scripts]
