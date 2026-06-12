@@ -134,18 +134,68 @@ def write_broken_chain(working_dir: Path) -> None:
 
 
 def write_malformed_record(working_dir: Path) -> Path:
-    """Write a file with a valid-format TOKEN but a broken OCTAVE envelope.
+    """Write a genuinely-malformed DECISION_RECORD (F1 distinction).
 
-    Used to exercise RECORD_PARSE_FAILED: the file is discoverable but its
-    required fields / envelope do not parse.
+    The file DECLARES itself a DECISION_RECORD (canonical sentinel +
+    ``TYPE::DECISION_RECORD`` + a valid-format TOKEN, so it is in scope and
+    discoverable) but is MISSING required §1.2 fields (no STATUS / TIER /
+    DECISION / BECAUSE / AUTHORED_AT). It must therefore trigger
+    RECORD_PARSE_FAILED — NOT be silently skipped. This is the "is-an-AGR-but-
+    broken" half of the two-way scoping split.
     """
     root = decisions_dir(working_dir)
     path = root / f"{MALFORMED_TOKEN}.oct.md"
-    # No sentinel, no required fields — envelope is broken.
     path.write_text(
-        f"this is not a valid OCTAVE record\nTOKEN::{MALFORMED_TOKEN}\n",
+        "===DECISION_RECORD===\n"
+        "META:\n"
+        "  TYPE::DECISION_RECORD\n"
+        '  VERSION::"1.0"\n'
+        f"  TOKEN::{MALFORMED_TOKEN}\n"
+        # Required STATUS/TIER/DECISION/BECAUSE/AUTHORED_AT deliberately absent.
+        "===END===\n",
         encoding="utf-8",
     )
+    return path
+
+
+def write_non_agr_record(
+    working_dir: Path,
+    *,
+    filename: str,
+    sentinel: str = "BUILD_PLAN",
+    type_field: str | None = "BUILD_PLAN",
+    type_key: str = "TYPE",
+    group: str | None = None,
+) -> Path:
+    """Write a correctly-placed NON-AGR ``.oct.md`` (F1 co-residency case).
+
+    Models the governance artefacts that legitimately co-reside under
+    ``.hestai/decisions/`` per ADR-RFC-ARCH-001 (BUILD_PLAN, SECURITY_DESIGN_
+    REVIEW, arbitration records). These declare a NON-DECISION_RECORD sentinel
+    and/or type (or no type at all) and carry no TOKEN. They are OUT OF SCOPE for
+    the AGR read tools and must be skipped silently.
+
+    Args:
+        filename: The on-disk basename (e.g. ``BUILD-PLAN.oct.md``).
+        sentinel: The opening ``===<sentinel>===`` envelope name.
+        type_field: Value for the META type line, or ``None`` to omit it.
+        type_key: META key for the type line — defaults to ``TYPE``; pass
+            ``DOCUMENT_TYPE`` to model the real BUILD_PLAN convention.
+        group: Optional ``<group>/`` subdirectory.
+    """
+    root = decisions_dir(working_dir)
+    if group:
+        root = root / group
+        root.mkdir(parents=True, exist_ok=True)
+
+    lines = [f"==={sentinel}===", "META:"]
+    if type_field is not None:
+        lines.append(f"  {type_key}::{type_field}")
+    lines.append('  NOTE::"a correctly-placed non-AGR governance artefact"')
+    lines.append("===END===")
+
+    path = root / filename
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 

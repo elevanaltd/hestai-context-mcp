@@ -33,6 +33,7 @@ from ._agr_fixtures import (
     TOKEN_RATIFIED,
     snapshot_tree,
     write_malformed_record,
+    write_non_agr_record,
     write_record,
     write_supersession_chain,
 )
@@ -173,6 +174,33 @@ class TestErrorEnvelope:
         missing = tmp_path / "does-not-exist"
         result = lookup_decision(str(missing), TOKEN_RATIFIED)
         self._assert_envelope(result, "WORKING_DIR_INVALID", "io_failure")
+
+
+class TestCoLocatedNonAgrFiles:
+    """F1 (CIV NO-GO regression): a co-located non-AGR must never resolve as a
+    record. A token that only matches a non-AGR is TOKEN_NOT_FOUND, not a hit.
+    """
+
+    @pytest.mark.unit
+    def test_token_matching_only_a_non_agr_is_not_found(self, tmp_path: Path) -> None:
+        """A non-AGR whose filename embeds a valid-format token does not resolve.
+
+        We name a BUILD_PLAN with a DECISION_RECORD-looking filename token; since
+        the file is not a DECISION_RECORD (wrong sentinel/type, no TOKEN field),
+        discover_record must reject it and lookup must return TOKEN_NOT_FOUND.
+        """
+        lookup_decision = _lookup_decision()
+        decoy_token = "HO-CONTEXT-MCP-DECOY-NONAGR-20260601"
+        write_non_agr_record(
+            tmp_path,
+            filename=f"{decoy_token}.oct.md",
+            sentinel="B1_BUILD_PLAN",
+            type_field="BUILD_PLAN",
+            type_key="DOCUMENT_TYPE",
+        )
+        result = lookup_decision(str(tmp_path), decoy_token)
+        assert result["ok"] is False
+        assert result["error"]["code"] == "TOKEN_NOT_FOUND"
 
 
 class TestPurity:

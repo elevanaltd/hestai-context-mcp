@@ -58,10 +58,20 @@ def list_decisions(
 
     records: list[dict[str, Any]] = []
     for path in agr_read.iter_record_paths(working_path):
-        parsed = agr_read.load_parsed(path)
+        is_agr, parsed = agr_read.classify_file(path)
+
+        # F1 SCOPING: ``.hestai/decisions/`` legitimately co-hosts non-AGR
+        # governance artefacts (BUILD_PLAN, SECURITY_DESIGN_REVIEW, arbitration
+        # records) per ADR-RFC-ARCH-001. A file that does NOT declare itself a
+        # DECISION_RECORD is OUT OF SCOPE — skip silently, never error.
+        if not is_agr:
+            continue
+
+        # §3.3 PROTECTION (preserved): a file that IS a DECISION_RECORD but fails
+        # to parse its required §1.2 fields fails the WHOLE call — consumers MUST
+        # be able to detect that the list is incomplete; do not silently drop a
+        # genuinely-malformed AGR.
         if not agr_read.record_is_parseable(parsed):
-            # §3.3: fail the whole call rather than silently dropping; consumers
-            # MUST be able to detect that the list is incomplete.
             return agr_read.error_envelope(
                 code="RECORD_PARSE_FAILED",
                 category="schema_violation",

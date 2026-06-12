@@ -27,10 +27,13 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
 
 # §1.3 TOKEN format — reuse the authoritative Gate-A regex (do not rebuild).
 from hestai_context_mcp.tools.governance.type_checker import (
-    _TOKEN_FORMAT_RE as TOKEN_FORMAT_RE,
+    _DECISION_RECORD_TYPE,
+    _extract_sentinel,
+    _extract_token,
+    _extract_type,
 )
 from hestai_context_mcp.tools.governance.type_checker import (
-    _extract_token,
+    _TOKEN_FORMAT_RE as TOKEN_FORMAT_RE,
 )
 
 # The §1.2 required fields whose presence proves the OCTAVE envelope parsed.
@@ -43,6 +46,26 @@ _REQUIRED_FIELDS = (
     "because",
     "authored_at",
 )
+
+
+def is_decision_record(content: str) -> bool:
+    """True iff this OCTAVE document declares itself a DECISION_RECORD (AGR).
+
+    Type membership is a SCOPING signal, distinct from parse-completeness
+    (``record_is_parseable``). ``.hestai/decisions/`` legitimately co-hosts
+    non-AGR governance artefacts (BUILD_PLAN, SECURITY_DESIGN_REVIEW, arbitration
+    records) per ADR-RFC-ARCH-001; those are OUT OF SCOPE for the AGR read tools
+    and must be skipped silently — never raised as RECORD_PARSE_FAILED.
+
+    A document is a DECISION_RECORD iff its opening sentinel is
+    ``===DECISION_RECORD===`` OR its META declares ``TYPE::DECISION_RECORD``
+    (§1.1). The two signals are OR-ed so a file that declares the type either way
+    is in scope; co-located non-AGRs (different sentinel, ``DOCUMENT_TYPE::``,
+    or no TYPE at all) are out of scope. Regex-only via the Gate-A extractors.
+    """
+    if _extract_sentinel(content) == _DECISION_RECORD_TYPE:
+        return True
+    return _extract_type(content) == _DECISION_RECORD_TYPE
 
 
 def error_envelope(
@@ -122,33 +145,45 @@ def record_is_parseable(parsed: DecisionRecord) -> bool:
     return all(parsed.get(field) is not None for field in _REQUIRED_FIELDS)
 
 
+def _is_decision_record_for_token(path: Path, token: str) -> bool:
+    """True iff ``path`` is a DECISION_RECORD whose embedded TOKEN == ``token``.
+
+    Both conditions are required: a co-located non-AGR (BUILD_PLAN, etc.) must
+    NOT resolve as a record even if its filename collides, and an AGR whose
+    filename drifted from its TOKEN must still resolve by content. Read-only.
+    """
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return is_decision_record(content) and _extract_token(content) == token
+
+
 def discover_record(working_dir: Path, token: str) -> Path | None:
-    """Resolve a TOKEN to its on-disk ``.oct.md`` path, or ``None`` if absent.
+    """Resolve a TOKEN to its on-disk DECISION_RECORD path, or ``None``.
 
     Resolution is path-first (§1.1 filename↔TOKEN): the canonical filename is
-    ``<token>.oct.md`` under the flat root or any sub-group. As a fallback (a
-    record whose filename was hand-edited away from its TOKEN), the store is
-    scanned and each file's embedded TOKEN compared via the Gate-A extractor.
-    Read-only; deterministic for identical filesystem state.
+    ``<token>.oct.md`` under the flat root or any sub-group. Every candidate is
+    verified to be a DECISION_RECORD whose embedded TOKEN equals ``token`` —
+    a co-located non-AGR ``.oct.md`` can never resolve as a record (F1 guard).
+    As a fallback (a record whose filename drifted from its TOKEN), the store is
+    scanned by content. Deterministic for identical filesystem state.
     """
     root = decisions_root(working_dir)
     if not root.exists():
         return None
 
-    # Fast path: canonical filename match (flat or sub-grouped).
+    # Fast path: canonical filename match (flat or sub-grouped), type-verified.
     direct = root / f"{token}.oct.md"
-    if direct.exists():
+    if direct.exists() and _is_decision_record_for_token(direct, token):
         return direct
-    for candidate in root.rglob(f"{token}.oct.md"):
-        return candidate
+    for candidate in sorted(root.rglob(f"{token}.oct.md")):
+        if _is_decision_record_for_token(candidate, token):
+            return candidate
 
-    # Fallback: embedded-TOKEN scan (filename drifted from TOKEN).
+    # Fallback: embedded-TOKEN scan (filename drifted from TOKEN), type-verified.
     for path in iter_record_paths(working_dir):
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if _extract_token(content) == token:
+        if _is_decision_record_for_token(path, token):
             return path
     return None
 
@@ -157,6 +192,21 @@ def load_parsed(path: Path) -> DecisionRecord:
     """Read + parse a record file into a structured dict (pure read)."""
     content = path.read_text(encoding="utf-8", errors="replace")
     return parse_decision_record(content)
+
+
+def classify_file(path: Path) -> tuple[bool, DecisionRecord]:
+    """Read a file ONCE and return ``(is_decision_record, parsed)`` (pure read).
+
+    The two-way scoping split for list_decisions (F1):
+      * ``is_decision_record`` False  → out of scope (co-located non-AGR): SKIP.
+      * ``is_decision_record`` True   → in scope; the caller then checks
+        ``record_is_parseable(parsed)`` to distinguish a healthy AGR from a
+        genuinely-malformed one (RECORD_PARSE_FAILED).
+
+    Reads the file a single time so type-membership and field-parse share one IO.
+    """
+    content = path.read_text(encoding="utf-8", errors="replace")
+    return is_decision_record(content), parse_decision_record(content)
 
 
 def chain_entry(working_dir: Path, parsed: DecisionRecord, path: Path) -> dict[str, Any]:

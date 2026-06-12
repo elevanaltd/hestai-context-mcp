@@ -29,6 +29,7 @@ import pytest
 from ._agr_fixtures import (
     snapshot_tree,
     write_malformed_record,
+    write_non_agr_record,
     write_record,
 )
 
@@ -205,6 +206,92 @@ class TestErrorEnvelope:
         write_malformed_record(tmp_path)
         result = list_decisions(str(tmp_path))
         self._assert_envelope(result, "RECORD_PARSE_FAILED", "schema_violation")
+
+
+class TestCoLocatedNonAgrFiles:
+    """F1 (CIV NO-GO regression): ``.hestai/decisions/`` co-hosts non-AGR
+    governance artefacts (BUILD_PLAN, SECURITY_DESIGN_REVIEW, arbitration
+    records) per ADR-RFC-ARCH-001. They are OUT OF SCOPE and must be skipped
+    silently — never RECORD_PARSE_FAILED — while genuinely-malformed AGRs still
+    error.
+    """
+
+    @pytest.mark.unit
+    def test_non_agr_files_excluded_not_errored(self, tmp_path: Path) -> None:
+        """Real AGRs are listed; co-located non-AGRs are silently skipped."""
+        list_decisions = _list_decisions()
+        # Two valid DECISION_RECORDs.
+        write_record(tmp_path, token=_T1, authored_at="2026-01-01T00:00:00Z")
+        write_record(tmp_path, token=_T3, authored_at="2026-03-01T00:00:00Z")
+        # A correctly-placed BUILD_PLAN (DOCUMENT_TYPE convention, no TOKEN).
+        write_non_agr_record(
+            tmp_path,
+            filename="BUILD-PLAN.oct.md",
+            sentinel="B1_BUILD_PLAN",
+            type_field="BUILD_PLAN",
+            type_key="DOCUMENT_TYPE",
+            group="phase-pss-b1",
+        )
+        # A no-TYPE arbitration record (no TYPE line at all).
+        write_non_agr_record(
+            tmp_path,
+            filename="arbitration-1.oct.md",
+            sentinel="B1_GATE_ARBITRATION_RECORD",
+            type_field=None,
+            group="phase-pss-b1",
+        )
+        # A SECURITY_DESIGN_REVIEW (declares TYPE, but not DECISION_RECORD) in a
+        # nested subdir.
+        write_non_agr_record(
+            tmp_path,
+            filename="issue-43-redaction-design.oct.md",
+            sentinel="REDACTION_DESIGN_REVIEW",
+            type_field="SECURITY_DESIGN_REVIEW",
+            group="security",
+        )
+
+        result = list_decisions(str(tmp_path))
+        assert result["ok"] is True
+        # Only the two real AGRs are listed — non-AGRs excluded entirely.
+        assert result["total"] == 2
+        tokens = [r["token"] for r in result["records"]]
+        assert tokens == [_T3, _T1]  # sorted authored_at DESC
+
+    @pytest.mark.unit
+    def test_only_non_agr_files_yields_empty_list(self, tmp_path: Path) -> None:
+        """A store with ONLY non-AGR artefacts lists nothing (no error)."""
+        list_decisions = _list_decisions()
+        write_non_agr_record(
+            tmp_path,
+            filename="BUILD-PLAN.oct.md",
+            sentinel="B1_BUILD_PLAN",
+            type_field="BUILD_PLAN",
+            type_key="DOCUMENT_TYPE",
+        )
+        result = list_decisions(str(tmp_path))
+        assert result["ok"] is True
+        assert result["records"] == []
+        assert result["total"] == 0
+
+    @pytest.mark.unit
+    def test_malformed_agr_still_errors_amid_non_agrs(self, tmp_path: Path) -> None:
+        """§3.3 protection intact: an is-an-AGR-but-broken record errors even when
+        co-located non-AGRs are present (the non-AGRs are not what trips it)."""
+        list_decisions = _list_decisions()
+        write_record(tmp_path, token=_T1, authored_at="2026-01-01T00:00:00Z")
+        write_non_agr_record(
+            tmp_path,
+            filename="BUILD-PLAN.oct.md",
+            sentinel="B1_BUILD_PLAN",
+            type_field="BUILD_PLAN",
+            type_key="DOCUMENT_TYPE",
+        )
+        write_malformed_record(tmp_path)  # declares DECISION_RECORD, missing fields
+        result = list_decisions(str(tmp_path))
+        assert result["ok"] is False
+        assert result["error"]["code"] == "RECORD_PARSE_FAILED"
+        # The failing path is the broken AGR, not the legitimately-typed non-AGR.
+        assert "MALFORMED" in result["error"]["context"]["path"]
 
 
 class TestPurity:
