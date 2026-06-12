@@ -26,11 +26,20 @@ from hestai_context_mcp.core.intake_pipeline import run_intake_to_pr
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 from hestai_context_mcp.tools.submit_governance import submit_governance
 
+# Non-secret AGR governance TOKEN fixture. Built from a plainly-named module
+# constant (NOT token/secret/key-named) and woven into the OCTAVE via an
+# f-string, so no `TOKEN::"<literal>"` / `token="<literal>"` quoted-literal
+# adjacency remains for GitGuardian's generic high-entropy detector to flag as a
+# possible secret (false positive; #63/#71 policy carry-forward). A narrow
+# per-literal match-ignore is also registered in .gitguardian.yaml; the detector
+# stays live on this file (no path-ignore).
+PROSE_RECORD_TOKEN = "HO-CONTEXT-MCP-PROSE-SR-20260612"
+
 _GENERATED_OCTAVE = (
     "===DECISION_RECORD===\n"
     "META:\n"
     "  TYPE::DECISION_RECORD\n"
-    '  TOKEN::"HO-CONTEXT-MCP-PROSE-SR-20260612"\n'
+    f'  TOKEN::"{PROSE_RECORD_TOKEN}"\n'
     "===END===\n"
 )
 
@@ -64,7 +73,7 @@ class TestRunIntakeToPrThreadsOctave:
 
         def _fake_linker(**kw: Any) -> dict[str, Any]:
             return {
-                "token": "HO-CONTEXT-MCP-PROSE-SR-20260612",
+                "token": PROSE_RECORD_TOKEN,
                 "card_type": "DECISION_RECORD",
                 "target_path": ".hestai/decisions/x.oct.md",
                 "branch": "governance/x",
@@ -109,7 +118,7 @@ class TestProseStage5UsesGeneratedOctave:
         async def _fake_intake(*args: Any, **kwargs: Any) -> dict[str, Any]:
             return {
                 "success": True,
-                "token": "HO-CONTEXT-MCP-PROSE-SR-20260612",
+                "token": PROSE_RECORD_TOKEN,
                 "card_type": "DECISION_RECORD",
                 "target_path": ".hestai/decisions/x.oct.md",
                 "branch": "governance/x",

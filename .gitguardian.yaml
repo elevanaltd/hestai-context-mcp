@@ -18,6 +18,10 @@ secret:
       match: "HO-CONTEXT-MCP-LIVE-20260101"
     - name: "Fake governance TOKEN fixture (Gate C intake pipeline/linker tests)"
       match: "HO-CONTEXT-MCP-NEWREC-20260601"
+    - name: "Fake governance TOKEN fixture (#77 octave_content semantic-review tests)"
+      match: "HO-CONTEXT-MCP-SR-20260612"
+    - name: "Fake governance TOKEN fixture (#77 prose semantic-review tests)"
+      match: "HO-CONTEXT-MCP-PROSE-SR-20260612"
     - name: "Fake GitHub PAT fixture (token-shape validation test)"
       match: "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   # Defense-in-depth: the two governance test modules only ever hold
