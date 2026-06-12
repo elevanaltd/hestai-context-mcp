@@ -87,14 +87,13 @@ def stub_octave_pr(monkeypatch: pytest.MonkeyPatch):
         def to_dict(self) -> dict[str, Any]:
             return {"ok": True, "available": True, "errors": []}
 
+    monkeypatch.setattr(sg, "validate_working_dir", lambda wd: Path(wd), raising=True)
+    monkeypatch.setattr(sg, "validate_octave_content", lambda wd, oc: _Validation(), raising=True)
     monkeypatch.setattr(
-        sg, "validate_working_dir", lambda wd: Path(wd), raising=True
-    )
-    monkeypatch.setattr(
-        sg, "validate_octave_content", lambda wd, oc: _Validation(), raising=True
-    )
-    monkeypatch.setattr(
-        sg, "get_octave_validator", lambda: type("V", (), {"validate": lambda self, oc: _OctaveResult()})(), raising=True
+        sg,
+        "get_octave_validator",
+        lambda: type("V", (), {"validate": lambda self, oc: _OctaveResult()})(),
+        raising=True,
     )
     monkeypatch.setattr(sg, "run_linker", lambda **kw: _linker_pr_ok(), raising=True)
 
@@ -105,7 +104,9 @@ def capture_review(monkeypatch: pytest.MonkeyPatch):
 
     captured: dict[str, Any] = {"review": None, "submit": None}
 
-    def _install(verdict: str, *, concerns: list[str] | None = None, post_status: str = "ok") -> None:
+    def _install(
+        verdict: str, *, concerns: list[str] | None = None, post_status: str = "ok"
+    ) -> None:
         async def _fake_review(octave_content: str, **kwargs: Any) -> dict[str, Any]:
             captured["review"] = {"octave_content": octave_content, "kwargs": kwargs}
             return _review_result(verdict, concerns=concerns)
@@ -218,9 +219,7 @@ class TestStage5SkipConditions:
     def test_dry_run_skips_stage5(self, tmp_path, capture_review):
         capture_review("APPROVED")
         result = asyncio.run(
-            submit_governance(
-                working_dir=str(tmp_path), octave_content=_VALID_OCTAVE, dry_run=True
-            )
+            submit_governance(working_dir=str(tmp_path), octave_content=_VALID_OCTAVE, dry_run=True)
         )
         # No review, no post, no semantic_review key (byte-stable dry_run shape).
         assert capture_review.captured["review"] is None
@@ -230,9 +229,7 @@ class TestStage5SkipConditions:
     def test_review_false_skips_stage5(self, tmp_path, stub_octave_pr, capture_review):
         capture_review("APPROVED")
         result = asyncio.run(
-            submit_governance(
-                working_dir=str(tmp_path), octave_content=_VALID_OCTAVE, review=False
-            )
+            submit_governance(working_dir=str(tmp_path), octave_content=_VALID_OCTAVE, review=False)
         )
         assert capture_review.captured["review"] is None
         assert capture_review.captured["submit"] is None

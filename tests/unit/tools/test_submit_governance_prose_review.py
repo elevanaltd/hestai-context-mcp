@@ -143,9 +143,7 @@ class TestProseStage5UsesGeneratedOctave:
         monkeypatch.setattr(sg, "review_governance", _fake_review, raising=True)
         monkeypatch.setattr(sg, "submit_review", _fake_submit, raising=True)
 
-        result = asyncio.run(
-            submit_governance(working_dir=str(tmp_path), prose_input="record it")
-        )
+        result = asyncio.run(submit_governance(working_dir=str(tmp_path), prose_input="record it"))
 
         assert result["success"] is True
         # Reviewer saw the GENERATED octave, at the analysis tier.

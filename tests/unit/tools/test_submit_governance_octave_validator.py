@@ -201,10 +201,19 @@ class TestPublicContractUnchanged:
 
         params = inspect.signature(submit_governance).parameters
         # Gate C (T5) adds prose_input back-compatibly: octave_content becomes
-        # optional and prose_input is the second mode. The pre-existing params
-        # remain so octave_content callers are unaffected.
-        assert set(params) == {"working_dir", "octave_content", "prose_input", "dry_run"}
+        # optional and prose_input is the second mode. Issue #77 adds the
+        # ``review`` flag back-compatibly (defaults True). The pre-existing
+        # params remain so octave_content callers are unaffected.
+        assert set(params) == {
+            "working_dir",
+            "octave_content",
+            "prose_input",
+            "dry_run",
+            "review",
+        }
         # Back-compat: octave_content is now optional (defaults to None) so the
         # EXACTLY-ONE-OF guard can distinguish the two modes.
         assert params["octave_content"].default is None
         assert params["prose_input"].default is None
+        # Issue #77: review defaults True (Stage 5 active on real PRs by default).
+        assert params["review"].default is True
