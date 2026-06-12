@@ -258,6 +258,40 @@ class TestCoLocatedNonAgrFiles:
         assert tokens == [_T3, _T1]  # sorted authored_at DESC
 
     @pytest.mark.unit
+    def test_suffixed_type_field_does_not_falsely_qualify(self, tmp_path: Path) -> None:
+        """CRS P2 (same class as F1): a non-AGR whose META carries a
+        ``*TYPE::DECISION_RECORD`` line (``DOCUMENT_TYPE::`` / ``CONTENT_TYPE::``)
+        and NO ``===DECISION_RECORD===`` sentinel must be EXCLUDED, not admitted.
+
+        The pre-fix TYPE detection used an unanchored substring search, so
+        ``DOCUMENT_TYPE::DECISION_RECORD`` matched ``TYPE::DECISION_RECORD`` and
+        tripped RECORD_PARSE_FAILED. The anchored read-side check rejects it.
+        """
+        list_decisions = _list_decisions()
+        write_record(tmp_path, token=_T1, authored_at="2026-01-01T00:00:00Z")
+        # DOCUMENT_TYPE::DECISION_RECORD — substring-leak variant.
+        write_non_agr_record(
+            tmp_path,
+            filename="doc-type-decoy.oct.md",
+            sentinel="B1_BUILD_PLAN",
+            type_field="DECISION_RECORD",
+            type_key="DOCUMENT_TYPE",
+        )
+        # CONTENT_TYPE::DECISION_RECORD — second substring-leak variant.
+        write_non_agr_record(
+            tmp_path,
+            filename="content-type-decoy.oct.md",
+            sentinel="SOME_DOC",
+            type_field="DECISION_RECORD",
+            type_key="CONTENT_TYPE",
+        )
+
+        result = list_decisions(str(tmp_path))
+        assert result["ok"] is True  # NOT RECORD_PARSE_FAILED
+        assert result["total"] == 1
+        assert [r["token"] for r in result["records"]] == [_T1]
+
+    @pytest.mark.unit
     def test_only_non_agr_files_yields_empty_list(self, tmp_path: Path) -> None:
         """A store with ONLY non-AGR artefacts lists nothing (no error)."""
         list_decisions = _list_decisions()

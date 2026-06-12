@@ -17,6 +17,7 @@ rebuilding them.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,6 @@ from hestai_context_mcp.tools.governance.type_checker import (
     _DECISION_RECORD_TYPE,
     _extract_sentinel,
     _extract_token,
-    _extract_type,
 )
 from hestai_context_mcp.tools.governance.type_checker import (
     _TOKEN_FORMAT_RE as TOKEN_FORMAT_RE,
@@ -47,6 +47,19 @@ _REQUIRED_FIELDS = (
     "authored_at",
 )
 
+# Read-side TYPE-membership regex: LINE-ANCHORED and EXACT (CRS P2 guard).
+# The KEY must be exactly ``TYPE`` at line start — a leading whitespace-only
+# indent is allowed (OCTAVE META bodies are indented), but NO other characters
+# may precede ``TYPE``. This rejects ``DOCUMENT_TYPE::``/``CONTENT_TYPE::`` and
+# any other ``*TYPE::DECISION_RECORD`` substring that Gate-A's unanchored
+# ``_TYPE_RE.search()`` would falsely admit. The trailing ``\s*$`` end-anchor
+# rejects trailing garbage (e.g. ``TYPE::DECISION_RECORD EXTRA``). This is a
+# read-side-only decision; Gate-A's shared ``_TYPE_RE`` is intentionally NOT
+# touched (write-side root, tracked separately).
+_TYPE_IS_DECISION_RECORD_RE = re.compile(
+    r"(?m)^\s*TYPE::" + re.escape(_DECISION_RECORD_TYPE) + r"\s*$"
+)
+
 
 def is_decision_record(content: str) -> bool:
     """True iff this OCTAVE document declares itself a DECISION_RECORD (AGR).
@@ -58,14 +71,17 @@ def is_decision_record(content: str) -> bool:
     and must be skipped silently — never raised as RECORD_PARSE_FAILED.
 
     A document is a DECISION_RECORD iff its opening sentinel is
-    ``===DECISION_RECORD===`` OR its META declares ``TYPE::DECISION_RECORD``
-    (§1.1). The two signals are OR-ed so a file that declares the type either way
-    is in scope; co-located non-AGRs (different sentinel, ``DOCUMENT_TYPE::``,
-    or no TYPE at all) are out of scope. Regex-only via the Gate-A extractors.
+    ``===DECISION_RECORD===`` OR a META line is EXACTLY ``TYPE::DECISION_RECORD``
+    (§1.1). The two signals are OR-ed. The sentinel branch reuses the Gate-A
+    ``_extract_sentinel`` (already ``\\A===…===`` anchored/exact). The TYPE
+    branch uses a read-side LINE-ANCHORED regex (``_TYPE_IS_DECISION_RECORD_RE``)
+    rather than Gate-A's substring-tolerant ``_TYPE_RE`` so a non-AGR line such
+    as ``DOCUMENT_TYPE::DECISION_RECORD`` / ``CONTENT_TYPE::DECISION_RECORD``
+    can never qualify (CRS P2 — same failure class as F1).
     """
     if _extract_sentinel(content) == _DECISION_RECORD_TYPE:
         return True
-    return _extract_type(content) == _DECISION_RECORD_TYPE
+    return _TYPE_IS_DECISION_RECORD_RE.search(content) is not None
 
 
 def error_envelope(
