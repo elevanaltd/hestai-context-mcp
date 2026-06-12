@@ -216,7 +216,11 @@ async def run_intake_to_pr(
     linker call is offloaded to the default executor (mirroring
     ``submit_governance``).
 
-    Returns the I4-conformant submit_governance dict, extended with ``metrics``.
+    Returns the I4-conformant submit_governance dict, extended with ``metrics``
+    and (issue #77) an additive ``octave`` field carrying the authored OCTAVE.
+    Prose mode generates the OCTAVE internally; surfacing it here lets the
+    Stage-5 analysis-tier semantic reviewer read exactly the record that was
+    PR'd. The field is ``None`` on the abort path (no authored OCTAVE exists).
     """
     pipeline = await run_intake_pipeline(
         working_dir,
@@ -248,6 +252,9 @@ async def run_intake_to_pr(
         "pr_url": linker_output.get("pr_url"),
         "validation_errors": [linker_error] if linker_error else [],
         "octave_validation": None,
+        # Surface the authored OCTAVE so the Stage-5 reviewer can read the exact
+        # record that was PR'd (issue #77). Additive; ``None`` on the abort path.
+        "octave": pipeline["octave"],
         "metrics": pipeline["metrics"],
         "dry_run": dry_run,
     }
