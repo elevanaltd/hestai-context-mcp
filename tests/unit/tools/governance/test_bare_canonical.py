@@ -482,11 +482,10 @@ class TestTypeCheckerIssueRefShape:
 # ---------------------------------------------------------------------------
 # ISSUE_REF trailing-garbage rejection (ADR-RFC-ARCH-004 §4.1 #10)
 #
-# _ISSUE_REF_RE end-anchors (\s*$) reject trailing garbage at the regex level,
-# but that means _extract_issue_ref returns None for a malformed line, and check
-# 5a (``if issue_ref is not None``) silently skips it.  A presence detector must
-# close this bypass: if any ISSUE_REF:: line exists in content but strict
-# extraction fails, Gate A must emit a named error.
+# _ISSUE_REF_LINE_RE is greedy: it captures everything after ISSUE_REF:: to
+# end-of-line, including trailing garbage.  Shape validation always runs on the
+# captured raw value, so no separate presence detector is needed and no bypass
+# class exists.
 # ---------------------------------------------------------------------------
 
 
@@ -522,15 +521,11 @@ class TestTypeCheckerIssueRefTrailingGarbageRejected:
     def test_issue_ref_trailing_garbage_quoted_rejected(self, tmp_path: Path) -> None:
         """ISSUE_REF::"repo:..#77" EXTRA must fail validation (quoted + trailing garbage).
 
-        When a quoted ISSUE_REF line has trailing content the end-anchor causes
-        _ISSUE_REF_RE to not match, _extract_issue_ref returns None, and check 5a
-        is skipped -- the malformed line silently passes Gate A.  The presence
-        detector must catch this and return valid=False with a named ISSUE_REF error.
+        The greedy _ISSUE_REF_LINE_RE captures the full raw value including the
+        trailing content; shape validation then rejects it.
         """
         raw = f'ISSUE_REF::"{_VALID_ISSUE_REF_SHORTHAND}" trailing-garbage'
-        content = _decision_record_with_raw_issue_ref_line(
-            _ISSUE_REF_TRAILING_HOST_TOKEN, raw
-        )
+        content = _decision_record_with_raw_issue_ref_line(_ISSUE_REF_TRAILING_HOST_TOKEN, raw)
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False, "Expected invalid: quoted ISSUE_REF with trailing garbage"
         assert any("ISSUE_REF" in e for e in result.errors), result.errors
@@ -539,26 +534,23 @@ class TestTypeCheckerIssueRefTrailingGarbageRejected:
     def test_issue_ref_trailing_garbage_bare_rejected(self, tmp_path: Path) -> None:
         """ISSUE_REF::repo:..#77 EXTRA must fail validation (bare + trailing garbage).
 
-        Same bypass as the quoted form: bare ISSUE_REF line with trailing content
-        causes _ISSUE_REF_RE to not match, extraction returns None, check 5a
-        skips.  The presence detector must emit a named ISSUE_REF error.
+        The greedy _ISSUE_REF_LINE_RE captures the full raw value; the trailing
+        content causes shape validation to fail.
         """
         raw = f"ISSUE_REF::{_VALID_ISSUE_REF_SHORTHAND} trailing-garbage"
-        content = _decision_record_with_raw_issue_ref_line(
-            _ISSUE_REF_TRAILING_HOST_TOKEN, raw
-        )
+        content = _decision_record_with_raw_issue_ref_line(_ISSUE_REF_TRAILING_HOST_TOKEN, raw)
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False, "Expected invalid: bare ISSUE_REF with trailing garbage"
         assert any("ISSUE_REF" in e for e in result.errors), result.errors
 
 
 # ---------------------------------------------------------------------------
-# Fix 1 — Line-start anchor on _ISSUE_REF_RE (CE + TMG + CRS)
+# Prefix-anchor guard (CE + TMG + CRS)
 #
 # A string like ``NOT_ISSUE_REF::"repo:x#1"`` must NOT be treated as an
-# ISSUE_REF field.  Without a ``^\s*`` start-anchor the unanchored regex
-# matches the substring ``ISSUE_REF::`` inside ``NOT_ISSUE_REF::`` and
-# extracts the value, falsely triggering ISSUE_REF shape-validation.
+# ISSUE_REF field.  _ISSUE_REF_LINE_RE is anchored to ``^[ \t]*ISSUE_REF::``
+# so only lines where ISSUE_REF:: appears at the start of the line (after
+# optional horizontal whitespace) are matched.
 # ---------------------------------------------------------------------------
 
 _NOT_FIELD_PREFIX_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-PREFIX-20260613"
@@ -569,15 +561,9 @@ class TestTypeCheckerIssueRefNotFieldPrefixNotMatched:
     def test_issue_ref_not_field_prefix_not_matched(self, tmp_path: Path) -> None:
         """NOT_ISSUE_REF:: must not be treated as an ISSUE_REF field.
 
-        Without the ``^\\s*`` anchor, ``_ISSUE_REF_RE`` matches the
-        ``ISSUE_REF::`` substring inside ``NOT_ISSUE_REF::`` and falsely
-        extracts a value.  When that value is NOT a valid ISSUE_REF shape
-        (e.g. a decision-TOKEN), the current code emits a spurious ISSUE_REF
-        shape error even though no real ISSUE_REF field is present.
-
-        After Fix 1 the regex is anchored with ``^\\s*``, so
-        ``NOT_ISSUE_REF::`` is never matched, the document validates as
-        valid=True, and no ISSUE_REF errors are emitted.
+        ``_ISSUE_REF_LINE_RE`` is anchored to ``^[ \\t]*ISSUE_REF::`` so
+        ``NOT_ISSUE_REF::`` is never matched.  The document validates as
+        valid=True with no ISSUE_REF errors.
         """
         content = (
             "===DECISION_RECORD===\n"
@@ -602,12 +588,10 @@ class TestTypeCheckerIssueRefNotFieldPrefixNotMatched:
 
 
 # ---------------------------------------------------------------------------
-# Fix 3 — Multi-line document with duplicate ISSUE_REF fields (CRS)
+# Duplicate ISSUE_REF guard (CRS)
 #
-# When a document contains two ISSUE_REF lines (first malformed, second
-# valid), ``_ISSUE_REF_RE.search()`` skips the malformed line and finds the
-# valid one, leaving the malformed line undetected.  Gate A must count all
-# ISSUE_REF:: occurrences and reject any document with more than one.
+# Gate A counts all ISSUE_REF lines via _ISSUE_REF_LINE_RE.findall() and
+# rejects any document with more than one occurrence.
 # ---------------------------------------------------------------------------
 
 _DUPLICATE_ISSUE_REF_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-DUPE-20260613"
@@ -642,4 +626,4 @@ class TestTypeCheckerIssueRefDuplicateFieldRejected:
         )
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False, "Expected invalid: duplicate ISSUE_REF fields"
-        assert any("ISSUE_REF" in e for e in result.errors), result.errors
+        assert any("multiple times" in e for e in result.errors), result.errors
