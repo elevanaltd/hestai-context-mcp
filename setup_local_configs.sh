@@ -1,7 +1,14 @@
 #!/bin/bash
-# Register hestai-context-mcp in Claude Code, Gemini CLI, Codex, and Goose.
+# Install hestai-context-mcp and register it in Claude Code, Gemini CLI, Codex, and Goose.
 #
 # Usage: bash setup_local_configs.sh [--dry-run]
+#
+# Prerequisites:
+#   uv  — https://docs.astral.sh/uv/getting-started/installation/
+#
+# What it does:
+#   0. uv sync --extra validation  (creates .venv, installs package + optional OCTAVE validator)
+#   1–4. Registers the server entry point in each supported AI client config
 #
 # Server launched via:
 #   <repo>/.venv/bin/python -m hestai_context_mcp
@@ -23,19 +30,31 @@ fi
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 
-if [ ! -f "$VENV_PYTHON" ]; then
-    echo "ERROR: .venv not found at $REPO_DIR/.venv"
-    echo "       Run: uv sync --all-extras"
+if ! command -v uv &>/dev/null; then
+    echo "ERROR: uv not found — install from https://docs.astral.sh/uv/getting-started/installation/"
     exit 1
 fi
 
-echo "Checking server import..."
-"$VENV_PYTHON" -c "import hestai_context_mcp; print('  ✓ Package importable')"
+echo "=== 0/5  Environment  (uv sync) ==="
+if $DRY_RUN; then
+    echo "  Would run: uv sync --extra validation (from $REPO_DIR)"
+else
+    (cd "$REPO_DIR" && uv sync --extra validation)
+    echo "  ✓ Environment ready"
+fi
+echo ""
+
+if $DRY_RUN; then
+    echo "Skipping import check in dry-run (no .venv guaranteed)."
+else
+    echo "Checking server import..."
+    "$VENV_PYTHON" -c "import hestai_context_mcp; print('  ✓ Package importable')"
+fi
 echo ""
 
 # ── 1. Claude Code (~/.claude.json) ──────────────────────────────────────────
 
-echo "=== 1/4  Claude Code  (~/.claude.json) ==="
+echo "=== 1/5  Claude Code  (~/.claude.json) ==="
 CLAUDE_JSON="$HOME/.claude.json"
 
 if [ ! -f "$CLAUDE_JSON" ]; then
@@ -75,7 +94,7 @@ echo ""
 
 # ── 2. Gemini CLI (~/.gemini/settings.json) ───────────────────────────────────
 
-echo "=== 2/4  Gemini CLI  (~/.gemini/settings.json) ==="
+echo "=== 2/5  Gemini CLI  (~/.gemini/settings.json) ==="
 GEMINI_JSON="$HOME/.gemini/settings.json"
 
 if [ ! -f "$GEMINI_JSON" ]; then
@@ -115,7 +134,7 @@ echo ""
 
 # ── 3. Codex (~/.codex/config.toml) ──────────────────────────────────────────
 
-echo "=== 3/4  Codex  (~/.codex/config.toml) ==="
+echo "=== 3/5  Codex  (~/.codex/config.toml) ==="
 CODEX_TOML="$HOME/.codex/config.toml"
 
 if [ ! -f "$CODEX_TOML" ]; then
@@ -183,7 +202,7 @@ echo ""
 
 # ── 4. Goose (~/.config/goose/config.yaml) ───────────────────────────────────
 
-echo "=== 4/4  Goose  (~/.config/goose/config.yaml) ==="
+echo "=== 4/5  Goose  (~/.config/goose/config.yaml) ==="
 GOOSE_YAML="$HOME/.config/goose/config.yaml"
 
 if [ ! -f "$GOOSE_YAML" ]; then
