@@ -550,3 +550,96 @@ class TestTypeCheckerIssueRefTrailingGarbageRejected:
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False, "Expected invalid: bare ISSUE_REF with trailing garbage"
         assert any("ISSUE_REF" in e for e in result.errors), result.errors
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — Line-start anchor on _ISSUE_REF_RE (CE + TMG + CRS)
+#
+# A string like ``NOT_ISSUE_REF::"repo:x#1"`` must NOT be treated as an
+# ISSUE_REF field.  Without a ``^\s*`` start-anchor the unanchored regex
+# matches the substring ``ISSUE_REF::`` inside ``NOT_ISSUE_REF::`` and
+# extracts the value, falsely triggering ISSUE_REF shape-validation.
+# ---------------------------------------------------------------------------
+
+_NOT_FIELD_PREFIX_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-PREFIX-20260613"
+
+
+class TestTypeCheckerIssueRefNotFieldPrefixNotMatched:
+    @pytest.mark.unit
+    def test_issue_ref_not_field_prefix_not_matched(self, tmp_path: Path) -> None:
+        """NOT_ISSUE_REF:: must not be treated as an ISSUE_REF field.
+
+        Without the ``^\\s*`` anchor, ``_ISSUE_REF_RE`` matches the
+        ``ISSUE_REF::`` substring inside ``NOT_ISSUE_REF::`` and falsely
+        extracts a value.  When that value is NOT a valid ISSUE_REF shape
+        (e.g. a decision-TOKEN), the current code emits a spurious ISSUE_REF
+        shape error even though no real ISSUE_REF field is present.
+
+        After Fix 1 the regex is anchored with ``^\\s*``, so
+        ``NOT_ISSUE_REF::`` is never matched, the document validates as
+        valid=True, and no ISSUE_REF errors are emitted.
+        """
+        content = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f'  TOKEN::"{_NOT_FIELD_PREFIX_TOKEN}"\n'
+            "  STATUS::PROPOSED\n"
+            "  TIER::OPERATIONAL\n"
+            # Value is a decision-TOKEN shape — valid token but NOT a valid
+            # ISSUE_REF shape.  The unanchored regex extracts it from
+            # NOT_ISSUE_REF:: and emits a spurious shape error.
+            f'  NOT_ISSUE_REF::"{_DECISION_TOKEN_IN_ISSUE_REF}"\n'
+            '  DECISION::"Prefix anchor validation."\n'
+            '  BECAUSE::"ADR-RFC-ARCH-004 §4.1 #10."\n'
+            '  AUTHORED_AT::"2026-06-13T00:00:00Z"\n'
+            "===END===\n"
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is True, result.errors
+        assert not any("ISSUE_REF" in e for e in result.errors), result.errors
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — Multi-line document with duplicate ISSUE_REF fields (CRS)
+#
+# When a document contains two ISSUE_REF lines (first malformed, second
+# valid), ``_ISSUE_REF_RE.search()`` skips the malformed line and finds the
+# valid one, leaving the malformed line undetected.  Gate A must count all
+# ISSUE_REF:: occurrences and reject any document with more than one.
+# ---------------------------------------------------------------------------
+
+_DUPLICATE_ISSUE_REF_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-DUPE-20260613"
+_DUPLICATE_ISSUE_REF_VALID = "repo:hestai-context-mcp#10"
+
+
+class TestTypeCheckerIssueRefDuplicateFieldRejected:
+    @pytest.mark.unit
+    def test_issue_ref_duplicate_field_rejected(self, tmp_path: Path) -> None:
+        """A document with two ISSUE_REF lines must be rejected.
+
+        Even when the second ISSUE_REF line is valid, the first malformed
+        line must not be silently skipped.  Gate A must count all ISSUE_REF::
+        line occurrences and emit a 'multiple times' error when count > 1.
+        """
+        content = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f'  TOKEN::"{_DUPLICATE_ISSUE_REF_TOKEN}"\n'
+            "  STATUS::PROPOSED\n"
+            "  TIER::OPERATIONAL\n"
+            # first line: malformed (trailing garbage, would be skipped by search)
+            '  ISSUE_REF::"repo:hestai-context-mcp#1" EXTRA\n'
+            # second line: valid (search() would land here and miss the first)
+            f'  ISSUE_REF::"{_DUPLICATE_ISSUE_REF_VALID}"\n'
+            '  DECISION::"Duplicate ISSUE_REF guard."\n'
+            '  BECAUSE::"ADR-RFC-ARCH-004 §4.1 #10."\n'
+            '  AUTHORED_AT::"2026-06-13T00:00:00Z"\n'
+            "===END===\n"
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False, "Expected invalid: duplicate ISSUE_REF fields"
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors
