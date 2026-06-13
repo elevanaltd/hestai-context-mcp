@@ -358,3 +358,301 @@ class TestLexerTrailingGarbageRejected:
             _decision_record_raw_token_line(f'TOKEN::"{_VALID_TOKEN}"')
         )
         assert lookup_token_deterministic(tmp_path, _VALID_TOKEN) is True
+
+
+# ---------------------------------------------------------------------------
+# ISSUE_REF shape validation (ADR-RFC-ARCH-004 §4.1 invariant #10)
+#
+# "ISSUE_REF shape — when present, parses as a GitHub URL or repo:<repo-id>#<n>."
+# (ADR line 86: "GitHub issue URL or repo:<repo-id>#<n> shorthand. Optional on
+#  PROPOSED/RATIFIED ...")
+#
+# ISSUE_REF is OPTIONAL: absence MUST remain valid. Only a PRESENT-but-malformed
+# value is rejected, and it is collected alongside other errors (it does NOT
+# early-return), mirroring the SUPERSEDED_BY collect-more-errors pattern.
+# ---------------------------------------------------------------------------
+
+# Valid §1.3 TOKEN used as the "wrong shape" injected into ISSUE_REF. It is a
+# legal decision-TOKEN but NOT a legal ISSUE_REF — exactly the elevana-studio
+# dogfood finding (a decision-TOKEN leaked into ISSUE_REF and Gate A passed it
+# silently because ISSUE_REF was never validated). Referenced via a constant so
+# secret scanners do not read the keyword+literal adjacency as a credential.
+_DECISION_TOKEN_IN_ISSUE_REF = "HO-CONTEXT-MCP-TEST-20260513"
+_VALID_ISSUE_REF_SHORTHAND = "repo:hestai-context-mcp#77"
+_VALID_ISSUE_REF_URL = "https://github.com/elevanaltd/hestai-context-mcp/issues/53"
+# A §1.3-valid TOKEN for the host DECISION_RECORD (kept distinct from the
+# ISSUE_REF payload so a failure points unambiguously at ISSUE_REF).
+_ISSUE_REF_HOST_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-HOST-20260613"
+
+
+def _decision_record_with_issue_ref(token: str, issue_ref: str | None) -> str:
+    """Build a well-formed DECISION_RECORD, optionally carrying an ISSUE_REF.
+
+    When ``issue_ref`` is None the ISSUE_REF line is omitted entirely (the
+    optional-field case). The TOKEN is quoted (already covered by the bare
+    tests); the focus here is solely the ISSUE_REF shape.
+    """
+    issue_ref_line = f'  ISSUE_REF::"{issue_ref}"\n' if issue_ref is not None else ""
+    return (
+        "===DECISION_RECORD===\n"
+        "META:\n"
+        "  TYPE::DECISION_RECORD\n"
+        '  VERSION::"1.0"\n'
+        f'  TOKEN::"{token}"\n'
+        "  STATUS::PROPOSED\n"
+        "  TIER::OPERATIONAL\n"
+        f"{issue_ref_line}"
+        '  DECISION::"ISSUE_REF shape validation."\n'
+        '  BECAUSE::"ADR-RFC-ARCH-004 §4.1 invariant #10."\n'
+        '  AUTHORED_AT::"2026-06-13T00:00:00Z"\n'
+        "===END===\n"
+    )
+
+
+class TestTypeCheckerIssueRefShape:
+    @pytest.mark.unit
+    def test_issue_ref_holding_decision_token_rejected(self, tmp_path: Path) -> None:
+        """A decision-TOKEN in ISSUE_REF is rejected (the dogfood finding).
+
+        ISSUE_REF::"HO-...-20260513" is a valid TOKEN but NOT a valid ISSUE_REF.
+        """
+        content = _decision_record_with_issue_ref(
+            _ISSUE_REF_HOST_TOKEN, _DECISION_TOKEN_IN_ISSUE_REF
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors
+        # The bad value must be named in the error for operator diagnosis.
+        assert any(_DECISION_TOKEN_IN_ISSUE_REF in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_issue_ref_repo_shorthand_accepted(self, tmp_path: Path) -> None:
+        """ISSUE_REF::"repo:<repo-id>#<n>" passes the ISSUE_REF shape check."""
+        content = _decision_record_with_issue_ref(_ISSUE_REF_HOST_TOKEN, _VALID_ISSUE_REF_SHORTHAND)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+        assert not any("ISSUE_REF" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_issue_ref_github_url_accepted(self, tmp_path: Path) -> None:
+        """ISSUE_REF::"https://github.com/<org>/<repo>/issues/<n>" passes."""
+        content = _decision_record_with_issue_ref(_ISSUE_REF_HOST_TOKEN, _VALID_ISSUE_REF_URL)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+        assert not any("ISSUE_REF" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_issue_ref_absent_is_valid(self, tmp_path: Path) -> None:
+        """ISSUE_REF is OPTIONAL: a record with no ISSUE_REF field is valid."""
+        content = _decision_record_with_issue_ref(_ISSUE_REF_HOST_TOKEN, None)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+        assert not any("ISSUE_REF" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_real_ratified_record_with_issue_ref_still_validates(self, tmp_path: Path) -> None:
+        """Regression: a real RATIFIED AGR with a valid shorthand ISSUE_REF validates.
+
+        Mirrors the on-disk record
+        .hestai/decisions/HO-AGR-SEMANTIC-REVIEWER-ANALYSIS-TIER-20260611.oct.md
+        (ISSUE_REF::"repo:hestai-context-mcp#77"). Reproduced inline (TOKEN
+        localised so the uniqueness check on tmp_path stays clean).
+        """
+        content = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            "  TOKEN::HO-AGR-SEMANTIC-REVIEWER-ANALYSIS-TIER-20260611\n"
+            "  STATUS::RATIFIED\n"
+            "  TIER::TACTICAL\n"
+            '  AUTHORED_AT::"2026-06-11T00:00:00Z"\n'
+            '  RATIFIED_BY::"human:operator"\n'
+            '  RATIFIED_AT::"2026-06-11T00:00:00Z"\n'
+            f'  ISSUE_REF::"{_VALID_ISSUE_REF_SHORTHAND}"\n'
+            '  SCOPE::"hestai-context-mcp"\n'
+            '  DECISION::"Scoped semantic reviewer at analysis tier."\n'
+            '  BECAUSE::"Semantic second opinion catches what the human misses."\n'
+            "===END===\n"
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+
+
+# ---------------------------------------------------------------------------
+# ISSUE_REF trailing-garbage rejection (ADR-RFC-ARCH-004 §4.1 #10)
+#
+# _ISSUE_REF_LINE_RE is greedy: it captures everything after ISSUE_REF:: to
+# end-of-line, including trailing garbage.  Shape validation always runs on the
+# captured raw value, so no separate presence detector is needed and no bypass
+# class exists.
+# ---------------------------------------------------------------------------
+
+
+def _decision_record_with_raw_issue_ref_line(token: str, raw_issue_ref_line: str) -> str:
+    """Build a DECISION_RECORD with a caller-supplied raw ISSUE_REF field line.
+
+    ``raw_issue_ref_line`` is the exact text of the ISSUE_REF field including
+    any trailing garbage (e.g. ``ISSUE_REF::"repo:hestai-context-mcp#77" EXTRA``).
+    The two-space indent is added here.
+    """
+    return (
+        "===DECISION_RECORD===\n"
+        "META:\n"
+        "  TYPE::DECISION_RECORD\n"
+        '  VERSION::"1.0"\n'
+        f'  TOKEN::"{token}"\n'
+        "  STATUS::PROPOSED\n"
+        "  TIER::OPERATIONAL\n"
+        f"  {raw_issue_ref_line}\n"
+        '  DECISION::"ISSUE_REF trailing-garbage guard."\n'
+        '  BECAUSE::"ADR-RFC-ARCH-004 §4.1 invariant #10."\n'
+        '  AUTHORED_AT::"2026-06-13T00:00:00Z"\n'
+        "===END===\n"
+    )
+
+
+# §1.3-valid TOKEN for the host DECISION_RECORD in trailing-garbage tests.
+_ISSUE_REF_TRAILING_HOST_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-TRAILING-20260613"
+
+
+class TestTypeCheckerIssueRefTrailingGarbageRejected:
+    @pytest.mark.unit
+    def test_issue_ref_trailing_garbage_quoted_rejected(self, tmp_path: Path) -> None:
+        """ISSUE_REF::"repo:..#77" EXTRA must fail validation (quoted + trailing garbage).
+
+        The greedy _ISSUE_REF_LINE_RE captures the full raw value including the
+        trailing content; shape validation then rejects it.
+        """
+        raw = f'ISSUE_REF::"{_VALID_ISSUE_REF_SHORTHAND}" trailing-garbage'
+        content = _decision_record_with_raw_issue_ref_line(_ISSUE_REF_TRAILING_HOST_TOKEN, raw)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False, "Expected invalid: quoted ISSUE_REF with trailing garbage"
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_issue_ref_trailing_garbage_bare_rejected(self, tmp_path: Path) -> None:
+        """ISSUE_REF::repo:..#77 EXTRA must fail validation (bare + trailing garbage).
+
+        The greedy _ISSUE_REF_LINE_RE captures the full raw value; the trailing
+        content causes shape validation to fail.
+        """
+        raw = f"ISSUE_REF::{_VALID_ISSUE_REF_SHORTHAND} trailing-garbage"
+        content = _decision_record_with_raw_issue_ref_line(_ISSUE_REF_TRAILING_HOST_TOKEN, raw)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False, "Expected invalid: bare ISSUE_REF with trailing garbage"
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors
+
+
+# ---------------------------------------------------------------------------
+# Prefix-anchor guard (CE + TMG + CRS)
+#
+# A string like ``NOT_ISSUE_REF::"repo:x#1"`` must NOT be treated as an
+# ISSUE_REF field.  _ISSUE_REF_LINE_RE is anchored to ``^[ \t]*ISSUE_REF::``
+# so only lines where ISSUE_REF:: appears at the start of the line (after
+# optional horizontal whitespace) are matched.
+# ---------------------------------------------------------------------------
+
+_NOT_FIELD_PREFIX_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-PREFIX-20260613"
+
+
+class TestTypeCheckerIssueRefNotFieldPrefixNotMatched:
+    @pytest.mark.unit
+    def test_issue_ref_not_field_prefix_not_matched(self, tmp_path: Path) -> None:
+        """NOT_ISSUE_REF:: must not be treated as an ISSUE_REF field.
+
+        ``_ISSUE_REF_LINE_RE`` is anchored to ``^[ \\t]*ISSUE_REF::`` so
+        ``NOT_ISSUE_REF::`` is never matched.  The document validates as
+        valid=True with no ISSUE_REF errors.
+        """
+        content = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f'  TOKEN::"{_NOT_FIELD_PREFIX_TOKEN}"\n'
+            "  STATUS::PROPOSED\n"
+            "  TIER::OPERATIONAL\n"
+            # Value is a decision-TOKEN shape — valid token but NOT a valid
+            # ISSUE_REF shape.  The unanchored regex extracts it from
+            # NOT_ISSUE_REF:: and emits a spurious shape error.
+            f'  NOT_ISSUE_REF::"{_DECISION_TOKEN_IN_ISSUE_REF}"\n'
+            '  DECISION::"Prefix anchor validation."\n'
+            '  BECAUSE::"ADR-RFC-ARCH-004 §4.1 #10."\n'
+            '  AUTHORED_AT::"2026-06-13T00:00:00Z"\n'
+            "===END===\n"
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is True, result.errors
+        assert not any("ISSUE_REF" in e for e in result.errors), result.errors
+
+
+# ---------------------------------------------------------------------------
+# Duplicate ISSUE_REF guard (CRS)
+#
+# Gate A counts all ISSUE_REF lines via _ISSUE_REF_LINE_RE.findall() and
+# rejects any document with more than one occurrence.
+# ---------------------------------------------------------------------------
+
+_DUPLICATE_ISSUE_REF_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-DUPE-20260613"
+_DUPLICATE_ISSUE_REF_VALID = "repo:hestai-context-mcp#10"
+
+
+class TestTypeCheckerIssueRefDuplicateFieldRejected:
+    @pytest.mark.unit
+    def test_issue_ref_duplicate_field_rejected(self, tmp_path: Path) -> None:
+        """A document with two ISSUE_REF lines must be rejected.
+
+        Even when the second ISSUE_REF line is valid, the first malformed
+        line must not be silently skipped.  Gate A must count all ISSUE_REF::
+        line occurrences and emit a 'multiple times' error when count > 1.
+        """
+        content = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f'  TOKEN::"{_DUPLICATE_ISSUE_REF_TOKEN}"\n'
+            "  STATUS::PROPOSED\n"
+            "  TIER::OPERATIONAL\n"
+            # first line: malformed (trailing garbage, would be skipped by search)
+            '  ISSUE_REF::"repo:hestai-context-mcp#1" EXTRA\n'
+            # second line: valid (search() would land here and miss the first)
+            f'  ISSUE_REF::"{_DUPLICATE_ISSUE_REF_VALID}"\n'
+            '  DECISION::"Duplicate ISSUE_REF guard."\n'
+            '  BECAUSE::"ADR-RFC-ARCH-004 §4.1 #10."\n'
+            '  AUTHORED_AT::"2026-06-13T00:00:00Z"\n'
+            "===END===\n"
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False, "Expected invalid: duplicate ISSUE_REF fields"
+        assert any("multiple times" in e for e in result.errors), result.errors
+
+
+# ---------------------------------------------------------------------------
+# ISSUE_REF_SHAPE_RE segment character-class guard
+#
+# _ISSUE_REF_SHAPE_RE uses [A-Za-z0-9._-]+ for GitHub owner and repo segments.
+# [^/\s]+ (the prior class) accepted characters like `"` that are not valid
+# in GitHub names; after outer-quote stripping a malformed quoted URL
+# ISSUE_REF::"https://github.com/org"/repo/issues/1" would pass because the
+# embedded `"` fell inside [^/\s]+.
+# ---------------------------------------------------------------------------
+
+_SHAPE_RE_HOST_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-SHAPE-RE-20260613"
+
+
+class TestTypeCheckerIssueRefShapeReSegments:
+    @pytest.mark.unit
+    def test_issue_ref_url_with_illegal_char_in_org_rejected(self, tmp_path: Path) -> None:
+        """GitHub URL with illegal character in org segment is rejected.
+
+        ISSUE_REF::"https://github.com/org"/repo/issues/1" — after outer-quote
+        stripping the embedded quote lands inside the org segment.
+        ``[A-Za-z0-9._-]+`` rejects this; ``[^/\\s]+`` (prior class) accepted it.
+        """
+        raw = 'ISSUE_REF::"https://github.com/elevanaltd\\"/hestai-context-mcp/issues/53"'
+        content = _decision_record_with_raw_issue_ref_line(_SHAPE_RE_HOST_TOKEN, raw)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False, "Expected invalid: illegal char in GitHub org segment"
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors

@@ -64,6 +64,18 @@ _ID_QUOTED_RE = re.compile(r'(?m)^  ID::(?:"([^"]+)"|([^"\s]+))\s*$')
 # unchanged (only anchors added).
 _SUPERSEDED_BY_RE = re.compile(r'(?m)^\s*SUPERSEDED_BY::"([^"]+)"\s*$')
 
+# ISSUE_REF field: greedy line capture (horizontal whitespace anchor only —
+# no ReDoS risk, no extractor/presence-detector asymmetry).
+# Captures everything after ISSUE_REF:: to end-of-line; shape validation is
+# done separately after quote-stripping so trailing garbage is always detected.
+_ISSUE_REF_LINE_RE = re.compile(r"(?m)^[ \t]*ISSUE_REF::(.*)$")
+
+# ISSUE_REF shape per ADR-RFC-ARCH-004 §4.1 invariant #10: accepts ONLY the two
+# valid forms — the repo:<repo-id>#<n> shorthand or a GitHub issue URL.
+_ISSUE_REF_SHAPE_RE = re.compile(
+    r"^(?:repo:[A-Za-z0-9_-]+#[0-9]+|https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/issues/[0-9]+)$"
+)
+
 # TOKEN format validation per ADR-RFC-ARCH-004 §1.3
 # ^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$
 _TOKEN_FORMAT_RE = re.compile(r"^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$")
@@ -155,6 +167,23 @@ def _extract_superseded_by(content: str) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
+def _extract_issue_ref(content: str) -> str | None:
+    """Extract and normalise the ISSUE_REF value if exactly one line is present.
+
+    Uses the greedy _ISSUE_REF_LINE_RE so trailing garbage is captured (not
+    silently dropped).  Returns the quote-stripped value, or None when no
+    ISSUE_REF line exists.  Callers that need the raw line count should use
+    _ISSUE_REF_LINE_RE.findall() directly.
+    """
+    matches = _ISSUE_REF_LINE_RE.findall(content)
+    if len(matches) != 1:
+        return None
+    raw = matches[0].strip()
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        raw = raw[1:-1]
+    return raw or None
 
 
 def _extract_repo_id(content: str) -> str | None:
@@ -316,6 +345,31 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
             f"SUPERSEDED_BY target '{superseded_by}' not found in governance store. "
             "The referenced TOKEN must exist before it can be superseded."
         )
+        # Continue to collect more errors
+
+    # --- Check 5a: ISSUE_REF shape (ADR-RFC-ARCH-004 §4.1 invariant #10) ---
+    # ISSUE_REF is OPTIONAL: absence (zero matching lines) is valid.
+    # _ISSUE_REF_LINE_RE is greedy — it always captures the full raw value
+    # including trailing garbage, so shape validation catches every malformed
+    # form without a separate presence detector.
+    issue_ref_raw_lines = _ISSUE_REF_LINE_RE.findall(content)
+    if len(issue_ref_raw_lines) > 1:
+        errors.append(
+            "ISSUE_REF field appears multiple times; expected at most one "
+            "(ADR-RFC-ARCH-004 §4.1 #10)."
+        )
+        # Continue to collect more errors
+    elif len(issue_ref_raw_lines) == 1:
+        raw = issue_ref_raw_lines[0].strip()
+        if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+            raw = raw[1:-1]
+        if not raw or not _ISSUE_REF_SHAPE_RE.fullmatch(raw):
+            errors.append(
+                f"ISSUE_REF '{raw}' does not match a valid shape. "
+                "ISSUE_REF must be a GitHub issue URL "
+                "(https://github.com/<org>/<repo>/issues/<n>) or the "
+                "repo:<repo-id>#<n> shorthand (ADR-RFC-ARCH-004 §4.1 #10)."
+            )
         # Continue to collect more errors
 
     # --- Check 6: Token uniqueness (must NOT already exist for new records) ---
