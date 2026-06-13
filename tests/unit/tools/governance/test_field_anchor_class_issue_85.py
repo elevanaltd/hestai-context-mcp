@@ -142,9 +142,7 @@ class TestLeakDownstreamEffectPinned:
         assert result.token is None
 
     @pytest.mark.unit
-    def test_suffixed_superseded_by_does_not_trigger_supersedure_path(
-        self, tmp_path: Path
-    ) -> None:
+    def test_suffixed_superseded_by_does_not_trigger_supersedure_path(self, tmp_path: Path) -> None:
         """A ``PARENT_SUPERSEDED_BY::`` key must NOT drive the supersedure-target check.
 
         If the leak fired, ``_extract_superseded_by`` would return a value and
@@ -191,14 +189,9 @@ _FIELD_EXTRACTOR_FAMILY = [
     ("manifest._ID_BARE_RE", manifest_mod._ID_BARE_RE, "ID", "GATE_A_TEST_CONCEPT", False),
 ]
 
-# The ID-family extractors are anchored to EXACTLY two leading spaces (``^  ``)
-# rather than ``^\s*``; they only ever match a 2-space-indented META body line.
-# Render their genuine line with that exact indent so the accept-case is fair.
-_TWO_SPACE_INDENT_IDS = {
-    "tc._ID_QUOTED_RE",
-    "manifest._ID_RE",
-    "manifest._ID_BARE_RE",
-}
+# Genuine META body lines are rendered with a two-space indent. This is exact
+# for the ID-family extractors anchored to ``^  `` and admitted by the ``^\s*``
+# members too, so the accept-case is fair for every family member.
 
 
 def _render_field_line(field_key: str, value: str, quoted: bool, indent: str) -> str:
@@ -228,7 +221,6 @@ class TestFieldAnchorClassGuard:
         quoted: bool,
     ) -> None:
         """A ``PREFIX<FIELD>::value`` decoy line must NOT match (no substring leak)."""
-        indent = "  " if extractor_id in _TWO_SPACE_INDENT_IDS else "  "
         decoy = _render_field_line(field_key, value, quoted, indent="  PREFIX_")
         # Decoy renders as e.g. ``  PREFIX_TOKEN::"<tok>"`` — a *FIELD:: suffixed key.
         assert compiled.search(decoy) is None, f"{extractor_id} leaked on decoy: {decoy!r}"  # type: ignore[attr-defined]
