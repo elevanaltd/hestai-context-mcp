@@ -20,6 +20,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `list_decisions` scoped to DECISION_RECORD-typed files only; co-located non-AGR artifacts excluded (PR #83)
 - TYPE detection line-anchored to exclude `*TYPE::-suffixed` non-AGR fields (PR #83)
 - GitGuardian false positive on AGR token fixtures neutralised in CI
+- Setup: skip import check in dry-run mode
+- Setup: run `uv sync --extra validation` before client registration
+
+### Chore
+- Setup: fix stale 0/4 step label to 0/5
 
 ### Records Added
 - `HO-AGR-SEMANTIC-REVIEWER-ANALYSIS-TIER-20260611`
