@@ -1,4 +1,4 @@
-"""RED suite — ``lookup_decision`` MCP tool.
+"""Test suite — ``lookup_decision`` MCP tool.
 
 Contract: ADR-RFC-ARCH-004 §3.2 (return shape) + §3.1.1 (common error
 envelope). Pure read (PROD I5), structured return (PROD I4).
@@ -9,14 +9,12 @@ Happy path returns::
       "ok": true,
       "record": {token, type, version, status, tier, decision, because,
                  authored_at, path, fields{}},
-      "resolution_chain": [ ... ]   # populated when STATUS == SUPERSEDED
+      "resolution_chain": [ ... ],            # populated when STATUS == SUPERSEDED
+      "resolution_chain_status": "complete"   # | "broken" | "cyclic" (issue #87)
     }
 
 Error envelope (§3.1.1) for TOKEN_NOT_FOUND, TOKEN_MALFORMED,
 RECORD_PARSE_FAILED, WORKING_DIR_INVALID.
-
-RED: ``tools.lookup_decision`` does not exist yet — import raises
-ModuleNotFoundError (right-reason failure, not a collection error).
 """
 
 from __future__ import annotations
@@ -45,12 +43,11 @@ from ._agr_fixtures import (
 
 
 def _lookup_decision() -> Callable[..., dict]:
-    """Lazily import the not-yet-existing tool (RED discipline).
+    """Import the tool lazily, inside the call (collection-safe).
 
-    The import lives inside each test so COLLECTION succeeds and every test
-    FAILS individually with a 'missing implementation' reason rather than a
-    module-level collection error masking the file. GREEN creates
-    ``tools.lookup_decision.lookup_decision``.
+    Keeping the import here (rather than at module top) means a future import
+    regression surfaces as a per-test failure with a clear reason rather than a
+    module-level collection error that masks the whole file.
     """
     from hestai_context_mcp.tools.lookup_decision import lookup_decision
 
