@@ -54,13 +54,13 @@ _SUPERSEDED_BY_RE = re.compile(r'SUPERSEDED_BY::"([^"]+)"')
 # ISSUE_REF field: quote-optional, line-anchored (consistent with _TOKEN_RE).
 # Group 1 holds the quoted value, group 2 the bare value; the end-anchor (\s*$)
 # lives OUTSIDE the alternation so BOTH branches reject trailing garbage.
-_ISSUE_REF_RE = re.compile(r'(?m)ISSUE_REF::(?:"([^"]+)"|([^"\s]+))\s*$')
+_ISSUE_REF_RE = re.compile(r'(?m)^\s*ISSUE_REF::(?:"([^"]+)"|([^"\s]+))\s*$')
 
 # ISSUE_REF presence detector: matches ANY line that starts with ISSUE_REF::
 # (with optional leading whitespace). Used alongside _ISSUE_REF_RE to detect the
 # trailing-garbage bypass: if this matches but _ISSUE_REF_RE does not, the line
 # is present-but-malformed and must be reported as an error.
-_ISSUE_REF_LINE_PRESENT_RE = re.compile(r"(?m)^\s*ISSUE_REF::")
+_ISSUE_REF_LINE_PRESENT_RE = re.compile(r"(?m)^[ \t]*ISSUE_REF::")
 
 # ISSUE_REF shape per ADR-RFC-ARCH-004 §4.1 invariant #10: accepts ONLY the two
 # valid forms — the repo:<repo-id>#<n> shorthand or a GitHub issue URL.
@@ -335,13 +335,25 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
     # GitHub issue URL or the repo:<repo-id>#<n> shorthand. Collect alongside
     # other errors (no early return), mirroring the SUPERSEDED_BY check.
     #
-    # Bypass fix: _ISSUE_REF_RE uses \s*$ end-anchoring so trailing garbage
-    # causes it to return None — making check 5a a no-op for a malformed line.
-    # The presence detector (_ISSUE_REF_LINE_PRESENT_RE) catches this: if an
-    # ISSUE_REF:: line exists but strict extraction returned None the line is
+    # Duplicate-field guard: count all ISSUE_REF:: line occurrences. If more
+    # than one exists that is already a structural error (duplicate optional
+    # field) — _ISSUE_REF_RE.search() would silently skip a malformed first
+    # line and extract the second, letting the malformed line go undetected.
+    #
+    # Bypass fix: _ISSUE_REF_RE uses ^\s*...\s*$ anchoring so trailing garbage
+    # causes it to return None — making the shape check a no-op for a malformed
+    # line. The presence detector (_ISSUE_REF_LINE_PRESENT_RE) catches this: if
+    # an ISSUE_REF:: line exists but strict extraction returned None the line is
     # present-but-malformed and we emit a named error (ADR-RFC-ARCH-004 §4.1 #10).
     issue_ref = _extract_issue_ref(content)
-    if issue_ref is not None and not _ISSUE_REF_SHAPE_RE.match(issue_ref):
+    issue_ref_line_count = len(_ISSUE_REF_LINE_PRESENT_RE.findall(content))
+    if issue_ref_line_count > 1:
+        errors.append(
+            "ISSUE_REF field appears multiple times; expected at most one "
+            "(ADR-RFC-ARCH-004 §4.1 #10)."
+        )
+        # Continue to collect more errors
+    elif issue_ref is not None and not _ISSUE_REF_SHAPE_RE.fullmatch(issue_ref):
         errors.append(
             f"ISSUE_REF '{issue_ref}' does not match a valid shape. "
             "ISSUE_REF must be a GitHub issue URL "
@@ -349,7 +361,7 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
             "repo:<repo-id>#<n> shorthand (ADR-RFC-ARCH-004 §4.1 #10)."
         )
         # Continue to collect more errors
-    elif issue_ref is None and _ISSUE_REF_LINE_PRESENT_RE.search(content):
+    elif issue_ref is None and issue_ref_line_count == 1:
         errors.append(
             "ISSUE_REF line is present but could not be parsed. "
             "ISSUE_REF must be one of: "
