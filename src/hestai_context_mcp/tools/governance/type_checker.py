@@ -30,17 +30,25 @@ from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 # Pattern: starts with ===TYPENAME=== on the very first line.
 _SENTINEL_RE = re.compile(r"\A===([A-Z_]+)===\s*(?:\r?\n|$)")
 
-# TYPE field in META block
-_TYPE_RE = re.compile(r"(?m)TYPE::(\w+)")
+# TYPE field in META block. LINE-ANCHORED (issue #85): the KEY must be exactly
+# ``TYPE`` at line start — a leading whitespace-only indent is admitted (OCTAVE
+# META bodies are indented) but NO other characters may precede it, so a
+# ``*TYPE::``-suffixed key such as ``DOCUMENT_TYPE::`` / ``CONTENT_TYPE::`` no
+# longer substring-leaks via ``.search()``. The trailing ``\s*$`` end-anchor
+# rejects trailing garbage (``TYPE::DECISION_RECORD EXTRA``). Mirrors the
+# read-side ``agr_read._TYPE_IS_DECISION_RECORD_RE`` anchored approach.
+_TYPE_RE = re.compile(r"(?m)^\s*TYPE::(\w+)\s*$")
 
 # TOKEN field (DECISION_RECORD): quote-optional (AGR canonical-form convergence).
 # Accepts BOTH the bare canonical form  TOKEN::VALUE  and the legacy quoted form
-# TOKEN::"VALUE".  The end-anchor (\s*$) lives OUTSIDE the alternation so BOTH
-# branches are line-anchored: a trailing-garbage line such as
-# TOKEN::"HO-…-20260513" EXTRA  or  TOKEN::HO-…-20260513 EXTRA  does NOT match
-# (cubic P2 — the §1.3 _TOKEN_FORMAT_RE only checks the captured value, so it
-# cannot catch trailing junk; the anchor must).
-_TOKEN_RE = re.compile(r'(?m)TOKEN::(?:"([^"]+)"|([^"\s]+))\s*$')
+# TOKEN::"VALUE".  LINE-ANCHORED at BOTH ends (issue #85): the line-START anchor
+# ``^\s*`` admits OCTAVE indentation but forbids a ``*TOKEN::``-suffixed key
+# (e.g. ``DOCUMENT_TOKEN::``) from substring-leaking via ``.search()``; the
+# end-anchor (\s*$) lives OUTSIDE the alternation so BOTH branches reject a
+# trailing-garbage line such as  TOKEN::"HO-…-20260513" EXTRA  /
+# TOKEN::HO-…-20260513 EXTRA  (cubic P2 — the §1.3 _TOKEN_FORMAT_RE only checks
+# the captured value, so it cannot catch trailing junk; the anchor must).
+_TOKEN_RE = re.compile(r'(?m)^\s*TOKEN::(?:"([^"]+)"|([^"\s]+))\s*$')
 
 # ID field (facet cards): quote-optional. Accepts bare  ID::VALUE  and quoted
 # ID::"VALUE".  The end-anchor (\s*$) lives OUTSIDE the alternation so BOTH the
@@ -48,8 +56,25 @@ _TOKEN_RE = re.compile(r'(?m)TOKEN::(?:"([^"]+)"|([^"\s]+))\s*$')
 # (cubic P2 — the quoted branch was previously unanchored).
 _ID_QUOTED_RE = re.compile(r'(?m)^  ID::(?:"([^"]+)"|([^"\s]+))\s*$')
 
-# SUPERSEDED_BY field: quoted string
-_SUPERSEDED_BY_RE = re.compile(r'SUPERSEDED_BY::"([^"]+)"')
+# SUPERSEDED_BY field: quoted string. LINE-ANCHORED (issue #85): ``^\s*`` admits
+# OCTAVE indentation but forbids a ``*SUPERSEDED_BY::``-suffixed key (e.g.
+# ``PARENT_SUPERSEDED_BY::``) from substring-leaking a supersedure target via
+# ``.search()`` — this is the supersedure-corruption vector the issue exists to
+# kill. ``\s*$`` rejects trailing garbage; the quoted-only value behavior is
+# unchanged (only anchors added).
+_SUPERSEDED_BY_RE = re.compile(r'(?m)^\s*SUPERSEDED_BY::"([^"]+)"\s*$')
+
+# ISSUE_REF field: greedy line capture (horizontal whitespace anchor only —
+# no ReDoS risk, no extractor/presence-detector asymmetry).
+# Captures everything after ISSUE_REF:: to end-of-line; shape validation is
+# done separately after quote-stripping so trailing garbage is always detected.
+_ISSUE_REF_LINE_RE = re.compile(r"(?m)^[ \t]*ISSUE_REF::(.*)$")
+
+# ISSUE_REF shape per ADR-RFC-ARCH-004 §4.1 invariant #10: accepts ONLY the two
+# valid forms — the repo:<repo-id>#<n> shorthand or a GitHub issue URL.
+_ISSUE_REF_SHAPE_RE = re.compile(
+    r"^(?:repo:[A-Za-z0-9_-]+#[0-9]+|https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/issues/[0-9]+)$"
+)
 
 # TOKEN format validation per ADR-RFC-ARCH-004 §1.3
 # ^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$
@@ -64,8 +89,12 @@ _DECISION_RECORD_TYPE = "DECISION_RECORD"
 _FACET_CARD_TYPES = frozenset({"CONCEPT_CARD", "FRAME_CARD", "CLUSTER_CARD", "PHASE_CARD"})
 _KNOWN_TYPES = frozenset([_DECISION_RECORD_TYPE]) | _FACET_CARD_TYPES
 
-# REPO_ID field for facet cards
-_REPO_ID_RE = re.compile(r"REPO_ID::([^\s]+)")
+# REPO_ID field for facet cards. LINE-ANCHORED (issue #85, same *FIELD:: class):
+# ``^\s*`` admits OCTAVE indentation but forbids a ``*REPO_ID::``-suffixed key
+# (e.g. ``SOURCE_REPO_ID::``) from substring-leaking via ``.search()``. The
+# trailing ``\s*$`` rejects a trailing-garbage line; the captured value's own
+# comma/whitespace cleanup still happens in ``_extract_repo_id``.
+_REPO_ID_RE = re.compile(r"(?m)^\s*REPO_ID::([^\s]+)\s*$")
 
 # Safe slug pattern for REPO_ID validation (alphanumeric, hyphens, underscores only)
 _SAFE_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -138,6 +167,23 @@ def _extract_superseded_by(content: str) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
+def _extract_issue_ref(content: str) -> str | None:
+    """Extract and normalise the ISSUE_REF value if exactly one line is present.
+
+    Uses the greedy _ISSUE_REF_LINE_RE so trailing garbage is captured (not
+    silently dropped).  Returns the quote-stripped value, or None when no
+    ISSUE_REF line exists.  Callers that need the raw line count should use
+    _ISSUE_REF_LINE_RE.findall() directly.
+    """
+    matches = _ISSUE_REF_LINE_RE.findall(content)
+    if len(matches) != 1:
+        return None
+    raw = matches[0].strip()
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        raw = raw[1:-1]
+    return raw or None
 
 
 def _extract_repo_id(content: str) -> str | None:
@@ -299,6 +345,31 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
             f"SUPERSEDED_BY target '{superseded_by}' not found in governance store. "
             "The referenced TOKEN must exist before it can be superseded."
         )
+        # Continue to collect more errors
+
+    # --- Check 5a: ISSUE_REF shape (ADR-RFC-ARCH-004 §4.1 invariant #10) ---
+    # ISSUE_REF is OPTIONAL: absence (zero matching lines) is valid.
+    # _ISSUE_REF_LINE_RE is greedy — it always captures the full raw value
+    # including trailing garbage, so shape validation catches every malformed
+    # form without a separate presence detector.
+    issue_ref_raw_lines = _ISSUE_REF_LINE_RE.findall(content)
+    if len(issue_ref_raw_lines) > 1:
+        errors.append(
+            "ISSUE_REF field appears multiple times; expected at most one "
+            "(ADR-RFC-ARCH-004 §4.1 #10)."
+        )
+        # Continue to collect more errors
+    elif len(issue_ref_raw_lines) == 1:
+        raw = issue_ref_raw_lines[0].strip()
+        if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+            raw = raw[1:-1]
+        if not raw or not _ISSUE_REF_SHAPE_RE.fullmatch(raw):
+            errors.append(
+                f"ISSUE_REF '{raw}' does not match a valid shape. "
+                "ISSUE_REF must be a GitHub issue URL "
+                "(https://github.com/<org>/<repo>/issues/<n>) or the "
+                "repo:<repo-id>#<n> shorthand (ADR-RFC-ARCH-004 §4.1 #10)."
+            )
         # Continue to collect more errors
 
     # --- Check 6: Token uniqueness (must NOT already exist for new records) ---
