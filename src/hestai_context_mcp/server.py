@@ -6,6 +6,9 @@ This MCP server provides session lifecycle and context management tools:
 - get_context: Synthesize and return project context
 - submit_review: Submit structured review comments
 - submit_governance: Gate A Rails intake for OCTAVE governance artifacts (RFC #53)
+- lookup_decision: Resolve a single AGR by TOKEN (RFC #40, read-only)
+- list_decisions: List AGRs with optional filtering (RFC #40, read-only)
+- trace_supersedure: Trace an AGR supersession chain (RFC #40, read-only)
 
 Architecture:
 - Part of the three-service model (ADR-0353)
@@ -29,8 +32,11 @@ from fastmcp import FastMCP
 from hestai_context_mcp.tools.clock_in import clock_in
 from hestai_context_mcp.tools.clock_out import clock_out
 from hestai_context_mcp.tools.get_context import get_context
+from hestai_context_mcp.tools.list_decisions import list_decisions
+from hestai_context_mcp.tools.lookup_decision import lookup_decision
 from hestai_context_mcp.tools.submit_governance import submit_governance
 from hestai_context_mcp.tools.submit_review import submit_review
+from hestai_context_mcp.tools.trace_supersedure import trace_supersedure
 
 mcp = FastMCP(
     name="hestai-context-mcp",
@@ -82,6 +88,10 @@ mcp.tool(clock_out)
 mcp.tool(get_context)
 mcp.tool(submit_review)
 mcp.tool(submit_governance)
+# RFC #40 AGR read-side (ADR-RFC-ARCH-004 §3): pure-read governance-store tools.
+mcp.tool(lookup_decision)
+mcp.tool(list_decisions)
+mcp.tool(trace_supersedure)
 
 
 def main() -> None:

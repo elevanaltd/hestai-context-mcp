@@ -30,3 +30,7 @@ secret:
   ignored_paths:
     - "tests/unit/tools/governance/test_linker.py"
     - "tests/unit/tools/test_submit_governance.py"
+    # Deliberately-fake AGR TOKEN fixtures (#83 read-side suite): the
+    # TOKEN_OLD/MID/NEW/CYCLE_A/CYCLE_B constants are non-secret governance
+    # identifiers the "Generic High Entropy Secret" detector trips on.
+    - "tests/unit/tools/governance/_agr_fixtures.py"

@@ -267,7 +267,8 @@ class TestLocalFilesystemAdapterHasNoKeyringImport:
 
 
 class TestNoNewToolRegistration:
-    """TEST_167 — server.py registers the B1 tools plus RFC-53 Gate A submit_governance."""
+    """TEST_167 — server.py registers the B1 tools plus RFC-53 Gate A submit_governance
+    plus the RFC #40 AGR read-side tools (ADR-RFC-ARCH-004 §3, pure reads)."""
 
     def test_no_new_tool_registration_for_publish_or_restore(self) -> None:
         path = _SRC_ROOT / "server.py"
@@ -275,13 +276,26 @@ class TestNoNewToolRegistration:
         # Count mcp.tool(...) registrations.
         registrations = re.findall(r"^\s*mcp\.tool\(([\w_]+)\)", source, re.MULTILINE)
         # RFC #53 Gate A: submit_governance is the approved additive tool (PROD I5 — additive only).
-        # B2_START_BLOCKER_002 / R5 blocks publish/restore — NOT intake tools per RFC #53.
+        # RFC #40 (ADR-RFC-ARCH-004 §3): lookup_decision/list_decisions/trace_supersedure are
+        # the approved additive pure-read AGR tools (PROD I5 pure reads).
+        # B2_START_BLOCKER_002 / R5 still blocks publish/restore — those names remain absent
+        # from the allowlist, so a publish/restore registration still fails this equality.
         allowed = sorted(
-            ["clock_in", "clock_out", "get_context", "submit_review", "submit_governance"]
+            [
+                "clock_in",
+                "clock_out",
+                "get_context",
+                "submit_review",
+                "submit_governance",
+                "lookup_decision",
+                "list_decisions",
+                "trace_supersedure",
+            ]
         )
         assert sorted(registrations) == allowed, (
             "B2_START_BLOCKER_002 / R5 violation — server.py must register exactly "
-            f"the five approved tools (RFC #53 Gate A additive); got {registrations}"
+            "the approved tools (B1 + RFC #53 Gate A + RFC #40 read-side); "
+            f"got {registrations}"
         )
 
     def test_server_does_not_import_publish_or_restore_helpers(self) -> None:
