@@ -51,6 +51,17 @@ _ID_QUOTED_RE = re.compile(r'(?m)^  ID::(?:"([^"]+)"|([^"\s]+))\s*$')
 # SUPERSEDED_BY field: quoted string
 _SUPERSEDED_BY_RE = re.compile(r'SUPERSEDED_BY::"([^"]+)"')
 
+# ISSUE_REF field: quote-optional, line-anchored (consistent with _TOKEN_RE).
+# Group 1 holds the quoted value, group 2 the bare value; the end-anchor (\s*$)
+# lives OUTSIDE the alternation so BOTH branches reject trailing garbage.
+_ISSUE_REF_RE = re.compile(r'(?m)ISSUE_REF::(?:"([^"]+)"|([^"\s]+))\s*$')
+
+# ISSUE_REF shape per ADR-RFC-ARCH-004 §4.1 invariant #10: accepts ONLY the two
+# valid forms — the repo:<repo-id>#<n> shorthand or a GitHub issue URL.
+_ISSUE_REF_SHAPE_RE = re.compile(
+    r"^(?:repo:[A-Za-z0-9_-]+#[0-9]+|https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+)$"
+)
+
 # TOKEN format validation per ADR-RFC-ARCH-004 §1.3
 # ^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$
 _TOKEN_FORMAT_RE = re.compile(r"^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$")
@@ -137,6 +148,18 @@ def _extract_superseded_by(content: str) -> str | None:
     m = _SUPERSEDED_BY_RE.search(content)
     if m:
         return m.group(1)
+    return None
+
+
+def _extract_issue_ref(content: str) -> str | None:
+    """Extract the ISSUE_REF field if present, quote-optional.
+
+    Group 1 holds the quoted value, group 2 the bare value; exactly one is set.
+    Returns None when no ISSUE_REF line is present (the field is optional).
+    """
+    m = _ISSUE_REF_RE.search(content)
+    if m:
+        return m.group(1) if m.group(1) is not None else m.group(2)
     return None
 
 
@@ -298,6 +321,20 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
         errors.append(
             f"SUPERSEDED_BY target '{superseded_by}' not found in governance store. "
             "The referenced TOKEN must exist before it can be superseded."
+        )
+        # Continue to collect more errors
+
+    # --- Check 5a: ISSUE_REF shape (ADR-RFC-ARCH-004 §4.1 invariant #10) ---
+    # ISSUE_REF is OPTIONAL: absence is valid. When present, it MUST parse as a
+    # GitHub issue URL or the repo:<repo-id>#<n> shorthand. Collect alongside
+    # other errors (no early return), mirroring the SUPERSEDED_BY check.
+    issue_ref = _extract_issue_ref(content)
+    if issue_ref is not None and not _ISSUE_REF_SHAPE_RE.match(issue_ref):
+        errors.append(
+            f"ISSUE_REF '{issue_ref}' does not match a valid shape. "
+            "ISSUE_REF must be a GitHub issue URL "
+            "(https://github.com/<org>/<repo>/issues/<n>) or the "
+            "repo:<repo-id>#<n> shorthand (ADR-RFC-ARCH-004 §4.1 #10)."
         )
         # Continue to collect more errors
 
