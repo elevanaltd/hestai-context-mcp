@@ -1,4 +1,4 @@
-"""RED suite — ``lookup_decision`` MCP tool.
+"""Test suite — ``lookup_decision`` MCP tool.
 
 Contract: ADR-RFC-ARCH-004 §3.2 (return shape) + §3.1.1 (common error
 envelope). Pure read (PROD I5), structured return (PROD I4).
@@ -9,14 +9,12 @@ Happy path returns::
       "ok": true,
       "record": {token, type, version, status, tier, decision, because,
                  authored_at, path, fields{}},
-      "resolution_chain": [ ... ]   # populated when STATUS == SUPERSEDED
+      "resolution_chain": [ ... ],            # populated when STATUS == SUPERSEDED
+      "resolution_chain_status": "complete"   # | "broken" | "cyclic" (issue #87)
     }
 
 Error envelope (§3.1.1) for TOKEN_NOT_FOUND, TOKEN_MALFORMED,
 RECORD_PARSE_FAILED, WORKING_DIR_INVALID.
-
-RED: ``tools.lookup_decision`` does not exist yet — import raises
-ModuleNotFoundError (right-reason failure, not a collection error).
 """
 
 from __future__ import annotations
@@ -27,11 +25,16 @@ from pathlib import Path
 import pytest
 
 from ._agr_fixtures import (
+    TOKEN_BROKEN,
+    TOKEN_CYCLE_A,
     TOKEN_MID,
+    TOKEN_MISSING,
     TOKEN_NEW,
     TOKEN_OLD,
     TOKEN_RATIFIED,
     snapshot_tree,
+    write_broken_chain,
+    write_cyclic_pair,
     write_malformed_record,
     write_non_agr_record,
     write_record,
@@ -40,12 +43,11 @@ from ._agr_fixtures import (
 
 
 def _lookup_decision() -> Callable[..., dict]:
-    """Lazily import the not-yet-existing tool (RED discipline).
+    """Import the tool lazily, inside the call (collection-safe).
 
-    The import lives inside each test so COLLECTION succeeds and every test
-    FAILS individually with a 'missing implementation' reason rather than a
-    module-level collection error masking the file. GREEN creates
-    ``tools.lookup_decision.lookup_decision``.
+    Keeping the import here (rather than at module top) means a future import
+    regression surfaces as a per-test failure with a clear reason rather than a
+    module-level collection error that masks the whole file.
     """
     from hestai_context_mcp.tools.lookup_decision import lookup_decision
 
@@ -121,6 +123,151 @@ class TestResolutionChain:
         chain_tokens = [entry["token"] for entry in result["resolution_chain"]]
         # Chain starts at the requested token and walks to the terminal.
         assert chain_tokens == [TOKEN_OLD, TOKEN_MID, TOKEN_NEW]
+
+
+class TestResolutionChainStatus:
+    """Issue #87 - additive ``resolution_chain_status`` completeness signal.
+
+    Contract (ADR-RFC-ARCH-004 3.2, additive per 3.1.1): when a SUPERSEDED
+    record's supersession chain is followed, lookup_decision exposes a
+    ``resolution_chain_status`` string so a caller can distinguish a chain that
+    reached its terminal from one truncated by a broken link or a cycle. The
+    value is derived from the existing ``walk_supersession_chain`` outcome:
+
+      * walk outcome ``"ok"``     -> ``"complete"``
+      * walk outcome ``"broken"`` -> ``"broken"``  (chain still returned)
+      * walk outcome ``"cycle"``  -> ``"cyclic"``  (chain still returned, no hang)
+
+    The signal is additive: it never removes/renames an existing key, and a
+    consumer that ignores it is unaffected (back-compat asserted below).
+    """
+
+    _FIELD = "resolution_chain_status"
+    _ALLOWED = {"complete", "broken", "cyclic"}
+
+    @pytest.mark.unit
+    def test_complete_chain_reports_complete(self, tmp_path: Path) -> None:
+        """A SUPERSEDED record whose chain reaches a terminal => 'complete'."""
+        lookup_decision = _lookup_decision()
+        write_supersession_chain(tmp_path)
+        result = lookup_decision(str(tmp_path), TOKEN_OLD)
+
+        assert result["ok"] is True
+        assert result["record"]["status"] == "SUPERSEDED"
+        chain_tokens = [entry["token"] for entry in result["resolution_chain"]]
+        assert chain_tokens == [TOKEN_OLD, TOKEN_MID, TOKEN_NEW]
+        assert result[self._FIELD] == "complete"
+
+    @pytest.mark.unit
+    def test_broken_chain_reports_broken_and_returns_partial(self, tmp_path: Path) -> None:
+        """A missing successor TOKEN => 'broken' + the partial chain still returned."""
+        lookup_decision = _lookup_decision()
+        write_broken_chain(tmp_path)
+        result = lookup_decision(str(tmp_path), TOKEN_BROKEN)
+
+        # The read itself still succeeds (the data is correct, just truncated).
+        assert result["ok"] is True
+        assert result["record"]["status"] == "SUPERSEDED"
+        assert result[self._FIELD] == "broken"
+        # The entry gathered so far is surfaced (partial resolution, not empty),
+        # and the missing successor is NOT fabricated into the chain.
+        chain_tokens = [entry["token"] for entry in result["resolution_chain"]]
+        assert chain_tokens == [TOKEN_BROKEN]
+        assert TOKEN_MISSING not in chain_tokens
+
+    @pytest.mark.unit
+    def test_cyclic_chain_reports_cyclic_without_hanging(self, tmp_path: Path) -> None:
+        """A SUPERSEDED_BY cycle => 'cyclic', returns (no unbounded walk/hang)."""
+        lookup_decision = _lookup_decision()
+        write_cyclic_pair(tmp_path)
+        result = lookup_decision(str(tmp_path), TOKEN_CYCLE_A)
+
+        assert result["ok"] is True
+        assert result["record"]["status"] == "SUPERSEDED"
+        assert result[self._FIELD] == "cyclic"
+        # Fail-closed cycle detection still surfaces the gathered partial chain.
+        assert result["resolution_chain"]
+
+    @pytest.mark.unit
+    def test_non_superseded_record_reports_complete(self, tmp_path: Path) -> None:
+        """A non-SUPERSEDED record has an empty (untruncated) chain => 'complete'.
+
+        Chosen contract: the empty chain of a terminal/active record is by
+        definition not truncated, so the completeness signal is 'complete'. The
+        field is always present (a defined PROD::I4 key), never broken/cyclic
+        for a record with no supersession chain.
+        """
+        lookup_decision = _lookup_decision()
+        write_record(tmp_path, token=TOKEN_RATIFIED, status="RATIFIED")
+        result = lookup_decision(str(tmp_path), TOKEN_RATIFIED)
+
+        assert result["ok"] is True
+        assert result["resolution_chain"] == []
+        assert result[self._FIELD] == "complete"
+
+    @pytest.mark.unit
+    def test_status_value_is_in_allowed_domain(self, tmp_path: Path) -> None:
+        """The value is always a member of the closed enum (PROD::I4 defined field)."""
+        lookup_decision = _lookup_decision()
+        write_supersession_chain(tmp_path)
+        result = lookup_decision(str(tmp_path), TOKEN_OLD)
+        assert result[self._FIELD] in self._ALLOWED
+
+
+class TestResolutionChainStatusBackCompat:
+    """Back-compat: the additive field must not disturb any existing key.
+
+    ADR-RFC-ARCH-004 3.1.1 permits added fields but forbids removing/renaming
+    existing ones; consumers reading only the old keys MUST be unaffected.
+    """
+
+    _EXISTING_TOP_KEYS = {"ok", "record", "resolution_chain"}
+    _EXISTING_RECORD_KEYS = {
+        "token",
+        "type",
+        "version",
+        "status",
+        "tier",
+        "decision",
+        "because",
+        "authored_at",
+        "path",
+        "fields",
+    }
+
+    @pytest.mark.unit
+    def test_existing_keys_unchanged_for_superseded(self, tmp_path: Path) -> None:
+        """Every pre-#87 key is still present with its prior value/shape."""
+        lookup_decision = _lookup_decision()
+        write_supersession_chain(tmp_path)
+        result = lookup_decision(str(tmp_path), TOKEN_OLD)
+
+        # No existing key removed/renamed (additive-only: superset is allowed).
+        assert set(result) >= self._EXISTING_TOP_KEYS
+        assert set(result["record"]) >= self._EXISTING_RECORD_KEYS
+        # Existing values are byte-stable.
+        assert result["ok"] is True
+        assert result["record"]["token"] == TOKEN_OLD
+        assert result["record"]["status"] == "SUPERSEDED"
+        assert [e["token"] for e in result["resolution_chain"]] == [
+            TOKEN_OLD,
+            TOKEN_MID,
+            TOKEN_NEW,
+        ]
+        # The only new top-level key is the additive completeness signal.
+        assert set(result) - self._EXISTING_TOP_KEYS == {"resolution_chain_status"}
+
+    @pytest.mark.unit
+    def test_existing_keys_unchanged_for_non_superseded(self, tmp_path: Path) -> None:
+        """The non-superseded happy path keeps its exact pre-#87 key set."""
+        lookup_decision = _lookup_decision()
+        write_record(tmp_path, token=TOKEN_RATIFIED, scope="hestai-context-mcp")
+        result = lookup_decision(str(tmp_path), TOKEN_RATIFIED)
+
+        assert set(result) >= self._EXISTING_TOP_KEYS
+        assert set(result["record"]) >= self._EXISTING_RECORD_KEYS
+        assert result["resolution_chain"] == []
+        assert set(result) - self._EXISTING_TOP_KEYS == {"resolution_chain_status"}
 
 
 class TestErrorEnvelope:

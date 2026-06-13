@@ -19,6 +19,20 @@ from hestai_context_mcp.tools.governance import agr_read
 _TOOL = "lookup_decision"
 _CONTRACT_REF = "ADR-RFC-ARCH-004 §3.2"
 
+# §3.2 (issue #87): map the walk_supersession_chain outcome to the additive
+# ``resolution_chain_status`` completeness signal. ``ok`` (reached a terminal)
+# is "complete"; a missing successor TOKEN is "broken"; a detected SUPERSEDED_BY
+# cycle is "cyclic". These mirror trace_supersedure's CHAIN_BROKEN /
+# CHAIN_CYCLE_DETECTED conditions. A record with no supersession chain (the
+# empty-chain / non-SUPERSEDED case) is "complete" — an empty chain is, by
+# definition, not truncated.
+_CHAIN_STATUS_DEFAULT = "complete"
+_WALK_OUTCOME_TO_STATUS = {
+    "ok": "complete",
+    "broken": "broken",
+    "cycle": "cyclic",
+}
+
 
 def lookup_decision(
     working_dir: str,
@@ -35,7 +49,12 @@ def lookup_decision(
             contract conformance (§3.2 — consumers must tolerate agent shape).
 
     Returns:
-        On success: ``{"ok": True, "record": {...}, "resolution_chain": [...]}``.
+        On success: ``{"ok": True, "record": {...}, "resolution_chain": [...],
+        "resolution_chain_status": "complete"|"broken"|"cyclic"}``. The
+        ``resolution_chain_status`` field (additive per §3.1.1, issue #87) is a
+        completeness signal derived from the same ``walk_supersession_chain``
+        outcome, so a caller can tell a chain that reached its terminal from one
+        truncated by a broken link or a cycle.
         On failure: the §3.1.1 error envelope.
     """
     working_path = agr_read.validate_working_dir(working_dir)
@@ -99,15 +118,23 @@ def lookup_decision(
     }
 
     resolution_chain: list[dict[str, Any]] = []
+    resolution_chain_status = _CHAIN_STATUS_DEFAULT
     if parsed["status"] == "SUPERSEDED":
         walk = agr_read.walk_supersession_chain(working_path, token)
         # §3.2: the resolution chain mirrors the trace_supersedure entry shape.
         # A broken/cyclic chain still surfaces the entries gathered so far so the
         # caller sees the partial resolution rather than nothing.
         resolution_chain = walk["chain"]
+        # §3.2 (issue #87): derive the completeness signal from the SAME walk
+        # outcome — no second read, so PROD I5 purity is preserved. ``ok`` falls
+        # back to the default "complete".
+        resolution_chain_status = _WALK_OUTCOME_TO_STATUS.get(
+            walk["outcome"], _CHAIN_STATUS_DEFAULT
+        )
 
     return {
         "ok": True,
         "record": record,
         "resolution_chain": resolution_chain,
+        "resolution_chain_status": resolution_chain_status,
     }

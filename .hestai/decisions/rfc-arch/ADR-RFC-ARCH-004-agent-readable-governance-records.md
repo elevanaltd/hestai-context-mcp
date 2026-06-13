@@ -264,9 +264,18 @@ Resolves a single AGR by `TOKEN`. Pure read.
     "path": "<repo-relative path to the .oct.md file>",
     "fields": { /* all other present fields, key→value */ }
   },
-  "resolution_chain": [ /* see trace_supersedure shape; populated when STATUS == SUPERSEDED */ ]
+  "resolution_chain": [ /* see trace_supersedure shape; populated when STATUS == SUPERSEDED */ ],
+  "resolution_chain_status": "complete" | "broken" | "cyclic"  // additive (issue #87); see note below
 }
 ```
+
+The `resolution_chain_status` field (additive per §3.1.1; issue #87) is a completeness signal so a caller can distinguish a `resolution_chain` that reached its terminal from one truncated by a broken link or a cycle. It is derived from the same `walk_supersession_chain` outcome that produces `resolution_chain`, with **no** extra read:
+
+- `"complete"` — the walk reached a terminal record (walk outcome `ok`). This is also the value for a non-`SUPERSEDED` record, whose `resolution_chain` is empty and therefore not truncated.
+- `"broken"` — a successor `TOKEN` referenced by `SUPERSEDED_BY` does not exist on disk (walk outcome `broken`, the same condition `trace_supersedure` reports as `CHAIN_BROKEN`). The partial chain gathered so far is still returned.
+- `"cyclic"` — a `SUPERSEDED_BY` cycle was detected by fail-closed cycle detection (walk outcome `cycle`, the same condition `trace_supersedure` reports as `CHAIN_CYCLE_DETECTED`). The partial chain is still returned; the walk never runs unbounded.
+
+The field is **always present** (a defined PROD::I4 key) and never removes or renames an existing key; a consumer that ignores it is unaffected. `trace_supersedure` remains the authoritative source for the broken/cyclic *error*; `resolution_chain_status` is an in-band observability signal on `lookup_decision` that agrees with it.
 
 **Error cases** (per §3.1.1 envelope):
 
