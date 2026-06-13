@@ -358,3 +358,122 @@ class TestLexerTrailingGarbageRejected:
             _decision_record_raw_token_line(f'TOKEN::"{_VALID_TOKEN}"')
         )
         assert lookup_token_deterministic(tmp_path, _VALID_TOKEN) is True
+
+
+# ---------------------------------------------------------------------------
+# ISSUE_REF shape validation (ADR-RFC-ARCH-004 §4.1 invariant #10)
+#
+# "ISSUE_REF shape — when present, parses as a GitHub URL or repo:<repo-id>#<n>."
+# (ADR line 86: "GitHub issue URL or repo:<repo-id>#<n> shorthand. Optional on
+#  PROPOSED/RATIFIED ...")
+#
+# ISSUE_REF is OPTIONAL: absence MUST remain valid. Only a PRESENT-but-malformed
+# value is rejected, and it is collected alongside other errors (it does NOT
+# early-return), mirroring the SUPERSEDED_BY collect-more-errors pattern.
+# ---------------------------------------------------------------------------
+
+# Valid §1.3 TOKEN used as the "wrong shape" injected into ISSUE_REF. It is a
+# legal decision-TOKEN but NOT a legal ISSUE_REF — exactly the elevana-studio
+# dogfood finding (a decision-TOKEN leaked into ISSUE_REF and Gate A passed it
+# silently because ISSUE_REF was never validated). Referenced via a constant so
+# secret scanners do not read the keyword+literal adjacency as a credential.
+_DECISION_TOKEN_IN_ISSUE_REF = "HO-CONTEXT-MCP-TEST-20260513"
+_VALID_ISSUE_REF_SHORTHAND = "repo:hestai-context-mcp#77"
+_VALID_ISSUE_REF_URL = "https://github.com/elevanaltd/hestai-context-mcp/issues/53"
+# A §1.3-valid TOKEN for the host DECISION_RECORD (kept distinct from the
+# ISSUE_REF payload so a failure points unambiguously at ISSUE_REF).
+_ISSUE_REF_HOST_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-HOST-20260613"
+
+
+def _decision_record_with_issue_ref(token: str, issue_ref: str | None) -> str:
+    """Build a well-formed DECISION_RECORD, optionally carrying an ISSUE_REF.
+
+    When ``issue_ref`` is None the ISSUE_REF line is omitted entirely (the
+    optional-field case). The TOKEN is quoted (already covered by the bare
+    tests); the focus here is solely the ISSUE_REF shape.
+    """
+    issue_ref_line = f'  ISSUE_REF::"{issue_ref}"\n' if issue_ref is not None else ""
+    return (
+        "===DECISION_RECORD===\n"
+        "META:\n"
+        "  TYPE::DECISION_RECORD\n"
+        '  VERSION::"1.0"\n'
+        f'  TOKEN::"{token}"\n'
+        "  STATUS::PROPOSED\n"
+        "  TIER::OPERATIONAL\n"
+        f"{issue_ref_line}"
+        '  DECISION::"ISSUE_REF shape validation."\n'
+        '  BECAUSE::"ADR-RFC-ARCH-004 §4.1 invariant #10."\n'
+        '  AUTHORED_AT::"2026-06-13T00:00:00Z"\n'
+        "===END===\n"
+    )
+
+
+class TestTypeCheckerIssueRefShape:
+    @pytest.mark.unit
+    def test_issue_ref_holding_decision_token_rejected(self, tmp_path: Path) -> None:
+        """A decision-TOKEN in ISSUE_REF is rejected (the dogfood finding).
+
+        ISSUE_REF::"HO-...-20260513" is a valid TOKEN but NOT a valid ISSUE_REF.
+        """
+        content = _decision_record_with_issue_ref(
+            _ISSUE_REF_HOST_TOKEN, _DECISION_TOKEN_IN_ISSUE_REF
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors
+        # The bad value must be named in the error for operator diagnosis.
+        assert any(_DECISION_TOKEN_IN_ISSUE_REF in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_issue_ref_repo_shorthand_accepted(self, tmp_path: Path) -> None:
+        """ISSUE_REF::"repo:<repo-id>#<n>" passes the ISSUE_REF shape check."""
+        content = _decision_record_with_issue_ref(_ISSUE_REF_HOST_TOKEN, _VALID_ISSUE_REF_SHORTHAND)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+        assert not any("ISSUE_REF" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_issue_ref_github_url_accepted(self, tmp_path: Path) -> None:
+        """ISSUE_REF::"https://github.com/<org>/<repo>/issues/<n>" passes."""
+        content = _decision_record_with_issue_ref(_ISSUE_REF_HOST_TOKEN, _VALID_ISSUE_REF_URL)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+        assert not any("ISSUE_REF" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_issue_ref_absent_is_valid(self, tmp_path: Path) -> None:
+        """ISSUE_REF is OPTIONAL: a record with no ISSUE_REF field is valid."""
+        content = _decision_record_with_issue_ref(_ISSUE_REF_HOST_TOKEN, None)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+        assert not any("ISSUE_REF" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_real_ratified_record_with_issue_ref_still_validates(self, tmp_path: Path) -> None:
+        """Regression: a real RATIFIED AGR with a valid shorthand ISSUE_REF validates.
+
+        Mirrors the on-disk record
+        .hestai/decisions/HO-AGR-SEMANTIC-REVIEWER-ANALYSIS-TIER-20260611.oct.md
+        (ISSUE_REF::"repo:hestai-context-mcp#77"). Reproduced inline (TOKEN
+        localised so the uniqueness check on tmp_path stays clean).
+        """
+        content = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            "  TOKEN::HO-AGR-SEMANTIC-REVIEWER-ANALYSIS-TIER-20260611\n"
+            "  STATUS::RATIFIED\n"
+            "  TIER::TACTICAL\n"
+            '  AUTHORED_AT::"2026-06-11T00:00:00Z"\n'
+            '  RATIFIED_BY::"human:operator"\n'
+            '  RATIFIED_AT::"2026-06-11T00:00:00Z"\n'
+            f'  ISSUE_REF::"{_VALID_ISSUE_REF_SHORTHAND}"\n'
+            '  SCOPE::"hestai-context-mcp"\n'
+            '  DECISION::"Scoped semantic reviewer at analysis tier."\n'
+            '  BECAUSE::"Semantic second opinion catches what the human misses."\n'
+            "===END===\n"
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
