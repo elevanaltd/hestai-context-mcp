@@ -35,7 +35,7 @@ if ! command -v uv &>/dev/null; then
     exit 1
 fi
 
-echo "=== 0/4  Environment  (uv sync) ==="
+echo "=== 0/5  Environment  (uv sync) ==="
 if $DRY_RUN; then
     echo "  Would run: uv sync --extra validation (from $REPO_DIR)"
 else
