@@ -627,3 +627,32 @@ class TestTypeCheckerIssueRefDuplicateFieldRejected:
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False, "Expected invalid: duplicate ISSUE_REF fields"
         assert any("multiple times" in e for e in result.errors), result.errors
+
+
+# ---------------------------------------------------------------------------
+# ISSUE_REF_SHAPE_RE segment character-class guard
+#
+# _ISSUE_REF_SHAPE_RE uses [A-Za-z0-9._-]+ for GitHub owner and repo segments.
+# [^/\s]+ (the prior class) accepted characters like `"` that are not valid
+# in GitHub names; after outer-quote stripping a malformed quoted URL
+# ISSUE_REF::"https://github.com/org"/repo/issues/1" would pass because the
+# embedded `"` fell inside [^/\s]+.
+# ---------------------------------------------------------------------------
+
+_SHAPE_RE_HOST_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-SHAPE-RE-20260613"
+
+
+class TestTypeCheckerIssueRefShapeReSegments:
+    @pytest.mark.unit
+    def test_issue_ref_url_with_illegal_char_in_org_rejected(self, tmp_path: Path) -> None:
+        """GitHub URL with illegal character in org segment is rejected.
+
+        ISSUE_REF::"https://github.com/org"/repo/issues/1" — after outer-quote
+        stripping the embedded quote lands inside the org segment.
+        ``[A-Za-z0-9._-]+`` rejects this; ``[^/\\s]+`` (prior class) accepted it.
+        """
+        raw = 'ISSUE_REF::"https://github.com/elevanaltd\\"/hestai-context-mcp/issues/53"'
+        content = _decision_record_with_raw_issue_ref_line(_SHAPE_RE_HOST_TOKEN, raw)
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False, "Expected invalid: illegal char in GitHub org segment"
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors
