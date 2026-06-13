@@ -60,7 +60,7 @@ _ISSUE_REF_LINE_RE = re.compile(r"(?m)^[ \t]*ISSUE_REF::(.*)$")
 # ISSUE_REF shape per ADR-RFC-ARCH-004 §4.1 invariant #10: accepts ONLY the two
 # valid forms — the repo:<repo-id>#<n> shorthand or a GitHub issue URL.
 _ISSUE_REF_SHAPE_RE = re.compile(
-    r"^(?:repo:[A-Za-z0-9_-]+#[0-9]+|https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+)$"
+    r"^(?:repo:[A-Za-z0-9_-]+#[0-9]+|https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/issues/[0-9]+)$"
 )
 
 # TOKEN format validation per ADR-RFC-ARCH-004 §1.3
