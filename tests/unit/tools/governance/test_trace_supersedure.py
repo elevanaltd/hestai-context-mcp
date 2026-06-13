@@ -126,6 +126,49 @@ class TestErrorEnvelope:
         self._assert_envelope(result, "TOKEN_NOT_FOUND", "input_validation")
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "evil_token", ["../../../etc/passwd", "../secret", "..", "/etc/passwd"]
+    )
+    def test_traversal_token_is_not_found_no_escape(self, tmp_path: Path, evil_token: str) -> None:
+        """P1 SECURITY: trace_supersedure does NOT pre-validate the token, so the
+        path-traversal guard MUST live in discover_record. A traversal-shaped
+        token yields the clean TOKEN_NOT_FOUND envelope, no exception, and no
+        out-of-tree access.
+
+        A real AGR is planted OUTSIDE the decisions tree; if the guard were
+        missing, ``root / "../OUTSIDE.oct.md"`` could escape — here it must not
+        resolve. ``Path.read_text`` is guarded to fail loudly on any escape.
+        """
+        trace_supersedure = _trace_supersedure()
+        decisions = tmp_path / ".hestai" / "decisions"
+        decisions.mkdir(parents=True, exist_ok=True)
+        outside = tmp_path / ".hestai" / "OUTSIDE.oct.md"
+        outside.write_text(
+            "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n"
+            "  TOKEN::HO-CONTEXT-MCP-OUTSIDE-20260101\n  STATUS::RATIFIED\n"
+            '  TIER::STRATEGIC\n  AUTHORED_AT::"2026-01-01T00:00:00Z"\n'
+            '  DECISION::"x"\n  BECAUSE::"y"\n===END===\n',
+            encoding="utf-8",
+        )
+
+        decisions_resolved = decisions.resolve()
+        real_read_text = Path.read_text
+
+        def guarded_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            resolved = self.resolve()
+            assert str(resolved).startswith(
+                str(decisions_resolved)
+            ), f"path escape — trace_supersedure read outside tree: {resolved}"
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(Path, "read_text", guarded_read_text)
+            result = trace_supersedure(str(tmp_path), evil_token)
+
+        # Clean envelope, no exception, no escape.
+        self._assert_envelope(result, "TOKEN_NOT_FOUND", "input_validation")
+
+    @pytest.mark.unit
     def test_chain_broken_distinct_from_not_found(self, tmp_path: Path) -> None:
         """A mid-chain SUPERSEDED_BY pointing at a missing TOKEN => CHAIN_BROKEN.
 

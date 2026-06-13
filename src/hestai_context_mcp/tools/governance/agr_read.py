@@ -184,7 +184,20 @@ def discover_record(working_dir: Path, token: str) -> Path | None:
     a co-located non-AGR ``.oct.md`` can never resolve as a record (F1 guard).
     As a fallback (a record whose filename drifted from its TOKEN), the store is
     scanned by content. Deterministic for identical filesystem state.
+
+    SECURITY (P1 — fix-the-class path-traversal guard): the ``token`` is
+    validated against the §1.3 TOKEN regex BEFORE it is ever joined into a path
+    (``root / f"{token}.oct.md"``) or used in an ``rglob`` glob. The §1.3 format
+    ``^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$`` admits no ``/``, ``.`` or
+    ``..`` sequence, so a traversal-shaped token (e.g. ``../../../etc/passwd``)
+    is rejected here — closing the escape for EVERY caller at once, including
+    ``trace_supersedure``, which does not pre-validate. Callers that need the
+    explicit TOKEN_MALFORMED envelope (lookup_decision) still validate upstream;
+    this guard is defence-in-depth and simply returns ``None`` (not found).
     """
+    if not is_valid_token(token):
+        return None
+
     root = decisions_root(working_dir)
     if not root.exists():
         return None
