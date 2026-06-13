@@ -56,6 +56,12 @@ _SUPERSEDED_BY_RE = re.compile(r'SUPERSEDED_BY::"([^"]+)"')
 # lives OUTSIDE the alternation so BOTH branches reject trailing garbage.
 _ISSUE_REF_RE = re.compile(r'(?m)ISSUE_REF::(?:"([^"]+)"|([^"\s]+))\s*$')
 
+# ISSUE_REF presence detector: matches ANY line that starts with ISSUE_REF::
+# (with optional leading whitespace). Used alongside _ISSUE_REF_RE to detect the
+# trailing-garbage bypass: if this matches but _ISSUE_REF_RE does not, the line
+# is present-but-malformed and must be reported as an error.
+_ISSUE_REF_LINE_PRESENT_RE = re.compile(r"(?m)^\s*ISSUE_REF::")
+
 # ISSUE_REF shape per ADR-RFC-ARCH-004 §4.1 invariant #10: accepts ONLY the two
 # valid forms — the repo:<repo-id>#<n> shorthand or a GitHub issue URL.
 _ISSUE_REF_SHAPE_RE = re.compile(
@@ -328,6 +334,12 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
     # ISSUE_REF is OPTIONAL: absence is valid. When present, it MUST parse as a
     # GitHub issue URL or the repo:<repo-id>#<n> shorthand. Collect alongside
     # other errors (no early return), mirroring the SUPERSEDED_BY check.
+    #
+    # Bypass fix: _ISSUE_REF_RE uses \s*$ end-anchoring so trailing garbage
+    # causes it to return None — making check 5a a no-op for a malformed line.
+    # The presence detector (_ISSUE_REF_LINE_PRESENT_RE) catches this: if an
+    # ISSUE_REF:: line exists but strict extraction returned None the line is
+    # present-but-malformed and we emit a named error (ADR-RFC-ARCH-004 §4.1 #10).
     issue_ref = _extract_issue_ref(content)
     if issue_ref is not None and not _ISSUE_REF_SHAPE_RE.match(issue_ref):
         errors.append(
@@ -335,6 +347,16 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
             "ISSUE_REF must be a GitHub issue URL "
             "(https://github.com/<org>/<repo>/issues/<n>) or the "
             "repo:<repo-id>#<n> shorthand (ADR-RFC-ARCH-004 §4.1 #10)."
+        )
+        # Continue to collect more errors
+    elif issue_ref is None and _ISSUE_REF_LINE_PRESENT_RE.search(content):
+        errors.append(
+            "ISSUE_REF line is present but could not be parsed. "
+            "ISSUE_REF must be one of: "
+            'ISSUE_REF::"repo:<repo-id>#<n>" or ISSUE_REF::<repo-id>#<n> '
+            "(bare) or a GitHub issue URL. "
+            "Remove trailing content or correct the value "
+            "(ADR-RFC-ARCH-004 §4.1 #10)."
         )
         # Continue to collect more errors
 
