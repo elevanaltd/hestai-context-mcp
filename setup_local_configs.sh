@@ -44,8 +44,12 @@ else
 fi
 echo ""
 
-echo "Checking server import..."
-"$VENV_PYTHON" -c "import hestai_context_mcp; print('  ✓ Package importable')"
+if $DRY_RUN; then
+    echo "Skipping import check in dry-run (no .venv guaranteed)."
+else
+    echo "Checking server import..."
+    "$VENV_PYTHON" -c "import hestai_context_mcp; print('  ✓ Package importable')"
+fi
 echo ""
 
 # ── 1. Claude Code (~/.claude.json) ──────────────────────────────────────────
