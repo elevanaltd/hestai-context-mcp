@@ -477,3 +477,76 @@ class TestTypeCheckerIssueRefShape:
         )
         result = validate_octave_content(tmp_path, content)
         assert result.valid, result.errors
+
+
+# ---------------------------------------------------------------------------
+# ISSUE_REF trailing-garbage rejection (ADR-RFC-ARCH-004 §4.1 #10)
+#
+# _ISSUE_REF_RE end-anchors (\s*$) reject trailing garbage at the regex level,
+# but that means _extract_issue_ref returns None for a malformed line, and check
+# 5a (``if issue_ref is not None``) silently skips it.  A presence detector must
+# close this bypass: if any ISSUE_REF:: line exists in content but strict
+# extraction fails, Gate A must emit a named error.
+# ---------------------------------------------------------------------------
+
+
+def _decision_record_with_raw_issue_ref_line(token: str, raw_issue_ref_line: str) -> str:
+    """Build a DECISION_RECORD with a caller-supplied raw ISSUE_REF field line.
+
+    ``raw_issue_ref_line`` is the exact text of the ISSUE_REF field including
+    any trailing garbage (e.g. ``ISSUE_REF::"repo:hestai-context-mcp#77" EXTRA``).
+    The two-space indent is added here.
+    """
+    return (
+        "===DECISION_RECORD===\n"
+        "META:\n"
+        "  TYPE::DECISION_RECORD\n"
+        '  VERSION::"1.0"\n'
+        f'  TOKEN::"{token}"\n'
+        "  STATUS::PROPOSED\n"
+        "  TIER::OPERATIONAL\n"
+        f"  {raw_issue_ref_line}\n"
+        '  DECISION::"ISSUE_REF trailing-garbage guard."\n'
+        '  BECAUSE::"ADR-RFC-ARCH-004 §4.1 invariant #10."\n'
+        '  AUTHORED_AT::"2026-06-13T00:00:00Z"\n'
+        "===END===\n"
+    )
+
+
+# §1.3-valid TOKEN for the host DECISION_RECORD in trailing-garbage tests.
+_ISSUE_REF_TRAILING_HOST_TOKEN = "HO-CONTEXT-MCP-ISSUE-REF-TRAILING-20260613"
+
+
+class TestTypeCheckerIssueRefTrailingGarbageRejected:
+    @pytest.mark.unit
+    def test_issue_ref_trailing_garbage_quoted_rejected(self, tmp_path: Path) -> None:
+        """ISSUE_REF::"repo:..#77" EXTRA must fail validation (quoted + trailing garbage).
+
+        When a quoted ISSUE_REF line has trailing content the end-anchor causes
+        _ISSUE_REF_RE to not match, _extract_issue_ref returns None, and check 5a
+        is skipped -- the malformed line silently passes Gate A.  The presence
+        detector must catch this and return valid=False with a named ISSUE_REF error.
+        """
+        raw = f'ISSUE_REF::"{_VALID_ISSUE_REF_SHORTHAND}" trailing-garbage'
+        content = _decision_record_with_raw_issue_ref_line(
+            _ISSUE_REF_TRAILING_HOST_TOKEN, raw
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False, "Expected invalid: quoted ISSUE_REF with trailing garbage"
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_issue_ref_trailing_garbage_bare_rejected(self, tmp_path: Path) -> None:
+        """ISSUE_REF::repo:..#77 EXTRA must fail validation (bare + trailing garbage).
+
+        Same bypass as the quoted form: bare ISSUE_REF line with trailing content
+        causes _ISSUE_REF_RE to not match, extraction returns None, check 5a
+        skips.  The presence detector must emit a named ISSUE_REF error.
+        """
+        raw = f"ISSUE_REF::{_VALID_ISSUE_REF_SHORTHAND} trailing-garbage"
+        content = _decision_record_with_raw_issue_ref_line(
+            _ISSUE_REF_TRAILING_HOST_TOKEN, raw
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False, "Expected invalid: bare ISSUE_REF with trailing garbage"
+        assert any("ISSUE_REF" in e for e in result.errors), result.errors
