@@ -23,14 +23,20 @@ _CONTEXT_BUDGET_CHARS = 25_000
 # quote-optional per the AGR canonical-form convergence ruling.
 # Matches the bare canonical form  TOKEN::<value> / ID::<value>  AND the legacy
 # quoted form  TOKEN::"<value>" / ID::"<value>"  where <value> == the token.
-# Compiled with re.MULTILINE; EVERY branch (quoted and bare) ends with a
-# (?:\s*$) line-end anchor (only trailing whitespace, then end-of-line) so that:
-#   - a shorter token (HO-FOO-20260101) never prefix-matches a longer one, and
-#   - a trailing-garbage line (TOKEN::"<value>" junk) is NOT counted as a clean
-#     existence hit (cubic P2 — the quoted branches were previously unanchored,
-#     and a (?=\s|$) lookahead was satisfied by the leading space of the junk).
+# Compiled with re.MULTILINE; EVERY branch (quoted and bare) is LINE-ANCHORED at
+# BOTH ends:
+#   - line START via ``^\s*`` — admits OCTAVE indentation but forbids a
+#     ``*TOKEN::`` / ``*ID::``-suffixed key (e.g. ``DOCUMENT_TOKEN::`` /
+#     ``PARENT_ID::``) from substring-leaking as a clean existence hit
+#     (issue #85 — the previous template had no line-start anchor), and
+#   - line END via ``(?:\s*$)`` (only trailing whitespace, then end-of-line) so:
+#       - a shorter token (HO-FOO-20260101) never prefix-matches a longer one, and
+#       - a trailing-garbage line (TOKEN::"<value>" junk) is NOT counted as a
+#         clean existence hit (cubic P2 — the quoted branches were previously
+#         unanchored, and a (?=\s|$) lookahead was satisfied by the leading
+#         space of the junk).
 _FIELD_EXACT_RE_TEMPLATE = (
-    r'(?m)(?:TOKEN::\s*(?:"{token}"|{token})\s*$' r'|ID::\s*(?:"{token}"|{token})\s*$)'
+    r'(?m)(?:^\s*TOKEN::\s*(?:"{token}"|{token})\s*$' r'|^\s*ID::\s*(?:"{token}"|{token})\s*$)'
 )
 
 

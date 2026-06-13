@@ -30,17 +30,25 @@ from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 # Pattern: starts with ===TYPENAME=== on the very first line.
 _SENTINEL_RE = re.compile(r"\A===([A-Z_]+)===\s*(?:\r?\n|$)")
 
-# TYPE field in META block
-_TYPE_RE = re.compile(r"(?m)TYPE::(\w+)")
+# TYPE field in META block. LINE-ANCHORED (issue #85): the KEY must be exactly
+# ``TYPE`` at line start — a leading whitespace-only indent is admitted (OCTAVE
+# META bodies are indented) but NO other characters may precede it, so a
+# ``*TYPE::``-suffixed key such as ``DOCUMENT_TYPE::`` / ``CONTENT_TYPE::`` no
+# longer substring-leaks via ``.search()``. The trailing ``\s*$`` end-anchor
+# rejects trailing garbage (``TYPE::DECISION_RECORD EXTRA``). Mirrors the
+# read-side ``agr_read._TYPE_IS_DECISION_RECORD_RE`` anchored approach.
+_TYPE_RE = re.compile(r"(?m)^\s*TYPE::(\w+)\s*$")
 
 # TOKEN field (DECISION_RECORD): quote-optional (AGR canonical-form convergence).
 # Accepts BOTH the bare canonical form  TOKEN::VALUE  and the legacy quoted form
-# TOKEN::"VALUE".  The end-anchor (\s*$) lives OUTSIDE the alternation so BOTH
-# branches are line-anchored: a trailing-garbage line such as
-# TOKEN::"HO-…-20260513" EXTRA  or  TOKEN::HO-…-20260513 EXTRA  does NOT match
-# (cubic P2 — the §1.3 _TOKEN_FORMAT_RE only checks the captured value, so it
-# cannot catch trailing junk; the anchor must).
-_TOKEN_RE = re.compile(r'(?m)TOKEN::(?:"([^"]+)"|([^"\s]+))\s*$')
+# TOKEN::"VALUE".  LINE-ANCHORED at BOTH ends (issue #85): the line-START anchor
+# ``^\s*`` admits OCTAVE indentation but forbids a ``*TOKEN::``-suffixed key
+# (e.g. ``DOCUMENT_TOKEN::``) from substring-leaking via ``.search()``; the
+# end-anchor (\s*$) lives OUTSIDE the alternation so BOTH branches reject a
+# trailing-garbage line such as  TOKEN::"HO-…-20260513" EXTRA  /
+# TOKEN::HO-…-20260513 EXTRA  (cubic P2 — the §1.3 _TOKEN_FORMAT_RE only checks
+# the captured value, so it cannot catch trailing junk; the anchor must).
+_TOKEN_RE = re.compile(r'(?m)^\s*TOKEN::(?:"([^"]+)"|([^"\s]+))\s*$')
 
 # ID field (facet cards): quote-optional. Accepts bare  ID::VALUE  and quoted
 # ID::"VALUE".  The end-anchor (\s*$) lives OUTSIDE the alternation so BOTH the
@@ -48,8 +56,13 @@ _TOKEN_RE = re.compile(r'(?m)TOKEN::(?:"([^"]+)"|([^"\s]+))\s*$')
 # (cubic P2 — the quoted branch was previously unanchored).
 _ID_QUOTED_RE = re.compile(r'(?m)^  ID::(?:"([^"]+)"|([^"\s]+))\s*$')
 
-# SUPERSEDED_BY field: quoted string
-_SUPERSEDED_BY_RE = re.compile(r'SUPERSEDED_BY::"([^"]+)"')
+# SUPERSEDED_BY field: quoted string. LINE-ANCHORED (issue #85): ``^\s*`` admits
+# OCTAVE indentation but forbids a ``*SUPERSEDED_BY::``-suffixed key (e.g.
+# ``PARENT_SUPERSEDED_BY::``) from substring-leaking a supersedure target via
+# ``.search()`` — this is the supersedure-corruption vector the issue exists to
+# kill. ``\s*$`` rejects trailing garbage; the quoted-only value behavior is
+# unchanged (only anchors added).
+_SUPERSEDED_BY_RE = re.compile(r'(?m)^\s*SUPERSEDED_BY::"([^"]+)"\s*$')
 
 # TOKEN format validation per ADR-RFC-ARCH-004 §1.3
 # ^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$
@@ -64,8 +77,12 @@ _DECISION_RECORD_TYPE = "DECISION_RECORD"
 _FACET_CARD_TYPES = frozenset({"CONCEPT_CARD", "FRAME_CARD", "CLUSTER_CARD", "PHASE_CARD"})
 _KNOWN_TYPES = frozenset([_DECISION_RECORD_TYPE]) | _FACET_CARD_TYPES
 
-# REPO_ID field for facet cards
-_REPO_ID_RE = re.compile(r"REPO_ID::([^\s]+)")
+# REPO_ID field for facet cards. LINE-ANCHORED (issue #85, same *FIELD:: class):
+# ``^\s*`` admits OCTAVE indentation but forbids a ``*REPO_ID::``-suffixed key
+# (e.g. ``SOURCE_REPO_ID::``) from substring-leaking via ``.search()``. The
+# trailing ``\s*$`` rejects a trailing-garbage line; the captured value's own
+# comma/whitespace cleanup still happens in ``_extract_repo_id``.
+_REPO_ID_RE = re.compile(r"(?m)^\s*REPO_ID::([^\s]+)\s*$")
 
 # Safe slug pattern for REPO_ID validation (alphanumeric, hyphens, underscores only)
 _SAFE_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
