@@ -202,5 +202,6 @@ class TestPurityAndRegexOnly:
         assert source is not None
         with open(source, encoding="utf-8") as fh:
             module_text = fh.read()
-        assert "import ast" not in module_text
+        # Reject BOTH ``import ast`` and ``from ast import …`` (P2 hardening).
+        assert "import ast" not in module_text and "from ast " not in module_text
         assert "octave_mcp" not in module_text
