@@ -194,7 +194,7 @@ try:
     from octave_mcp import validate
     return RealOctaveValidator(validate)
 except ImportError:
-    return NullOctaveValidator()  # Gate B skipped, Gate A (regex) still enforced
+    return UnavailableOctaveValidator()  # Gate B skipped, Gate A (regex) still enforced
 ```
 
 This means the server works without octave-mcp installed. Installing `--extra validation`
