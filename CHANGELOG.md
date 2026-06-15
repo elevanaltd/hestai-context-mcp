@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.8.0] — 2026-06-15 — AGR Read-Side & Gate-A Hardening
+
 ### Added
 - AGR read-side tools: `list_decisions`, `lookup_decision`, `trace_supersedure` — query Agent-Readable Governance Records directly from the MCP server (PR #83)
 - AGR parser: tokeniser + linker for DECISION_RECORD-typed `.oct.md` files (PR #83)
@@ -15,11 +19,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - AGR semantic review integration: analysis-tier reviewer wired into AGR PR flow (PR #77)
 - Scoped semantic AGR reviewer agent at the analysis tier (PR #77)
 - `.env` loaded at server startup so Gate C prose mode resolves credentials
+- `resolution_chain_status` completeness signal in `lookup_decision` response — indicates whether the decision chain is terminal, superseded, or unresolved (PR #93, issue #87)
+- Gate-A ISSUE_REF shape enforcement in type checker — validates org/repo/number format (ADR-004 §4.1)
 
 ### Fixed
 - `list_decisions` scoped to DECISION_RECORD-typed files only; co-located non-AGR artifacts excluded (PR #83)
 - TYPE detection line-anchored to exclude `*TYPE::-suffixed` non-AGR fields (PR #83)
 - GitGuardian false positive on AGR token fixtures neutralised in CI
+- Gate-A `_TOKEN_RE`/`_SUPERSEDED_BY_RE` anchored; class-guard meta-test added — closes full `*FIELD::` substring-leak class (PR #91, issue #85)
+- Gate-A `TYPE`/`REPO_ID`/lexer-field extractors line-anchored to prevent `*FIELD::` substring leaks (PR #91, issue #85)
+- `_ISSUE_REF_RE` anchored; ISSUE_REF presence detector hardened; duplicate field rejected (ADR-004 §4.1)
+- ISSUE_REF trailing-garbage bypass closed (ADR-004 §4.1)
+- `ISSUE_REF_SHAPE_RE` org/repo segment character class tightened (ADR-004 §4.1)
+- Setup: skip import check in dry-run mode
+- Setup: run `uv sync --extra validation` before client registration
+
+### Refactored
+- Gate-A ISSUE_REF extractor+detector pair collapsed to single greedy regex (ADR-004 §4.1)
+
+### Chore
+- Setup: fix stale 0/4 step label to 0/5
+
+### Docs
+- Comprehensive README rewrite with supplementary docs (PR #94)
+- Claude / Agent Configuration section added to README (PR #94)
+- `UnavailableOctaveValidator` class name corrected in architecture example (PR #94)
 
 ### Records Added
 - `HO-AGR-SEMANTIC-REVIEWER-ANALYSIS-TIER-20260611`
@@ -169,4 +193,5 @@ This milestone implements the full ADR-0013 Portable Session State specification
 
 ---
 
-[Unreleased]: https://github.com/elevanaltd/hestai-context-mcp/compare/main...HEAD
+[Unreleased]: https://github.com/elevanaltd/hestai-context-mcp/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/elevanaltd/hestai-context-mcp/compare/v0.7.0...v0.8.0
