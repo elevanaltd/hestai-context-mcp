@@ -40,6 +40,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientAuthError,
     AIClientProtocolError,
     AIClientTransportError,
+    AIClientTruncationError,
     CompletionRequest,
 )
 
@@ -163,12 +164,52 @@ class OpenAICompatAIClient:
         message = first.get("message")
         if not isinstance(message, dict):
             raise AIClientProtocolError("provider response 'choices[0].message' is not an object")
+        # Issue #96: inspect the stop condition BEFORE the content type-check.
+        # ``finish_reason == "length"`` means the generation hit the output-token
+        # cap (budget exhaustion) — a well-formed envelope whose body is
+        # incomplete or null. This is a distinct, actionable condition, not a
+        # malformed response, so it must surface as ``AIClientTruncationError``
+        # carrying the real tokens billed. We deliberately do NOT fall back to
+        # ``reasoning``/``reasoning_content``: surfacing chain-of-thought as a
+        # compiled artifact is a safety hazard for governance content.
+        finish_reason = first.get("finish_reason")
+        if finish_reason == "length":
+            consumed, prompt_tokens, completion_tokens = self._extract_usage(body)
+            raise AIClientTruncationError(
+                "provider truncated output at the token cap (finish_reason='length')",
+                consumed_tokens=consumed,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
         content = message.get("content")
         if not isinstance(content, str):
             raise AIClientProtocolError(
                 "provider response 'choices[0].message.content' is not a string"
             )
         return content
+
+    @staticmethod
+    def _extract_usage(body: object) -> tuple[int, int | None, int | None]:
+        """Pull token counts from an OpenAI-compat ``usage`` block.
+
+        Returns ``(total_tokens, prompt_tokens, completion_tokens)``. Missing or
+        malformed fields degrade to ``0`` for the total and ``None`` for the
+        split — telemetry being unavailable must never mask the truncation.
+        """
+        usage = body.get("usage") if isinstance(body, dict) else None
+        if not isinstance(usage, dict):
+            return 0, None, None
+
+        def _as_int(value: object) -> int | None:
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+        prompt_tokens = _as_int(usage.get("prompt_tokens"))
+        completion_tokens = _as_int(usage.get("completion_tokens"))
+        total = _as_int(usage.get("total_tokens"))
+        if total is None:
+            # Reconstruct the total from the split when the provider omits it.
+            total = (prompt_tokens or 0) + (completion_tokens or 0)
+        return total, prompt_tokens, completion_tokens
 
 
 def build_default_ai_client(*, tier: str = "default") -> AIClient | None:

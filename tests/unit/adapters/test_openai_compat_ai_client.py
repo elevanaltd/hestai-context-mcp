@@ -288,6 +288,138 @@ class TestProtocolErrorPath:
                 await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
 
 
+class TestTruncationPath:
+    """Issue #96: finish_reason='length' is budget exhaustion, not malformed.
+
+    A reasoning model routed onto an upstream that hits the output cap returns
+    a well-formed envelope with ``finish_reason='length'`` and (often) a null
+    ``content``. The adapter must inspect ``finish_reason``/``usage`` BEFORE the
+    ``isinstance(content, str)`` check and raise ``AIClientTruncationError``
+    carrying the real tokens consumed — never collapse the spend onto a generic
+    ``AIClientProtocolError`` (which would lose the cost telemetry).
+    """
+
+    @pytest.mark.asyncio
+    async def test_length_with_null_content_raises_truncation_with_usage(self):
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "length"},
+                    ],
+                    "usage": {
+                        "prompt_tokens": 200,
+                        "completion_tokens": 8000,
+                        "total_tokens": 8200,
+                    },
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        exc = excinfo.value
+        assert exc.consumed_tokens == 8200
+        assert exc.prompt_tokens == 200
+        assert exc.completion_tokens == 8000
+
+    @pytest.mark.asyncio
+    async def test_length_takes_precedence_over_content_type_check(self):
+        """finish_reason='length' wins even when content IS a (partial) string.
+
+        Truncation must be detected from the stop condition, not inferred from a
+        null body; a partial string with finish_reason='length' is still a
+        truncated, untrustworthy result.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": "partial text"},
+                            "index": 0,
+                            "finish_reason": "length",
+                        },
+                    ],
+                    "usage": {"total_tokens": 8000},
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert excinfo.value.consumed_tokens == 8000
+
+    @pytest.mark.asyncio
+    async def test_length_without_usage_raises_truncation_zero_tokens(self):
+        """No usage block → still a truncation, consumed_tokens degrades to 0.
+
+        Better to surface the truncation (and not retry) than to mislabel it as
+        a protocol error; the cost telemetry is simply unavailable.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "length"},
+                    ],
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert excinfo.value.consumed_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_null_content_without_length_still_protocol_error(self):
+        """A null content with a *non*-length stop reason stays a protocol error.
+
+        Only ``finish_reason='length'`` is reclassified; genuinely malformed
+        shapes (null content on a 'stop') keep the existing protocol-error path.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientProtocolError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "stop"},
+                    ],
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientProtocolError):
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+
 class TestRequestShape:
     @pytest.mark.asyncio
     async def test_request_body_contains_prompts_and_model(self):
