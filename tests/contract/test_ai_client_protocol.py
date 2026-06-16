@@ -34,7 +34,11 @@ class TestProtocolConformance:
 
     def test_test_stub_satisfies_protocol(self):
         """Stubs used by other tests must track the Protocol (regression guard)."""
-        from hestai_context_mcp.ports.ai_client import AIClient, CompletionRequest
+        from hestai_context_mcp.ports.ai_client import (
+            AIClient,
+            CompletionRequest,
+            CompletionResult,
+        )
 
         class _Stub:
             async def __aenter__(self):
@@ -43,8 +47,8 @@ class TestProtocolConformance:
             async def __aexit__(self, exc_type, exc, tb):
                 return None
 
-            async def complete_text(self, request: CompletionRequest) -> str:
-                return "ok"
+            async def complete_text(self, request: CompletionRequest) -> CompletionResult:
+                return CompletionResult(content="ok")
 
         assert isinstance(_Stub(), AIClient)
 

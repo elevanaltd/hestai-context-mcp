@@ -293,11 +293,17 @@ async def _run_completion(
     system_prompt: str,
     user_prompt: str,
 ) -> str:
-    """Invoke the AIClient once inside its async-context-manager."""
+    """Invoke the AIClient once inside its async-context-manager.
+
+    Issue #98: ``complete_text`` now returns a ``CompletionResult``; the
+    clock-in synthesis path only needs the generated content (it discards usage
+    and cost — clock-in does not report per-call cost metrics).
+    """
     async with client as c:
-        return await c.complete_text(
+        result = await c.complete_text(
             CompletionRequest(system_prompt=system_prompt, user_prompt=user_prompt)
         )
+        return result.content
 
 
 def _sanitise_single_line(value: str) -> str:

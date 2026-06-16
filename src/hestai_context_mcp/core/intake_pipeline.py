@@ -129,7 +129,12 @@ async def run_intake_pipeline(
         ZERO linker calls.
     """
     ctx = intake_context
-    last_metrics: CompileMetrics = {"tokens": 0, "cost": 0.0, "model": ""}
+    last_metrics: CompileMetrics = {
+        "tokens": 0,
+        "cost": 0.0,
+        "model": "",
+        "cost_is_estimate": True,
+    }
     last_errors: list[str] = []
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
