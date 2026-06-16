@@ -33,6 +33,7 @@ from typing import Protocol, runtime_checkable
 
 __all__ = [
     "CompletionRequest",
+    "CompletionResult",
     "AIClient",
     "AIClientError",
     "AIClientAuthError",
@@ -57,6 +58,27 @@ class CompletionRequest:
     max_tokens: int = 1024
     temperature: float = 0.3
     timeout_seconds: int = 15
+
+
+@dataclass(frozen=True)
+class CompletionResult:
+    """Provider-agnostic completion result with real usage accounting.
+
+    Carries the generated ``content`` plus the provider's *real* token usage
+    and *real* cost so the application layer reports accurate metrics rather
+    than local estimates (issue #98). All fields are vendor-free primitives.
+
+    ``cost`` is the real USD cost the provider billed for the call, or ``None``
+    when the provider does not report one. A ``None`` cost signals the caller to
+    fall back to its flat-rate estimate (and to label it as an estimate, not an
+    actual). The token fields are ``None`` when the provider omits a usage block.
+    """
+
+    content: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    cost: float | None = None
 
 
 class AIClientError(Exception):
@@ -107,7 +129,11 @@ class AIClientTruncationError(AIClientError):
 
     ``consumed_tokens`` is the total tokens the provider reported as
     billed for the call. ``prompt_tokens`` / ``completion_tokens`` carry
-    the split when the provider supplies it, else ``None``.
+    the split when the provider supplies it, else ``None``. ``cost`` is
+    the provider's real USD cost for the (billed) truncated call when
+    reported, else ``None`` — the caller prices the real consumed tokens
+    with the real cost when available, and otherwise falls back to a
+    labelled flat-rate estimate (issue #98).
     """
 
     def __init__(
@@ -117,11 +143,13 @@ class AIClientTruncationError(AIClientError):
         consumed_tokens: int = 0,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        cost: float | None = None,
     ) -> None:
         super().__init__(message)
         self.consumed_tokens = consumed_tokens
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
+        self.cost = cost
 
 
 @runtime_checkable
@@ -146,8 +174,13 @@ class AIClient(Protocol):
         exc_tb: object | None,
     ) -> None: ...
 
-    async def complete_text(self, request: CompletionRequest) -> str:
-        """Return raw completion text for ``request``.
+    async def complete_text(self, request: CompletionRequest) -> CompletionResult:
+        """Return the completion result for ``request``.
+
+        The result carries the generated content plus the provider's real
+        token usage and real cost (issue #98) so callers report accurate
+        metrics. ``cost``/usage fields are ``None`` when the provider does
+        not report them.
 
         Raises:
             AIClientAuthError: No credential / credential rejected.
@@ -155,6 +188,6 @@ class AIClient(Protocol):
             AIClientProtocolError: Malformed provider response.
             AIClientTruncationError: Output hit the token cap before
                 finishing (budget exhausted); carries the real tokens
-                consumed.
+                consumed and the real cost when reported.
         """
         ...

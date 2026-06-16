@@ -100,6 +100,64 @@ class TestCompletionRequestShape:
             assert hint in allowed, f"CompletionRequest.{name} has non-primitive hint: {hint!r}"
 
 
+class TestCompletionResultShape:
+    """Issue #98: ``complete_text`` returns a vendor-free result with real usage.
+
+    The port carries the provider's real token usage and real cost so callers
+    can report accurate metrics instead of local estimates. ``cost`` is
+    ``float | None`` (None when the provider reports no cost → caller falls back
+    to a labelled estimate). All names stay vendor-agnostic (PROD::I3).
+    """
+
+    def test_exported_in_all(self):
+        import hestai_context_mcp.ports.ai_client as mod
+
+        assert "CompletionResult" in mod.__all__
+
+    def test_required_fields(self):
+        from hestai_context_mcp.ports.ai_client import CompletionResult
+
+        res = CompletionResult(
+            content="hello",
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            cost=0.0042,
+        )
+        assert res.content == "hello"
+        assert res.prompt_tokens == 10
+        assert res.completion_tokens == 20
+        assert res.total_tokens == 30
+        assert res.cost == 0.0042
+
+    def test_usage_and_cost_default_to_none(self):
+        from hestai_context_mcp.ports.ai_client import CompletionResult
+
+        res = CompletionResult(content="hello")
+        assert res.prompt_tokens is None
+        assert res.completion_tokens is None
+        assert res.total_tokens is None
+        assert res.cost is None
+
+    def test_is_frozen(self):
+        from hestai_context_mcp.ports.ai_client import CompletionResult
+
+        res = CompletionResult(content="x")
+        with pytest.raises((AttributeError, Exception)):
+            res.content = "other"  # type: ignore[misc]
+
+    def test_type_hints_are_vendor_free_primitives(self):
+        from hestai_context_mcp.ports.ai_client import CompletionResult
+
+        hints = get_type_hints(CompletionResult)
+        expected = {"content", "prompt_tokens", "completion_tokens", "total_tokens", "cost"}
+        assert set(hints.keys()) == expected
+        # str, int|None, float|None — assert no vendor type leaked.
+        for hint in hints.values():
+            assert "anthropic" not in repr(hint).lower()
+            assert "openai" not in repr(hint).lower()
+
+
 class TestAIClientProtocol:
     """``AIClient`` is a runtime-checkable Protocol with ``complete_text`` coroutine."""
 
@@ -293,6 +351,24 @@ class TestTruncationErrorTaxonomy:
         exc = AIClientTruncationError("output truncated", consumed_tokens=8000)
         assert exc.prompt_tokens is None
         assert exc.completion_tokens is None
+
+    def test_carries_optional_real_cost(self):
+        """Issue #98: the truncation error also carries the provider's real cost.
+
+        A truncated call is still billed; when the provider reports the cost the
+        caller prices the real consumed tokens with the real cost rather than the
+        flat-rate estimate. ``cost`` defaults to None when unavailable.
+        """
+        from hestai_context_mcp.ports.ai_client import AIClientTruncationError
+
+        exc = AIClientTruncationError("output truncated", consumed_tokens=8000, cost=0.0142)
+        assert exc.cost == 0.0142
+
+    def test_cost_defaults_to_none(self):
+        from hestai_context_mcp.ports.ai_client import AIClientTruncationError
+
+        exc = AIClientTruncationError("output truncated", consumed_tokens=8000)
+        assert exc.cost is None
 
     def test_is_vendor_free(self):
         """PROD::I3: the new exception must not name a provider in source."""
