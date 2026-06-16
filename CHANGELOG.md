@@ -11,6 +11,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - `AIClientTruncationError` in the AIClient port taxonomy — models output-token budget exhaustion (provider `finish_reason="length"`) distinctly from a malformed response, carrying the real `consumed_tokens` (issue #96)
 - Config-sourced provider upstream-routing pin: `HESTAI_AI_PROVIDER_ORDER` (comma-separated upstream slugs, OpenRouter) and `HESTAI_AI_PROVIDER_ROUTING=off` to disable. Defaults to a preferred order with `allow_fallbacks` preserved (prefer, not require), so a preferred-upstream outage degrades gracefully (issue #96)
+- `CompletionResult` in the AIClient port — `complete_text` returns content plus the provider's real token usage and real cost (vendor-free) so callers report accurate metrics (issue #98)
+- `metrics.cost_is_estimate` flag on `submit_governance` prose-mode and governance-review results — `true` when the cost is a flat-rate local estimate (provider reported none), so an estimate is never mistaken for a billed actual (issue #98)
+
+### Changed
+- `metrics.cost` and `metrics.tokens` now report the provider's **real** figures from the OpenRouter response (via `usage: {include: true}`) instead of local estimates. Previously `cost` overstated real spend by ~15× (flat $0.01/1k) and `tokens` were char-estimated. The flat-rate estimate is retained only for the pre-call cost-projection / abort guard, and as a clearly-labelled fallback when the provider reports no cost (issue #98)
 
 ### Fixed
 - Stage-2 prose→OCTAVE (`submit_governance` prose mode) no longer fails non-deterministically when OpenRouter routes a reasoning model onto an upstream that truncates at the token cap: the pin reduces routing nondeterminism and `finish_reason="length"` is now surfaced as an actionable truncation error instead of an opaque protocol error (issue #96)
