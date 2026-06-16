@@ -31,6 +31,7 @@ def _build_client_with_transport(
     base_url: str = "https://openrouter.ai/api/v1",
     model: str = "google/gemini-2.0-flash-lite",
     timeout: float = 5.0,
+    provider_payload: dict | None = None,
 ):
     """Create adapter with an injected ``httpx.MockTransport`` for tests."""
     from hestai_context_mcp.adapters.openai_compat_ai_client import (
@@ -44,6 +45,7 @@ def _build_client_with_transport(
         model=model,
         timeout_seconds=timeout,
         transport=transport,
+        provider_payload=provider_payload,
     )
 
 
@@ -288,6 +290,275 @@ class TestProtocolErrorPath:
                 await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
 
 
+class TestProviderPayloadRouting:
+    """Issue #96: a generic provider_payload is merged into the outgoing JSON.
+
+    The adapter is provider-agnostic about *what* the payload says — it only
+    knows how to attach it to the wire request. The OpenRouter-specific routing
+    preference (preferred upstream order, allow_fallbacks) is sourced from
+    config (ai_config), not hardcoded here, so there is no magic model-name
+    branch in the adapter.
+    """
+
+    @pytest.mark.asyncio
+    async def test_provider_payload_merged_into_request_body(self):
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        payload = {"provider": {"order": ["MiniMax"], "allow_fallbacks": True}}
+        client = _build_client_with_transport(handler, provider_payload=payload)
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert body["provider"] == {"order": ["MiniMax"], "allow_fallbacks": True}
+        # The core completion fields remain intact alongside the merged payload.
+        assert body["model"]
+        assert body["messages"]
+
+    @pytest.mark.asyncio
+    async def test_no_provider_payload_means_no_provider_key(self):
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        client = _build_client_with_transport(handler, provider_payload=None)
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert "provider" not in body
+
+    @pytest.mark.asyncio
+    async def test_provider_payload_does_not_overwrite_core_fields(self):
+        """A payload key colliding with a reserved field must not clobber it."""
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        # A malicious/misconfigured payload attempting to override the model.
+        payload = {"model": "evil/override", "provider": {"order": ["MiniMax"]}}
+        client = _build_client_with_transport(
+            handler, model="google/gemini-2.0-flash-lite", provider_payload=payload
+        )
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert body["model"] == "google/gemini-2.0-flash-lite"
+        assert body["provider"] == {"order": ["MiniMax"]}
+
+
+class TestTruncationPath:
+    """Issue #96: finish_reason='length' is budget exhaustion, not malformed.
+
+    A reasoning model routed onto an upstream that hits the output cap returns
+    a well-formed envelope with ``finish_reason='length'`` and (often) a null
+    ``content``. The adapter must inspect ``finish_reason``/``usage`` BEFORE the
+    ``isinstance(content, str)`` check and raise ``AIClientTruncationError``
+    carrying the real tokens consumed — never collapse the spend onto a generic
+    ``AIClientProtocolError`` (which would lose the cost telemetry).
+    """
+
+    @pytest.mark.asyncio
+    async def test_length_with_null_content_raises_truncation_with_usage(self):
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "length"},
+                    ],
+                    "usage": {
+                        "prompt_tokens": 200,
+                        "completion_tokens": 8000,
+                        "total_tokens": 8200,
+                    },
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        exc = excinfo.value
+        assert exc.consumed_tokens == 8200
+        assert exc.prompt_tokens == 200
+        assert exc.completion_tokens == 8000
+
+    @pytest.mark.asyncio
+    async def test_length_takes_precedence_over_content_type_check(self):
+        """finish_reason='length' wins even when content IS a (partial) string.
+
+        Truncation must be detected from the stop condition, not inferred from a
+        null body; a partial string with finish_reason='length' is still a
+        truncated, untrustworthy result.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": "partial text"},
+                            "index": 0,
+                            "finish_reason": "length",
+                        },
+                    ],
+                    "usage": {"total_tokens": 8000},
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert excinfo.value.consumed_tokens == 8000
+
+    @pytest.mark.asyncio
+    async def test_length_without_usage_raises_truncation_zero_tokens(self):
+        """No usage block → still a truncation, consumed_tokens degrades to 0.
+
+        Better to surface the truncation (and not retry) than to mislabel it as
+        a protocol error; the cost telemetry is simply unavailable.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "length"},
+                    ],
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert excinfo.value.consumed_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_negative_usage_counts_do_not_produce_negative_tokens(self):
+        """A malformed usage block with negative counts must not bill negatively.
+
+        Issue #97 (cubic P2): negative ``prompt_tokens``/``completion_tokens`` are
+        invalid telemetry — they must be treated as absent (clamped to 0), never
+        flow through to a negative ``consumed_tokens`` / negative cost record. The
+        accuracy this PR introduces must not be undone by a misbehaving provider.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "length"},
+                    ],
+                    # Negative split with no total → reconstruction must clamp.
+                    "usage": {"prompt_tokens": -100, "completion_tokens": -8000},
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        exc = excinfo.value
+        assert exc.consumed_tokens >= 0
+        assert exc.consumed_tokens == 0
+        # Negative split values are invalid → reported as absent (None), not negative.
+        assert exc.prompt_tokens is None
+        assert exc.completion_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_negative_total_tokens_is_clamped_to_zero(self):
+        """A negative ``total_tokens`` is invalid and must clamp to 0, not bill."""
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "length"},
+                    ],
+                    "usage": {"total_tokens": -8000},
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert excinfo.value.consumed_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_null_content_without_length_still_protocol_error(self):
+        """A null content with a *non*-length stop reason stays a protocol error.
+
+        Only ``finish_reason='length'`` is reclassified; genuinely malformed
+        shapes (null content on a 'stop') keep the existing protocol-error path.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientProtocolError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "stop"},
+                    ],
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientProtocolError):
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+
 class TestRequestShape:
     @pytest.mark.asyncio
     async def test_request_body_contains_prompts_and_model(self):
@@ -380,6 +651,44 @@ class TestBuildDefaultFactory:
 
         client = build_default_ai_client()
         assert client is None
+
+    def test_factory_wires_config_sourced_provider_payload(self, monkeypatch: pytest.MonkeyPatch):
+        """Issue #96: the factory injects the routing pin from ai_config.
+
+        The vendor-specific routing preference is resolved in ``ai_config``
+        (config-sourced, not a magic model-name branch) and threaded into the
+        adapter constructor as the generic ``provider_payload``.
+        """
+        import hestai_context_mcp.adapters.ai_config as cfg
+        import hestai_context_mcp.adapters.openai_compat_ai_client as adapter_mod
+
+        class _NoKR:
+            def get_password(self, *_a, **_kw):
+                return None
+
+            def set_password(self, *_a, **_kw):
+                return None
+
+            def delete_password(self, *_a, **_kw):
+                return None
+
+        monkeypatch.setattr(cfg, "keyring", _NoKR(), raising=True)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ENV_KEY")
+
+        sentinel = {"provider": {"order": ["MiniMax"], "allow_fallbacks": True}}
+        monkeypatch.setattr(cfg, "resolve_provider_payload", lambda _provider: sentinel)
+
+        captured: dict[str, object] = {}
+        real_cls = adapter_mod.OpenAICompatAIClient
+
+        def _capturing_ctor(**kwargs):
+            captured.update(kwargs)
+            return real_cls(**kwargs)
+
+        monkeypatch.setattr(adapter_mod, "OpenAICompatAIClient", _capturing_ctor)
+        client = adapter_mod.build_default_ai_client()
+        assert client is not None
+        assert captured.get("provider_payload") == sentinel
 
     def test_factory_raises_typeerror_if_complete_text_is_sync(
         self, monkeypatch: pytest.MonkeyPatch

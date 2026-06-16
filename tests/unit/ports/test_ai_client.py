@@ -228,7 +228,13 @@ class TestExceptionTaxonomyInstantiable:
 
     @pytest.mark.parametrize(
         "exc_name",
-        ["AIClientError", "AIClientAuthError", "AIClientTransportError", "AIClientProtocolError"],
+        [
+            "AIClientError",
+            "AIClientAuthError",
+            "AIClientTransportError",
+            "AIClientProtocolError",
+            "AIClientTruncationError",
+        ],
     )
     def test_exception_instantiates_with_message(self, exc_name):
         import hestai_context_mcp.ports.ai_client as mod
@@ -237,6 +243,66 @@ class TestExceptionTaxonomyInstantiable:
         inst = exc_cls("boom")
         assert isinstance(inst, Exception)
         assert "boom" in str(inst)
+
+
+class TestTruncationErrorTaxonomy:
+    """Issue #96: budget-exhaustion (finish_reason=length) is a distinct condition.
+
+    ``AIClientTruncationError`` models a completion that hit the output-token
+    cap, carrying the *real* tokens consumed so the application layer can record
+    accurate cost (closing the ``tokens:0/cost:0`` accounting leak) instead of
+    collapsing the spend onto a generic protocol error.
+    """
+
+    def test_exported_in_all(self):
+        import hestai_context_mcp.ports.ai_client as mod
+
+        assert "AIClientTruncationError" in mod.__all__
+
+    def test_subclasses_ai_client_error(self):
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientError,
+            AIClientTruncationError,
+        )
+
+        assert issubclass(AIClientTruncationError, AIClientError)
+
+    def test_carries_consumed_tokens(self):
+        from hestai_context_mcp.ports.ai_client import AIClientTruncationError
+
+        exc = AIClientTruncationError("output truncated", consumed_tokens=8000)
+        assert exc.consumed_tokens == 8000
+        assert "truncated" in str(exc)
+
+    def test_carries_optional_prompt_completion_split(self):
+        from hestai_context_mcp.ports.ai_client import AIClientTruncationError
+
+        exc = AIClientTruncationError(
+            "output truncated",
+            consumed_tokens=8200,
+            prompt_tokens=200,
+            completion_tokens=8000,
+        )
+        assert exc.consumed_tokens == 8200
+        assert exc.prompt_tokens == 200
+        assert exc.completion_tokens == 8000
+
+    def test_split_defaults_to_none(self):
+        from hestai_context_mcp.ports.ai_client import AIClientTruncationError
+
+        exc = AIClientTruncationError("output truncated", consumed_tokens=8000)
+        assert exc.prompt_tokens is None
+        assert exc.completion_tokens is None
+
+    def test_is_vendor_free(self):
+        """PROD::I3: the new exception must not name a provider in source."""
+        import inspect as _inspect
+
+        import hestai_context_mcp.ports.ai_client as mod
+
+        source = _inspect.getsource(mod)
+        for token in ("openrouter", "minimax", "atlascloud", "anthropic", "openai"):
+            assert token.lower() not in source.lower(), f"PROD::I3 violation: found {token!r}"
 
 
 # Helper Protocol re-export to avoid name shadowing in this test module.

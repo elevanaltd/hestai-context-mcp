@@ -40,6 +40,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientAuthError,
     AIClientProtocolError,
     AIClientTransportError,
+    AIClientTruncationError,
     CompletionRequest,
 )
 
@@ -62,11 +63,20 @@ class OpenAICompatAIClient:
         model: str,
         timeout_seconds: float = 15.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        provider_payload: dict[str, object] | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = float(timeout_seconds)
+        # Issue #96: a generic, opaque payload merged into every outgoing
+        # /chat/completions body (e.g. OpenRouter ``provider`` routing
+        # preferences). The adapter is agnostic about its contents; the
+        # vendor-specific shape is sourced from config (see
+        # ``build_default_ai_client``), keeping any provider/model magic-string
+        # branch out of this wire-protocol layer. Reserved completion keys
+        # (model/messages/max_tokens/temperature) are never overridden.
+        self._provider_payload = provider_payload
         # A test-only transport (``httpx.MockTransport`` is acceptable
         # because it implements ``AsyncBaseTransport`` for async clients)
         # may be injected; otherwise the real network transport is used.
@@ -107,15 +117,23 @@ class OpenAICompatAIClient:
             # here so misuse fails predictably rather than with a
             # ``NoneType`` attribute error.
             raise AIClientProtocolError("OpenAICompatAIClient used outside an async-with block")
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": request.system_prompt},
-                {"role": "user", "content": request.user_prompt},
-            ],
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-        }
+        payload: dict[str, object] = {}
+        if self._provider_payload:
+            # Merge the opaque config-sourced payload first so the reserved
+            # completion fields below always win (a misconfigured payload must
+            # never redirect the model or clobber the messages).
+            payload.update(self._provider_payload)
+        payload.update(
+            {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": request.system_prompt},
+                    {"role": "user", "content": request.user_prompt},
+                ],
+                "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
+            }
+        )
         timeout = httpx.Timeout(float(request.timeout_seconds))
         try:
             response = await self._client.post(
@@ -163,12 +181,58 @@ class OpenAICompatAIClient:
         message = first.get("message")
         if not isinstance(message, dict):
             raise AIClientProtocolError("provider response 'choices[0].message' is not an object")
+        # Issue #96: inspect the stop condition BEFORE the content type-check.
+        # ``finish_reason == "length"`` means the generation hit the output-token
+        # cap (budget exhaustion) — a well-formed envelope whose body is
+        # incomplete or null. This is a distinct, actionable condition, not a
+        # malformed response, so it must surface as ``AIClientTruncationError``
+        # carrying the real tokens billed. We deliberately do NOT fall back to
+        # ``reasoning``/``reasoning_content``: surfacing chain-of-thought as a
+        # compiled artifact is a safety hazard for governance content.
+        finish_reason = first.get("finish_reason")
+        if finish_reason == "length":
+            consumed, prompt_tokens, completion_tokens = self._extract_usage(body)
+            raise AIClientTruncationError(
+                "provider truncated output at the token cap (finish_reason='length')",
+                consumed_tokens=consumed,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
         content = message.get("content")
         if not isinstance(content, str):
             raise AIClientProtocolError(
                 "provider response 'choices[0].message.content' is not a string"
             )
         return content
+
+    @staticmethod
+    def _extract_usage(body: object) -> tuple[int, int | None, int | None]:
+        """Pull token counts from an OpenAI-compat ``usage`` block.
+
+        Returns ``(total_tokens, prompt_tokens, completion_tokens)``. Missing or
+        malformed fields degrade to ``0`` for the total and ``None`` for the
+        split — telemetry being unavailable must never mask the truncation.
+        """
+        usage = body.get("usage") if isinstance(body, dict) else None
+        if not isinstance(usage, dict):
+            return 0, None, None
+
+        def _as_int(value: object) -> int | None:
+            # Issue #97: a negative count is invalid telemetry — treat it as
+            # absent so it can never bill negative tokens / negative cost.
+            return (
+                value
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                else None
+            )
+
+        prompt_tokens = _as_int(usage.get("prompt_tokens"))
+        completion_tokens = _as_int(usage.get("completion_tokens"))
+        total = _as_int(usage.get("total_tokens"))
+        if total is None:
+            # Reconstruct the total from the split when the provider omits it.
+            total = (prompt_tokens or 0) + (completion_tokens or 0)
+        return total, prompt_tokens, completion_tokens
 
 
 def build_default_ai_client(*, tier: str = "default") -> AIClient | None:
@@ -201,7 +265,17 @@ def build_default_ai_client(*, tier: str = "default") -> AIClient | None:
         logger.warning("Unknown HESTAI_AI_PROVIDER %r; cannot build AIClient", provider)
         return None
     model = ai_config.resolve_model(tier)
-    client = OpenAICompatAIClient(api_key=api_key, base_url=base_url, model=model)
+    # Issue #96: config-sourced upstream-routing pin (None for providers that
+    # take no routing preference). Resolved here, in the composition root, so
+    # the wire-protocol adapter stays free of any provider/model magic-string
+    # branch (PROD::I3 keeps vendor knowledge in adapters/config).
+    provider_payload = ai_config.resolve_provider_payload(provider)
+    client = OpenAICompatAIClient(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        provider_payload=provider_payload,
+    )
     # Construction-time guard (CRS gemini follow-up
     # ``crs_review_pr9_followup_ceeaa71``): ``runtime_checkable`` Protocol
     # only checks attribute *presence*, so a future adapter that defined

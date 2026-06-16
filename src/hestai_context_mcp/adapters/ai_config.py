@@ -45,6 +45,7 @@ __all__ = [
     "resolve_model",
     "resolve_api_key",
     "get_provider_base_url",
+    "resolve_provider_payload",
 ]
 
 # Keyring service names. See module docstring for migration rules.
@@ -78,6 +79,24 @@ _PROVIDER_ENV_VARS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
 }
+
+# Issue #96 — provider upstream-routing pin (OpenRouter only).
+#
+# OpenRouter load-balances a model across multiple upstream providers per
+# request; for a reasoning model that non-determinism causes intermittent
+# output-cap truncation on the worse-fitted upstream. Pinning a *preferred*
+# upstream order removes the lottery while keeping ``allow_fallbacks`` True so a
+# preferred-upstream outage degrades gracefully (prefer, not require).
+#
+# The default order is intentionally minimal and fully env-overridable
+# (``HESTAI_AI_PROVIDER_ORDER``, comma-separated) so the upstream slug names can
+# be corrected without a code change. Routing can be disabled entirely via
+# ``HESTAI_AI_PROVIDER_ROUTING=off`` or by supplying an empty order list. Only
+# OpenRouter consumes a routing payload; other providers receive ``None``.
+_PROVIDER_ROUTING_DEFAULT_ORDER: dict[str, tuple[str, ...]] = {
+    "openrouter": ("MiniMax",),
+}
+_ROUTING_DISABLED_VALUES: frozenset[str] = frozenset({"off", "0", "false", "none", "disabled"})
 
 
 def resolve_provider() -> str:
@@ -128,6 +147,45 @@ def get_provider_base_url(provider: str) -> str:
         return _PROVIDER_BASE_URLS[provider]
     except KeyError as exc:
         raise ValueError(f"Unknown provider: {provider!r}") from exc
+
+
+def resolve_provider_payload(provider: str) -> dict[str, object] | None:
+    """Return the generic routing payload to merge into the request body.
+
+    The returned shape is the OpenRouter ``{"provider": {...}}`` envelope the
+    adapter merges verbatim into ``/chat/completions``. It is *config-sourced*
+    (there is no model-name branch here): the preferred upstream order comes
+    from :data:`_PROVIDER_ROUTING_DEFAULT_ORDER`, overridable via
+    ``HESTAI_AI_PROVIDER_ORDER`` (comma-separated upstream slugs).
+
+    ``allow_fallbacks`` is held True (prefer, not require) so a preferred
+    upstream outage degrades gracefully rather than hard-failing.
+
+    Returns ``None`` (no routing preference sent) when:
+        * the provider is not OpenRouter,
+        * ``HESTAI_AI_PROVIDER_ROUTING`` is set to a disabling value, or
+        * the resolved order list is empty.
+
+    Args:
+        provider: The configured provider identifier.
+    """
+    if provider != "openrouter":
+        return None
+
+    routing_flag = os.environ.get("HESTAI_AI_PROVIDER_ROUTING", "").strip().lower()
+    if routing_flag in _ROUTING_DISABLED_VALUES:
+        return None
+
+    order_override = os.environ.get("HESTAI_AI_PROVIDER_ORDER")
+    if order_override is not None:
+        order = [slug.strip() for slug in order_override.split(",") if slug.strip()]
+    else:
+        order = list(_PROVIDER_ROUTING_DEFAULT_ORDER.get(provider, ()))
+
+    if not order:
+        return None
+
+    return {"provider": {"order": order, "allow_fallbacks": True}}
 
 
 def _keyring_account(provider: str) -> str:

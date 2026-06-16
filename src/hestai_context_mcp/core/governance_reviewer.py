@@ -55,6 +55,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientAuthError,
     AIClientError,
     AIClientTransportError,
+    AIClientTruncationError,
     CompletionRequest,
 )
 
@@ -370,6 +371,30 @@ async def review_governance(
             model,
             f"AIClient transport error (call failed): {exc}",
             [f"transport error: {exc}"],
+        )
+    except AIClientTruncationError as exc:
+        # Issue #96: the provider hit the output-token cap and BILLED for the
+        # truncated call. Record the REAL tokens/cost (no 0/0 leak) and do NOT
+        # retry — an identical re-issue would re-truncate. Never fabricate a
+        # verdict; degrade to BLOCKED.
+        consumed = exc.consumed_tokens
+        truncation_cost = (consumed / 1000.0) * price_per_1k
+        logger.warning(
+            "governance review truncated: model=%s consumed_tokens=%d billed_cost=$%.4f "
+            "(output cap hit; not retried)",
+            model,
+            consumed,
+            truncation_cost,
+        )
+        return _blocked(
+            model,
+            (
+                "AIClient truncation error (output hit the token cap; not retried): "
+                f"{exc}. Consumed {consumed} tokens."
+            ),
+            [f"truncation: {exc}"],
+            tokens=consumed,
+            cost=truncation_cost,
         )
     except AIClientError as exc:
         return _blocked(
