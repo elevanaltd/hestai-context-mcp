@@ -31,6 +31,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientError,
     AIClientProtocolError,
     AIClientTransportError,
+    AIClientTruncationError,
     CompletionRequest,
 )
 
@@ -248,6 +249,25 @@ class TestFailSoftErrorPaths:
         patch_client(stub)
         result = await review_governance(_SAMPLE_AGR)
         assert result["verdict"] == "BLOCKED"
+
+    async def test_truncation_records_real_cost_and_is_blocked(
+        self, patch_client, monkeypatch
+    ) -> None:
+        """Issue #96: a truncated review records REAL tokens/cost, never APPROVED.
+
+        Mirrors the intake_compiler accounting fix so the shared AIClient path
+        is handled consistently: finish_reason=length is billed, so the metrics
+        must reflect the real spend instead of collapsing to 0/0.
+        """
+        monkeypatch.setenv("HESTAI_REVIEW_USD_PER_1K_TOKENS", "1.0")
+        monkeypatch.setenv("HESTAI_REVIEW_MAX_COST_USD", "1000000")  # never abort pre-call
+        stub = _StubClient(raises=AIClientTruncationError("truncated", consumed_tokens=2000))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["verdict"] != "APPROVED"
+        assert result["metrics"]["tokens"] == 2000
+        assert result["metrics"]["cost"] == pytest.approx(2.0)
 
 
 class TestCostCap:

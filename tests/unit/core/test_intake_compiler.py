@@ -29,6 +29,7 @@ from hestai_context_mcp.core.intake_compiler import compile_prose_to_octave
 from hestai_context_mcp.ports.ai_client import (
     AIClientAuthError,
     AIClientTransportError,
+    AIClientTruncationError,
     CompletionRequest,
 )
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
@@ -138,6 +139,69 @@ class TestErrorPaths:
         result = await compile_prose_to_octave(_ctx())
         assert result["ok"] is False
         assert result["octave"] is None
+
+
+class _CountingStub:
+    """AIClient stub that counts how many times complete_text is invoked."""
+
+    def __init__(self, *, raises: BaseException) -> None:
+        self._raises = raises
+        self.calls = 0
+
+    async def __aenter__(self) -> _CountingStub:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+    async def complete_text(self, request: CompletionRequest) -> str:
+        self.calls += 1
+        raise self._raises
+
+
+class TestTruncationAccounting:
+    """Issue #96: truncation records REAL cost and is never retried.
+
+    The adapter raises ``AIClientTruncationError`` (finish_reason='length')
+    carrying the tokens the provider actually billed. The compiler must:
+      * return a structured failure (PROD::I4) — never a fabricated AGR,
+      * record the REAL consumed tokens and a NON-zero cost (closing the
+        ``tokens:0 / cost:0`` accounting leak), and
+      * NOT retry (an identical re-issue would re-truncate and burn budget).
+    """
+
+    async def test_truncation_is_structured_failure(self, patch_client) -> None:
+        stub = _StubClient(raises=AIClientTruncationError("truncated", consumed_tokens=8000))
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is False
+        assert result["octave"] is None
+        assert result["error"]
+        assert "truncat" in result["error"].lower()
+
+    async def test_truncation_records_real_tokens_and_cost(self, patch_client, monkeypatch) -> None:
+        # Deterministic pricing so cost is exactly tokens/1000 * price.
+        monkeypatch.setenv("HESTAI_INTAKE_USD_PER_1K_TOKENS", "1.0")
+        # Raise the abort cap so the pre-call cost guard does not short-circuit;
+        # we want the truncation branch (post-call) to be exercised.
+        monkeypatch.setenv("HESTAI_INTAKE_MAX_COST_USD", "1000000")
+        stub = _StubClient(raises=AIClientTruncationError("truncated", consumed_tokens=8000))
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        metrics = result["metrics"]
+        # The REAL billed tokens, not 0.
+        assert metrics["tokens"] == 8000
+        # NON-zero cost computed from consumed tokens at the configured price.
+        assert metrics["cost"] == pytest.approx(8.0)
+        assert metrics["model"]
+
+    async def test_truncation_is_not_retried(self, patch_client) -> None:
+        stub = _CountingStub(raises=AIClientTruncationError("truncated", consumed_tokens=8000))
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is False
+        # Exactly one backend call — no retry on truncation.
+        assert stub.calls == 1
 
 
 class TestCostCaps:

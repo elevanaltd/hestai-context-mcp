@@ -40,6 +40,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientAuthError,
     AIClientError,
     AIClientTransportError,
+    AIClientTruncationError,
     CompletionRequest,
 )
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
@@ -160,11 +161,11 @@ def _project_tokens(intake_context: IntakeContext, max_output_tokens: int) -> in
     return _estimate_input_tokens(intake_context) + max_output_tokens
 
 
-def _failure(model: str, error: str, tokens: int = 0) -> CompileResult:
+def _failure(model: str, error: str, tokens: int = 0, cost: float = 0.0) -> CompileResult:
     return {
         "ok": False,
         "octave": None,
-        "metrics": {"tokens": tokens, "cost": 0.0, "model": model},
+        "metrics": {"tokens": tokens, "cost": cost, "model": model},
         "error": error,
     }
 
@@ -240,6 +241,29 @@ async def compile_prose_to_octave(
         return _failure(model, f"AIClient auth error (permanent, no retry): {exc}")
     except AIClientTransportError as exc:
         return _failure(model, f"AIClient transport error (call failed): {exc}")
+    except AIClientTruncationError as exc:
+        # Issue #96: the provider hit the output-token cap (budget exhausted)
+        # and BILLED for the truncated call. Record the REAL tokens/cost so the
+        # metrics stop under-reporting as 0/0. Do NOT retry: an identical
+        # re-issue would re-truncate and burn budget for the same outcome.
+        consumed = exc.consumed_tokens
+        truncation_cost = (consumed / 1000.0) * price_per_1k
+        logger.warning(
+            "intake compile truncated: model=%s consumed_tokens=%d billed_cost=$%.4f "
+            "(output cap hit; not retried)",
+            model,
+            consumed,
+            truncation_cost,
+        )
+        return _failure(
+            model,
+            (
+                "AIClient truncation error (output hit the token cap; not retried): "
+                f"{exc}. Consumed {consumed} tokens."
+            ),
+            tokens=consumed,
+            cost=truncation_cost,
+        )
     except AIClientError as exc:
         return _failure(model, f"AIClient error: {exc.__class__.__name__}: {exc}")
 
