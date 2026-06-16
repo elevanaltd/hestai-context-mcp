@@ -141,8 +141,14 @@ class TestSuccessUsageAccounting:
     """Issue #98: the success path reports the provider's real usage and cost."""
 
     @pytest.mark.asyncio
-    async def test_request_opts_into_usage_accounting(self):
-        """The outgoing body asks the provider to include real usage/cost."""
+    async def test_usage_field_absent_when_no_provider_payload(self):
+        """Issue #99 (Finding 1): usage must be config-sourced, not hardcoded.
+
+        When ``provider_payload`` is None (no OpenRouter config), the outgoing
+        request body must NOT contain a ``usage`` key. Hardcoding
+        ``{"usage": {"include": True}}`` into the adapter violates PROD::I3 by
+        injecting an OpenRouter-specific knob into every provider.
+        """
         from hestai_context_mcp.ports.ai_client import CompletionRequest
 
         seen: dict[str, object] = {}
@@ -151,7 +157,42 @@ class TestSuccessUsageAccounting:
             seen["body"] = json.loads(req.content.decode())
             return _ok_response("x")
 
-        client = _build_client_with_transport(handler)
+        # No provider_payload → no OpenRouter-specific keys in the payload.
+        client = _build_client_with_transport(handler, provider_payload=None)
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert "usage" not in body, (
+            "PROD::I3 violation: 'usage' is an OpenRouter-specific field and "
+            "must not be hardcoded in the generic adapter; it must come from "
+            "provider_payload in ai_config.py"
+        )
+
+    @pytest.mark.asyncio
+    async def test_usage_field_present_when_in_provider_payload(self):
+        """Issue #99 (Finding 1): usage is forwarded when config-sourced.
+
+        When ``provider_payload`` carries ``{"usage": {"include": True}}`` (set
+        by ``ai_config.resolve_provider_payload`` for OpenRouter), the adapter
+        must forward it verbatim to the provider. This validates the positive
+        path after the config-sourcing fix.
+        """
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        # Simulate what ai_config.resolve_provider_payload returns for OpenRouter.
+        payload = {
+            "provider": {"order": ["MiniMax"], "allow_fallbacks": True},
+            "usage": {"include": True},
+        }
+        client = _build_client_with_transport(handler, provider_payload=payload)
         async with client as c:
             await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
 

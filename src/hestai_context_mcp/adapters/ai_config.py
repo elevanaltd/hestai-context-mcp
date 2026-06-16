@@ -185,7 +185,12 @@ def resolve_provider_payload(provider: str) -> dict[str, object] | None:
     if not order:
         return None
 
-    return {"provider": {"order": order, "allow_fallbacks": True}}
+    # Issue #99: include OpenRouter real-usage accounting alongside the routing
+    # pin. Both are OpenRouter-specific knobs that belong in the config layer
+    # (PROD::I3 — keep vendor knowledge in adapters/config, not in the generic
+    # wire-protocol adapter). ``usage.include=True`` tells OpenRouter to return
+    # the provider's real token counts and real USD cost in the response body.
+    return {"provider": {"order": order, "allow_fallbacks": True}, "usage": {"include": True}}
 
 
 def _keyring_account(provider: str) -> str:

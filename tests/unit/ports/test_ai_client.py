@@ -246,7 +246,11 @@ class TestAIClientProtocol:
 
     def test_satisfies_isinstance_with_conforming_stub(self):
         """A stub implementing __aenter__/__aexit__/complete_text is an AIClient."""
-        from hestai_context_mcp.ports.ai_client import AIClient, CompletionRequest
+        from hestai_context_mcp.ports.ai_client import (
+            AIClient,
+            CompletionRequest,
+            CompletionResult,
+        )
 
         class _Stub:
             async def __aenter__(self):
@@ -255,8 +259,8 @@ class TestAIClientProtocol:
             async def __aexit__(self, exc_type, exc, tb):
                 return None
 
-            async def complete_text(self, request: CompletionRequest) -> str:
-                return "ok"
+            async def complete_text(self, request: CompletionRequest) -> CompletionResult:
+                return CompletionResult(content="ok")
 
         assert isinstance(_Stub(), AIClient) is True
 

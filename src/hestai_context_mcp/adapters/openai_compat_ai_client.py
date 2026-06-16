@@ -171,11 +171,6 @@ class OpenAICompatAIClient:
                 ],
                 "max_tokens": request.max_tokens,
                 "temperature": request.temperature,
-                # Issue #98: opt in to OpenRouter usage accounting so the response
-                # carries the provider's real token counts and real USD cost. This
-                # is a vendor-specific request knob and so lives in the adapter
-                # (same layer as the routing pin), keeping the port vendor-free.
-                "usage": {"include": True},
             }
         )
         timeout = httpx.Timeout(float(request.timeout_seconds))

@@ -386,20 +386,25 @@ async def review_governance(
 
     client = build_default_ai_client(tier=tier)
     if client is None:
+        # Issue #99 (Finding 3): no credential → definitively $0; the provider
+        # was never called so cost_is_estimate=False (not an approximation).
         return _blocked(
             model,
             "No AIClient available (no credential configured); cannot run semantic review.",
             ["No AI client/credential available for the semantic review."],
+            cost_is_estimate=False,
         )
 
     user_prompt = f"BEGIN_RECORD\n{octave_content}\nEND_RECORD"
     try:
         result = await _run_completion(client, _REVIEW_SYSTEM_PROMPT, user_prompt, out_cap)
     except AIClientAuthError as exc:
+        # Issue #99 (Finding 3): auth rejection is pre-billing; definitively $0.
         return _blocked(
             model,
             f"AIClient auth error (permanent, no retry): {exc}",
             [f"auth error: {exc}"],
+            cost_is_estimate=False,
         )
     except AIClientTransportError as exc:
         return _blocked(

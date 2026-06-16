@@ -269,13 +269,20 @@ async def compile_prose_to_octave(
 
     client = build_default_ai_client()
     if client is None:
-        return _failure(model, "No AIClient available (no credential configured).")
+        # Issue #99 (Finding 2): no credential → definitively $0; the provider
+        # was never called so cost_is_estimate=False (not an approximation).
+        return _failure(
+            model, "No AIClient available (no credential configured).", cost_is_estimate=False
+        )
 
     user_prompt = f"BEGIN_REQUEST\n{intake_context.prose_input}\nEND_REQUEST"
     try:
         result = await _run_completion(client, intake_context.prompt, user_prompt, out_cap)
     except AIClientAuthError as exc:
-        return _failure(model, f"AIClient auth error (permanent, no retry): {exc}")
+        # Issue #99 (Finding 2): auth rejection is pre-billing; definitively $0.
+        return _failure(
+            model, f"AIClient auth error (permanent, no retry): {exc}", cost_is_estimate=False
+        )
     except AIClientTransportError as exc:
         return _failure(model, f"AIClient transport error (call failed): {exc}")
     except AIClientTruncationError as exc:

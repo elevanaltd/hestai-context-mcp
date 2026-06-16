@@ -242,6 +242,45 @@ class TestPromptIsSemanticScoped:
             assert ("do not produce a facet" in prompt) or ("no facet" in prompt)
 
 
+class TestCostIsEstimateSemantics:
+    """Issue #99 (Finding 3): cost_is_estimate must be False on zero-cost paths.
+
+    Mirrors Finding 2 in intake_compiler: auth errors and no-credential failures
+    cost definitively $0. Transport errors remain ``True`` (unknown billing).
+    """
+
+    async def test_no_credential_blocked_has_cost_is_estimate_false(self, patch_client) -> None:
+        """No AIClient → definitively $0; cost_is_estimate must be False."""
+        patch_client(None)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["metrics"]["cost_is_estimate"] is False, (
+            "No-credential BLOCKED is definitively $0 (provider never called); "
+            "cost_is_estimate must be False, not True"
+        )
+
+    async def test_auth_error_blocked_has_cost_is_estimate_false(self, patch_client) -> None:
+        """Auth error → provider rejected before billing; cost_is_estimate must be False."""
+        stub = _StubClient(raises=AIClientAuthError("no key"))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["metrics"]["cost_is_estimate"] is False, (
+            "Auth error is a pre-billing rejection; cost is definitively $0; "
+            "cost_is_estimate must be False"
+        )
+
+    async def test_transport_error_blocked_retains_cost_is_estimate_true(
+        self, patch_client
+    ) -> None:
+        """Transport error → unknown whether provider billed; cost_is_estimate stays True."""
+        stub = _StubClient(raises=AIClientTransportError("timeout"))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["metrics"]["cost_is_estimate"] is True
+
+
 class TestNoClientAvailable:
     async def test_returns_structured_failure_when_no_client(self, patch_client) -> None:
         patch_client(None)

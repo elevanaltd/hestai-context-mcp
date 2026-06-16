@@ -201,6 +201,49 @@ class TestRealUsageAccounting:
         assert ctx.prose_input in stub.request.user_prompt
 
 
+class TestCostIsEstimateSemantics:
+    """Issue #99 (Finding 2): cost_is_estimate must be False on zero-cost paths.
+
+    Auth errors and no-credential failures cost definitively $0 — the provider
+    never billed. Marking them ``cost_is_estimate=True`` is semantically wrong;
+    the cost is not estimated, it is exactly $0.
+
+    Transport errors and generic AIClientError are left as ``True`` (genuinely
+    unknown whether the provider billed before the connection was lost).
+    """
+
+    async def test_no_credential_failure_has_cost_is_estimate_false(self, patch_client) -> None:
+        """No AIClient → definitively $0; cost_is_estimate must be False."""
+        patch_client(None)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is False
+        assert result["metrics"]["cost_is_estimate"] is False, (
+            "No-credential failure is definitively $0 (provider never called); "
+            "cost_is_estimate must be False, not True"
+        )
+
+    async def test_auth_error_failure_has_cost_is_estimate_false(self, patch_client) -> None:
+        """Auth error → provider rejected before billing; cost_is_estimate must be False."""
+        stub = _StubClient(raises=AIClientAuthError("no key"))
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is False
+        assert result["metrics"]["cost_is_estimate"] is False, (
+            "Auth error is a pre-billing rejection; cost is definitively $0; "
+            "cost_is_estimate must be False"
+        )
+
+    async def test_transport_error_failure_retains_cost_is_estimate_true(
+        self, patch_client
+    ) -> None:
+        """Transport error → unknown whether provider billed; cost_is_estimate stays True."""
+        stub = _StubClient(raises=AIClientTransportError("timeout"))
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is False
+        assert result["metrics"]["cost_is_estimate"] is True
+
+
 class TestNoClientAvailable:
     async def test_returns_structured_failure_when_no_client(self, patch_client) -> None:
         patch_client(None)
