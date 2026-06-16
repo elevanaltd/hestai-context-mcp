@@ -8,6 +8,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `AIClientTruncationError` in the AIClient port taxonomy — models output-token budget exhaustion (provider `finish_reason="length"`) distinctly from a malformed response, carrying the real `consumed_tokens` (issue #96)
+- Config-sourced provider upstream-routing pin: `HESTAI_AI_PROVIDER_ORDER` (comma-separated upstream slugs, OpenRouter) and `HESTAI_AI_PROVIDER_ROUTING=off` to disable. Defaults to a preferred order with `allow_fallbacks` preserved (prefer, not require), so a preferred-upstream outage degrades gracefully (issue #96)
+
+### Fixed
+- Stage-2 prose→OCTAVE (`submit_governance` prose mode) no longer fails non-deterministically when OpenRouter routes a reasoning model onto an upstream that truncates at the token cap: the pin reduces routing nondeterminism and `finish_reason="length"` is now surfaced as an actionable truncation error instead of an opaque protocol error (issue #96)
+- Truncated/budget-exhausted AI calls now record the **real** tokens and cost in the returned failure metrics instead of `tokens:0 / cost:0`; truncation is not retried (an identical re-issue would re-truncate and burn budget). Applies to `compile_prose_to_octave` and `review_governance` (issue #96)
+
 ---
 
 ## [0.8.0] — 2026-06-15 — AGR Read-Side & Gate-A Hardening
