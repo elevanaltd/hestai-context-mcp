@@ -218,7 +218,13 @@ class OpenAICompatAIClient:
             return 0, None, None
 
         def _as_int(value: object) -> int | None:
-            return value if isinstance(value, int) and not isinstance(value, bool) else None
+            # Issue #97: a negative count is invalid telemetry — treat it as
+            # absent so it can never bill negative tokens / negative cost.
+            return (
+                value
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                else None
+            )
 
         prompt_tokens = _as_int(usage.get("prompt_tokens"))
         completion_tokens = _as_int(usage.get("completion_tokens"))

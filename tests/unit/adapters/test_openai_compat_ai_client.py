@@ -470,6 +470,68 @@ class TestTruncationPath:
         assert excinfo.value.consumed_tokens == 0
 
     @pytest.mark.asyncio
+    async def test_negative_usage_counts_do_not_produce_negative_tokens(self):
+        """A malformed usage block with negative counts must not bill negatively.
+
+        Issue #97 (cubic P2): negative ``prompt_tokens``/``completion_tokens`` are
+        invalid telemetry — they must be treated as absent (clamped to 0), never
+        flow through to a negative ``consumed_tokens`` / negative cost record. The
+        accuracy this PR introduces must not be undone by a misbehaving provider.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "length"},
+                    ],
+                    # Negative split with no total → reconstruction must clamp.
+                    "usage": {"prompt_tokens": -100, "completion_tokens": -8000},
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        exc = excinfo.value
+        assert exc.consumed_tokens >= 0
+        assert exc.consumed_tokens == 0
+        # Negative split values are invalid → reported as absent (None), not negative.
+        assert exc.prompt_tokens is None
+        assert exc.completion_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_negative_total_tokens_is_clamped_to_zero(self):
+        """A negative ``total_tokens`` is invalid and must clamp to 0, not bill."""
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientTruncationError,
+            CompletionRequest,
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": None}, "index": 0, "finish_reason": "length"},
+                    ],
+                    "usage": {"total_tokens": -8000},
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        with pytest.raises(AIClientTruncationError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert excinfo.value.consumed_tokens == 0
+
+    @pytest.mark.asyncio
     async def test_null_content_without_length_still_protocol_error(self):
         """A null content with a *non*-length stop reason stays a protocol error.
 
