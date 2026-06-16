@@ -38,6 +38,7 @@ __all__ = [
     "AIClientAuthError",
     "AIClientTransportError",
     "AIClientProtocolError",
+    "AIClientTruncationError",
 ]
 
 
@@ -90,6 +91,39 @@ class AIClientProtocolError(AIClientError):
     """
 
 
+class AIClientTruncationError(AIClientError):
+    """Completion hit the output-token cap before finishing (budget exhausted).
+
+    Distinct from :class:`AIClientProtocolError`: the response *was*
+    well-formed; the generation simply ran out of budget (the provider
+    reported a length/cap stop condition) so the body is incomplete or
+    empty. Modelling this separately lets the application layer:
+
+        * record the *real* tokens billed for the truncated call instead
+          of collapsing the spend onto a generic error (closing the
+          ``tokens:0 / cost:0`` accounting leak), and
+        * decline to retry — an identical re-issue would re-truncate and
+          burn more budget for the same outcome.
+
+    ``consumed_tokens`` is the total tokens the provider reported as
+    billed for the call. ``prompt_tokens`` / ``completion_tokens`` carry
+    the split when the provider supplies it, else ``None``.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        consumed_tokens: int = 0,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.consumed_tokens = consumed_tokens
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
 @runtime_checkable
 class AIClient(Protocol):
     """Provider-agnostic text completion port.
@@ -119,5 +153,8 @@ class AIClient(Protocol):
             AIClientAuthError: No credential / credential rejected.
             AIClientTransportError: Timeout / connection / 5xx / 429.
             AIClientProtocolError: Malformed provider response.
+            AIClientTruncationError: Output hit the token cap before
+                finishing (budget exhausted); carries the real tokens
+                consumed.
         """
         ...
