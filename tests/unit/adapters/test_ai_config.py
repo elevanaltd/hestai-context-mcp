@@ -68,6 +68,8 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "HESTAI_AI_MODEL",
         "HESTAI_AI_MODEL_ANALYSIS",
         "HESTAI_AI_MODEL_CRITICAL",
+        "HESTAI_AI_PROVIDER_ROUTING",
+        "HESTAI_AI_PROVIDER_ORDER",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
     ):
@@ -392,6 +394,63 @@ def test_resolve_api_key_never_logs_secret_value(
             msg = rec.getMessage()
             assert "SECRET_AAA" not in msg, f"Secret leaked at level {level}: {msg!r}"
             assert "SECRET_BBB" not in msg, f"Secret leaked at level {level}: {msg!r}"
+
+
+class TestResolveProviderPayload:
+    """Issue #96: config-sourced OpenRouter upstream-routing pin.
+
+    ``resolve_provider_payload(provider)`` returns the generic
+    ``{"provider": {...}}`` payload the adapter merges into the request body —
+    or ``None`` to send no routing preference. The pin is:
+
+      * config-sourced (NOT a hardcoded ``if model == "minimax-m3"`` branch),
+      * **prefer, not require**: ``allow_fallbacks`` stays True so a preferred
+        upstream outage degrades gracefully instead of hard-failing,
+      * env-overridable (order list) and disableable, so it is not brittle.
+    """
+
+    def test_exposed_in_public_api(self):
+        from hestai_context_mcp.adapters import ai_config
+
+        assert hasattr(ai_config, "resolve_provider_payload")
+        assert "resolve_provider_payload" in ai_config.__all__
+
+    def test_openrouter_default_pins_preferred_order_with_fallbacks(self, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_provider_payload
+
+        payload = resolve_provider_payload("openrouter")
+        assert payload is not None
+        provider = payload["provider"]
+        assert isinstance(provider["order"], list) and provider["order"]
+        # Prefer, not require: graceful degradation on a preferred-upstream outage.
+        assert provider["allow_fallbacks"] is True
+
+    def test_non_openrouter_provider_has_no_routing_payload(self, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_provider_payload
+
+        assert resolve_provider_payload("openai") is None
+
+    def test_order_is_env_overridable(self, monkeypatch: pytest.MonkeyPatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_provider_payload
+
+        monkeypatch.setenv("HESTAI_AI_PROVIDER_ORDER", "Foo, Bar ,Baz")
+        payload = resolve_provider_payload("openrouter")
+        assert payload is not None
+        # Comma-separated, trimmed, order preserved.
+        assert payload["provider"]["order"] == ["Foo", "Bar", "Baz"]
+
+    def test_routing_disabled_by_env_returns_none(self, monkeypatch: pytest.MonkeyPatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_provider_payload
+
+        monkeypatch.setenv("HESTAI_AI_PROVIDER_ROUTING", "off")
+        assert resolve_provider_payload("openrouter") is None
+
+    def test_empty_order_env_disables_routing(self, monkeypatch: pytest.MonkeyPatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_provider_payload
+
+        # An explicitly empty / whitespace order list means "no preference".
+        monkeypatch.setenv("HESTAI_AI_PROVIDER_ORDER", "   ,  ")
+        assert resolve_provider_payload("openrouter") is None
 
 
 # Dead-import helper so ``Any`` stays reachable by mypy when adding fields.

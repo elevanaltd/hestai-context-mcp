@@ -31,6 +31,7 @@ def _build_client_with_transport(
     base_url: str = "https://openrouter.ai/api/v1",
     model: str = "google/gemini-2.0-flash-lite",
     timeout: float = 5.0,
+    provider_payload: dict | None = None,
 ):
     """Create adapter with an injected ``httpx.MockTransport`` for tests."""
     from hestai_context_mcp.adapters.openai_compat_ai_client import (
@@ -44,6 +45,7 @@ def _build_client_with_transport(
         model=model,
         timeout_seconds=timeout,
         transport=transport,
+        provider_payload=provider_payload,
     )
 
 
@@ -288,6 +290,81 @@ class TestProtocolErrorPath:
                 await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
 
 
+class TestProviderPayloadRouting:
+    """Issue #96: a generic provider_payload is merged into the outgoing JSON.
+
+    The adapter is provider-agnostic about *what* the payload says — it only
+    knows how to attach it to the wire request. The OpenRouter-specific routing
+    preference (preferred upstream order, allow_fallbacks) is sourced from
+    config (ai_config), not hardcoded here, so there is no magic model-name
+    branch in the adapter.
+    """
+
+    @pytest.mark.asyncio
+    async def test_provider_payload_merged_into_request_body(self):
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        payload = {"provider": {"order": ["MiniMax"], "allow_fallbacks": True}}
+        client = _build_client_with_transport(handler, provider_payload=payload)
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert body["provider"] == {"order": ["MiniMax"], "allow_fallbacks": True}
+        # The core completion fields remain intact alongside the merged payload.
+        assert body["model"]
+        assert body["messages"]
+
+    @pytest.mark.asyncio
+    async def test_no_provider_payload_means_no_provider_key(self):
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        client = _build_client_with_transport(handler, provider_payload=None)
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert "provider" not in body
+
+    @pytest.mark.asyncio
+    async def test_provider_payload_does_not_overwrite_core_fields(self):
+        """A payload key colliding with a reserved field must not clobber it."""
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        # A malicious/misconfigured payload attempting to override the model.
+        payload = {"model": "evil/override", "provider": {"order": ["MiniMax"]}}
+        client = _build_client_with_transport(
+            handler, model="google/gemini-2.0-flash-lite", provider_payload=payload
+        )
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert body["model"] == "google/gemini-2.0-flash-lite"
+        assert body["provider"] == {"order": ["MiniMax"]}
+
+
 class TestTruncationPath:
     """Issue #96: finish_reason='length' is budget exhaustion, not malformed.
 
@@ -512,6 +589,44 @@ class TestBuildDefaultFactory:
 
         client = build_default_ai_client()
         assert client is None
+
+    def test_factory_wires_config_sourced_provider_payload(self, monkeypatch: pytest.MonkeyPatch):
+        """Issue #96: the factory injects the routing pin from ai_config.
+
+        The vendor-specific routing preference is resolved in ``ai_config``
+        (config-sourced, not a magic model-name branch) and threaded into the
+        adapter constructor as the generic ``provider_payload``.
+        """
+        import hestai_context_mcp.adapters.ai_config as cfg
+        import hestai_context_mcp.adapters.openai_compat_ai_client as adapter_mod
+
+        class _NoKR:
+            def get_password(self, *_a, **_kw):
+                return None
+
+            def set_password(self, *_a, **_kw):
+                return None
+
+            def delete_password(self, *_a, **_kw):
+                return None
+
+        monkeypatch.setattr(cfg, "keyring", _NoKR(), raising=True)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ENV_KEY")
+
+        sentinel = {"provider": {"order": ["MiniMax"], "allow_fallbacks": True}}
+        monkeypatch.setattr(cfg, "resolve_provider_payload", lambda _provider: sentinel)
+
+        captured: dict[str, object] = {}
+        real_cls = adapter_mod.OpenAICompatAIClient
+
+        def _capturing_ctor(**kwargs):
+            captured.update(kwargs)
+            return real_cls(**kwargs)
+
+        monkeypatch.setattr(adapter_mod, "OpenAICompatAIClient", _capturing_ctor)
+        client = adapter_mod.build_default_ai_client()
+        assert client is not None
+        assert captured.get("provider_payload") == sentinel
 
     def test_factory_raises_typeerror_if_complete_text_is_sync(
         self, monkeypatch: pytest.MonkeyPatch

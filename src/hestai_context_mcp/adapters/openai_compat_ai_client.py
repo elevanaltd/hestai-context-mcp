@@ -63,11 +63,20 @@ class OpenAICompatAIClient:
         model: str,
         timeout_seconds: float = 15.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        provider_payload: dict[str, object] | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = float(timeout_seconds)
+        # Issue #96: a generic, opaque payload merged into every outgoing
+        # /chat/completions body (e.g. OpenRouter ``provider`` routing
+        # preferences). The adapter is agnostic about its contents; the
+        # vendor-specific shape is sourced from config (see
+        # ``build_default_ai_client``), keeping any provider/model magic-string
+        # branch out of this wire-protocol layer. Reserved completion keys
+        # (model/messages/max_tokens/temperature) are never overridden.
+        self._provider_payload = provider_payload
         # A test-only transport (``httpx.MockTransport`` is acceptable
         # because it implements ``AsyncBaseTransport`` for async clients)
         # may be injected; otherwise the real network transport is used.
@@ -108,15 +117,23 @@ class OpenAICompatAIClient:
             # here so misuse fails predictably rather than with a
             # ``NoneType`` attribute error.
             raise AIClientProtocolError("OpenAICompatAIClient used outside an async-with block")
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": request.system_prompt},
-                {"role": "user", "content": request.user_prompt},
-            ],
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-        }
+        payload: dict[str, object] = {}
+        if self._provider_payload:
+            # Merge the opaque config-sourced payload first so the reserved
+            # completion fields below always win (a misconfigured payload must
+            # never redirect the model or clobber the messages).
+            payload.update(self._provider_payload)
+        payload.update(
+            {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": request.system_prompt},
+                    {"role": "user", "content": request.user_prompt},
+                ],
+                "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
+            }
+        )
         timeout = httpx.Timeout(float(request.timeout_seconds))
         try:
             response = await self._client.post(
@@ -242,7 +259,17 @@ def build_default_ai_client(*, tier: str = "default") -> AIClient | None:
         logger.warning("Unknown HESTAI_AI_PROVIDER %r; cannot build AIClient", provider)
         return None
     model = ai_config.resolve_model(tier)
-    client = OpenAICompatAIClient(api_key=api_key, base_url=base_url, model=model)
+    # Issue #96: config-sourced upstream-routing pin (None for providers that
+    # take no routing preference). Resolved here, in the composition root, so
+    # the wire-protocol adapter stays free of any provider/model magic-string
+    # branch (PROD::I3 keeps vendor knowledge in adapters/config).
+    provider_payload = ai_config.resolve_provider_payload(provider)
+    client = OpenAICompatAIClient(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        provider_payload=provider_payload,
+    )
     # Construction-time guard (CRS gemini follow-up
     # ``crs_review_pr9_followup_ceeaa71``): ``runtime_checkable`` Protocol
     # only checks attribute *presence*, so a future adapter that defined
