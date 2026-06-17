@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.9.0] — 2026-06-17 — Real Cost Accounting & Truncation Resilience
+
 ### Added
 - `AIClientTruncationError` in the AIClient port taxonomy — models output-token budget exhaustion (provider `finish_reason="length"`) distinctly from a malformed response, carrying the real `consumed_tokens` (issue #96)
 - Config-sourced provider upstream-routing pin: `HESTAI_AI_PROVIDER_ORDER` (comma-separated upstream slugs, OpenRouter) and `HESTAI_AI_PROVIDER_ROUTING=off` to disable. Defaults to a preferred order with `allow_fallbacks` preserved (prefer, not require), so a preferred-upstream outage degrades gracefully (issue #96)
@@ -206,5 +210,6 @@ This milestone implements the full ADR-0013 Portable Session State specification
 
 ---
 
-[Unreleased]: https://github.com/elevanaltd/hestai-context-mcp/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/elevanaltd/hestai-context-mcp/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/elevanaltd/hestai-context-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/elevanaltd/hestai-context-mcp/compare/v0.7.0...v0.8.0
