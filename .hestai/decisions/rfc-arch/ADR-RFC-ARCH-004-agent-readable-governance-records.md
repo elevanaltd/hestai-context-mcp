@@ -315,17 +315,27 @@ Lists AGRs with optional filtering. Pure read.
     },
     …
   ],
-  "total": <integer>
+  "total": <integer>,
+  "skipped": [
+    {
+      "path": "<repo-relative path>",
+      "parse_error": "<reason the record could not be parsed>"
+    },
+    …
+  ]
 }
 ```
 
 The list is sorted by `authored_at` descending. No paging in v1; implementations MUST handle the full set in a single response. If repository scale requires paging, that is a MINOR schema addition for v1.1.
 
+`skipped` (additive per §3.1.1) is ALWAYS present — an empty array when every in-scope record parsed. It names every file that IS a `DECISION_RECORD` but failed to parse its required §1.2 fields, so a consumer can detect that the listing is incomplete and exactly which records are missing. Entries are sorted by `path` for deterministic output.
+
 **Error cases** (per §3.1.1 envelope):
 
 - `FILTER_INVALID` (`input_validation`) — `status` or `tier` is non-null and not a member of the admissible enum; `context.field` and `context.value` populated.
 - `WORKING_DIR_INVALID` (`io_failure`) — as in §3.2.
-- `RECORD_PARSE_FAILED` (`schema_violation`) — any record under `.hestai/decisions/**` fails to parse. Implementation choice: fail the whole call (recommended) rather than silently dropping the bad record; consumers MUST be able to detect that the list is incomplete.
+
+**Incompleteness handling**: a record under `.hestai/decisions/**` that IS a `DECISION_RECORD` but fails to parse does NOT fail the whole call. It is reported in the `skipped` array (above) — never silently dropped, and never blinding the rest of the index. This satisfies the hard requirement (consumers MUST be able to detect that the list is incomplete) while a single legacy or non-conforming record no longer makes the tool appear dead. (An earlier revision named whole-call `RECORD_PARSE_FAILED` as the recommended choice; the `skipped`-array form is the chosen implementation — detectability is preserved, resilience is improved. `lookup_decision` §3.2 still returns `RECORD_PARSE_FAILED` because a by-TOKEN read targets exactly one record.)
 
 ### 3.4 `trace_supersedure(working_dir, token)`
 

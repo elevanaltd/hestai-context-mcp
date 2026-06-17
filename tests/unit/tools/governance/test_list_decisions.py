@@ -12,8 +12,12 @@ Return::
     }
 
 sorted by authored_at DESCENDING. Optional scope/status/tier filters.
-FILTER_INVALID for a bad enum, WORKING_DIR_INVALID for a bad path,
-RECORD_PARSE_FAILED fails the WHOLE call (no silent drop) per §3.3.
+FILTER_INVALID for a bad enum, WORKING_DIR_INVALID for a bad path. A record
+that IS a DECISION_RECORD but fails to parse is NOT fatal: the parseable
+records are still returned and each unparseable one is reported in an explicit
+``skipped`` array (§3.3). This satisfies the §3.3 invariant — consumers MUST be
+able to detect that the list is incomplete — without one legacy/malformed file
+blinding the entire index. (Silent drop remains forbidden.)
 
 RED: ``tools.list_decisions`` does not exist yet — import raises
 ModuleNotFoundError.
@@ -195,17 +199,26 @@ class TestErrorEnvelope:
         self._assert_envelope(result, "WORKING_DIR_INVALID", "io_failure")
 
     @pytest.mark.unit
-    def test_record_parse_failed_fails_whole_call(self, tmp_path: Path) -> None:
-        """§3.3: a single unparseable record fails the WHOLE call, no silent drop.
+    def test_malformed_record_does_not_blind_the_index(self, tmp_path: Path) -> None:
+        """§3.3: a single unparseable record is reported in ``skipped`` — NOT fatal.
 
-        Consumers MUST be able to detect that the list is incomplete; the tool
-        therefore returns the error envelope rather than dropping the bad file.
+        The parseable record is still returned, and the malformed one surfaces in
+        the explicit ``skipped`` array so the consumer can detect the list is
+        incomplete. One legacy/non-conforming file must not blind the whole index.
         """
         list_decisions = _list_decisions()
         write_record(tmp_path, token=_T1, authored_at="2026-01-01T00:00:00Z")
         write_malformed_record(tmp_path)
         result = list_decisions(str(tmp_path))
-        self._assert_envelope(result, "RECORD_PARSE_FAILED", "schema_violation")
+        # Parseable record is still listed.
+        assert result["ok"] is True
+        assert [r["token"] for r in result["records"]] == [_T1]
+        assert result["total"] == 1
+        # The malformed AGR is surfaced, not silently dropped.
+        assert len(result["skipped"]) == 1
+        skipped = result["skipped"][0]
+        assert "MALFORMED" in skipped["path"]
+        assert isinstance(skipped["parse_error"], str) and skipped["parse_error"]
 
 
 class TestCoLocatedNonAgrFiles:
@@ -308,9 +321,10 @@ class TestCoLocatedNonAgrFiles:
         assert result["total"] == 0
 
     @pytest.mark.unit
-    def test_malformed_agr_still_errors_amid_non_agrs(self, tmp_path: Path) -> None:
-        """§3.3 protection intact: an is-an-AGR-but-broken record errors even when
-        co-located non-AGRs are present (the non-AGRs are not what trips it)."""
+    def test_malformed_agr_skipped_amid_non_agrs(self, tmp_path: Path) -> None:
+        """§3.3 distinction intact: a co-located non-AGR is excluded silently
+        (out of scope), while an is-an-AGR-but-broken record is reported in
+        ``skipped`` (in scope, but unparseable) — not conflated with the non-AGR."""
         list_decisions = _list_decisions()
         write_record(tmp_path, token=_T1, authored_at="2026-01-01T00:00:00Z")
         write_non_agr_record(
@@ -322,10 +336,55 @@ class TestCoLocatedNonAgrFiles:
         )
         write_malformed_record(tmp_path)  # declares DECISION_RECORD, missing fields
         result = list_decisions(str(tmp_path))
-        assert result["ok"] is False
-        assert result["error"]["code"] == "RECORD_PARSE_FAILED"
-        # The failing path is the broken AGR, not the legitimately-typed non-AGR.
-        assert "MALFORMED" in result["error"]["context"]["path"]
+        assert result["ok"] is True
+        assert [r["token"] for r in result["records"]] == [_T1]
+        # Exactly the broken AGR is skipped — the non-AGR is excluded entirely,
+        # not reported as a skip.
+        assert len(result["skipped"]) == 1
+        assert "MALFORMED" in result["skipped"][0]["path"]
+
+
+class TestGracefulDegradation:
+    """§3.3 graceful fallback: a clean store reports an empty ``skipped`` array;
+    unparseable records degrade the call to a partial result, never an error."""
+
+    @pytest.mark.unit
+    def test_clean_store_has_empty_skipped(self, tmp_path: Path) -> None:
+        """When every record parses, ``skipped`` is present and empty — so a
+        consumer can unconditionally read it as the incompleteness signal."""
+        list_decisions = _list_decisions()
+        _seed_three(tmp_path)
+        result = list_decisions(str(tmp_path))
+        assert result["ok"] is True
+        assert result["total"] == 3
+        assert result["skipped"] == []
+
+    @pytest.mark.unit
+    def test_multiple_malformed_all_reported(self, tmp_path: Path) -> None:
+        """Every unparseable record is surfaced; the count is not capped."""
+        list_decisions = _list_decisions()
+        write_record(tmp_path, token=_T1, authored_at="2026-01-01T00:00:00Z")
+        write_malformed_record(tmp_path)
+        # A second malformed AGR under a nested decisions subdir.
+        nested = tmp_path / ".hestai" / "decisions" / "rfc-arch"
+        nested.mkdir(parents=True, exist_ok=True)
+        (nested / "HO-CONTEXT-MCP-BROKEN-20260701.oct.md").write_text(
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            "  TOKEN::HO-CONTEXT-MCP-BROKEN-20260701\n"
+            "===END===\n",
+            encoding="utf-8",
+        )
+        result = list_decisions(str(tmp_path))
+        assert result["ok"] is True
+        assert [r["token"] for r in result["records"]] == [_T1]
+        assert len(result["skipped"]) == 2
+        # Each skip entry carries path + parse_error.
+        for entry in result["skipped"]:
+            assert entry["path"].endswith(".oct.md")
+            assert isinstance(entry["parse_error"], str) and entry["parse_error"]
 
 
 class TestPurity:
