@@ -20,6 +20,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 - `metrics.cost` and `metrics.tokens` now report the provider's **real** figures from the OpenRouter response (via `usage: {include: true}`) instead of local estimates. Previously `cost` overstated real spend by ~15× (flat $0.01/1k) and `tokens` were char-estimated. The flat-rate estimate is retained only for the pre-call cost-projection / abort guard, and as a clearly-labelled fallback when the provider reports no cost (issue #98)
+- `list_decisions` no longer fail-closes the entire index when one record is unparseable. It returns the parseable records plus an always-present `skipped` array naming each malformed `DECISION_RECORD` and why it failed. A single legacy/non-conforming file (e.g. a pre-schema ADR) can no longer make the whole tool appear dead. Detectability of an incomplete list — the ADR-RFC-ARCH-004 §3.3 hard requirement — is preserved via `skipped`; silent dropping remains forbidden. `lookup_decision` (by-TOKEN) still returns `RECORD_PARSE_FAILED`, since it targets exactly one record (ADR-RFC-ARCH-004 §3.3)
 
 ### Fixed
 - Stage-2 prose→OCTAVE (`submit_governance` prose mode) no longer fails non-deterministically when OpenRouter routes a reasoning model onto an upstream that truncates at the token cap: the pin reduces routing nondeterminism and `finish_reason="length"` is now surfaced as an actionable truncation error instead of an opaque protocol error (issue #96)
