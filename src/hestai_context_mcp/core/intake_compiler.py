@@ -42,6 +42,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientTransportError,
     AIClientTruncationError,
     CompletionRequest,
+    CompletionResult,
 )
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 
@@ -70,11 +71,18 @@ _REQUEST_TIMEOUT_SECONDS = 60
 
 
 class CompileMetrics(TypedDict):
-    """Per-call metrics (PROD::I4). ``cost`` is the projected USD cost."""
+    """Per-call metrics (PROD::I4).
+
+    ``tokens`` / ``cost`` are the provider's REAL figures when available
+    (issue #98). ``cost_is_estimate`` is ``True`` when the provider reported no
+    cost and the value is a flat-rate local estimate rather than an actual — so
+    consumers never mistake an estimate for a billed figure.
+    """
 
     tokens: int
     cost: float
     model: str
+    cost_is_estimate: bool
 
 
 class CompileResult(TypedDict):
@@ -161,16 +169,45 @@ def _project_tokens(intake_context: IntakeContext, max_output_tokens: int) -> in
     return _estimate_input_tokens(intake_context) + max_output_tokens
 
 
-def _failure(model: str, error: str, tokens: int = 0, cost: float = 0.0) -> CompileResult:
+def _resolve_cost(
+    provider_cost: float | None, tokens: int, price_per_1k: float
+) -> tuple[float, bool]:
+    """Return ``(cost, is_estimate)`` preferring the provider's real cost.
+
+    Issue #98: when the provider reports a real cost, use it verbatim and mark
+    it as actual. Otherwise fall back to the flat-rate projection
+    (``tokens / 1000 * price_per_1k``) and mark it as an estimate so consumers
+    never mistake the local approximation for a billed figure.
+    """
+    if provider_cost is not None:
+        return provider_cost, False
+    return (tokens / 1000.0) * price_per_1k, True
+
+
+def _failure(
+    model: str,
+    error: str,
+    tokens: int = 0,
+    cost: float = 0.0,
+    *,
+    cost_is_estimate: bool = True,
+) -> CompileResult:
     return {
         "ok": False,
         "octave": None,
-        "metrics": {"tokens": tokens, "cost": cost, "model": model},
+        "metrics": {
+            "tokens": tokens,
+            "cost": cost,
+            "model": model,
+            "cost_is_estimate": cost_is_estimate,
+        },
         "error": error,
     }
 
 
-async def _run_completion(client: AIClient, prompt: str, user_prompt: str, max_tokens: int) -> str:
+async def _run_completion(
+    client: AIClient, prompt: str, user_prompt: str, max_tokens: int
+) -> CompletionResult:
     async with client as c:
         return await c.complete_text(
             CompletionRequest(
@@ -232,28 +269,38 @@ async def compile_prose_to_octave(
 
     client = build_default_ai_client()
     if client is None:
-        return _failure(model, "No AIClient available (no credential configured).")
+        # Issue #99 (Finding 2): no credential → definitively $0; the provider
+        # was never called so cost_is_estimate=False (not an approximation).
+        return _failure(
+            model, "No AIClient available (no credential configured).", cost_is_estimate=False
+        )
 
     user_prompt = f"BEGIN_REQUEST\n{intake_context.prose_input}\nEND_REQUEST"
     try:
-        raw = await _run_completion(client, intake_context.prompt, user_prompt, out_cap)
+        result = await _run_completion(client, intake_context.prompt, user_prompt, out_cap)
     except AIClientAuthError as exc:
-        return _failure(model, f"AIClient auth error (permanent, no retry): {exc}")
+        # Issue #99 (Finding 2): auth rejection is pre-billing; definitively $0.
+        return _failure(
+            model, f"AIClient auth error (permanent, no retry): {exc}", cost_is_estimate=False
+        )
     except AIClientTransportError as exc:
         return _failure(model, f"AIClient transport error (call failed): {exc}")
     except AIClientTruncationError as exc:
         # Issue #96: the provider hit the output-token cap (budget exhausted)
-        # and BILLED for the truncated call. Record the REAL tokens/cost so the
+        # and BILLED for the truncated call. Record the REAL tokens so the
         # metrics stop under-reporting as 0/0. Do NOT retry: an identical
         # re-issue would re-truncate and burn budget for the same outcome.
+        # Issue #98: price with the provider's REAL cost when reported; else
+        # fall back to a labelled flat-rate estimate.
         consumed = exc.consumed_tokens
-        truncation_cost = (consumed / 1000.0) * price_per_1k
+        billed_cost, cost_is_estimate = _resolve_cost(exc.cost, consumed, price_per_1k)
         logger.warning(
-            "intake compile truncated: model=%s consumed_tokens=%d billed_cost=$%.4f "
+            "intake compile truncated: model=%s consumed_tokens=%d cost=$%.4f estimate=%s "
             "(output cap hit; not retried)",
             model,
             consumed,
-            truncation_cost,
+            billed_cost,
+            cost_is_estimate,
         )
         return _failure(
             model,
@@ -262,29 +309,42 @@ async def compile_prose_to_octave(
                 f"{exc}. Consumed {consumed} tokens."
             ),
             tokens=consumed,
-            cost=truncation_cost,
+            cost=billed_cost,
+            cost_is_estimate=cost_is_estimate,
         )
     except AIClientError as exc:
         return _failure(model, f"AIClient error: {exc.__class__.__name__}: {exc}")
 
-    if not isinstance(raw, str) or not raw.strip():
+    raw = result.content
+    if not raw.strip():
         return _failure(model, "Backend returned empty response; no OCTAVE produced.")
 
-    # Reported metric = input estimate + ACTUAL output (NOT the output ceiling).
-    # The pre-call guard used out_cap as a worst case; the post-call metric must
-    # reflect the real output size so tokens/cost are not double-counted.
-    actual_output_tokens = _ceil_div(len(raw), _CHARS_PER_TOKEN)
-    actual_tokens = _estimate_input_tokens(intake_context) + actual_output_tokens
-    cost = (actual_tokens / 1000.0) * price_per_1k
+    # Issue #98: report the provider's REAL usage and cost. The pre-call guard
+    # used out_cap as a worst case; the post-call metric reflects reality.
+    # Tokens: prefer the provider total; fall back to a char-based estimate only
+    # when the provider reports no usage. Cost: prefer the provider's real cost;
+    # fall back to a labelled flat-rate estimate when None.
+    if result.total_tokens is not None:
+        actual_tokens = result.total_tokens
+    else:
+        actual_output_tokens = _ceil_div(len(raw), _CHARS_PER_TOKEN)
+        actual_tokens = _estimate_input_tokens(intake_context) + actual_output_tokens
+    cost, cost_is_estimate = _resolve_cost(result.cost, actual_tokens, price_per_1k)
     logger.info(
-        "intake compile ok: model=%s actual_tokens=%d est_cost=$%.4f",
+        "intake compile ok: model=%s tokens=%d cost=$%.4f estimate=%s",
         model,
         actual_tokens,
         cost,
+        cost_is_estimate,
     )
     return {
         "ok": True,
         "octave": raw,
-        "metrics": {"tokens": actual_tokens, "cost": cost, "model": model},
+        "metrics": {
+            "tokens": actual_tokens,
+            "cost": cost,
+            "model": model,
+            "cost_is_estimate": cost_is_estimate,
+        },
         "error": None,
     }

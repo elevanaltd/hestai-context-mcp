@@ -55,10 +55,12 @@ class _StubClient:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         self.closed = True
 
-    async def complete_text(self, request: Any) -> str:  # CompletionRequest
+    async def complete_text(self, request: Any):  # -> CompletionResult
+        from hestai_context_mcp.ports.ai_client import CompletionResult
+
         if self._raises is not None:
             raise self._raises
-        return self._text
+        return CompletionResult(content=self._text)
 
 
 @pytest.fixture

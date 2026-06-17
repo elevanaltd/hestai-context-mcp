@@ -33,6 +33,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientTransportError,
     AIClientTruncationError,
     CompletionRequest,
+    CompletionResult,
 )
 
 _SAMPLE_AGR = (
@@ -62,11 +63,29 @@ _BLOCKED_RESPONSE = (
 
 
 class _StubClient:
-    """Async-context AIClient stub capturing the request it received."""
+    """Async-context AIClient stub capturing the request it received.
 
-    def __init__(self, *, text: str = "", raises: BaseException | None = None) -> None:
+    Returns a ``CompletionResult`` (issue #98). Usage/cost default to ``None`` so
+    a bare stub exercises the estimate-fallback path; pass them to exercise the
+    real-usage path.
+    """
+
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        raises: BaseException | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+        cost: float | None = None,
+    ) -> None:
         self._text = text
         self._raises = raises
+        self._prompt_tokens = prompt_tokens
+        self._completion_tokens = completion_tokens
+        self._total_tokens = total_tokens
+        self._cost = cost
         self.request: CompletionRequest | None = None
         self.entered = False
         self.closed = False
@@ -78,11 +97,17 @@ class _StubClient:
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self.closed = True
 
-    async def complete_text(self, request: CompletionRequest) -> str:
+    async def complete_text(self, request: CompletionRequest) -> CompletionResult:
         self.request = request
         if self._raises is not None:
             raise self._raises
-        return self._text
+        return CompletionResult(
+            content=self._text,
+            prompt_tokens=self._prompt_tokens,
+            completion_tokens=self._completion_tokens,
+            total_tokens=self._total_tokens,
+            cost=self._cost,
+        )
 
 
 @pytest.fixture
@@ -115,10 +140,27 @@ class TestReviewSuccess:
         assert isinstance(result["assessment"], str) and result["assessment"]
         assert isinstance(result["concerns"], list)
         metrics = result["metrics"]
-        assert set(metrics) == {"tokens", "cost", "model"}
+        assert set(metrics) == {"tokens", "cost", "model", "cost_is_estimate"}
         assert isinstance(metrics["tokens"], int) and metrics["tokens"] > 0
         assert isinstance(metrics["cost"], float) and metrics["cost"] >= 0.0
         assert isinstance(metrics["model"], str) and metrics["model"]
+        # Bare stub → no provider cost → labelled estimate.
+        assert metrics["cost_is_estimate"] is True
+
+    async def test_real_usage_and_cost_reported(self, patch_client) -> None:
+        stub = _StubClient(
+            text=_APPROVED_RESPONSE,
+            prompt_tokens=900,
+            completion_tokens=120,
+            total_tokens=1020,
+            cost=0.0021,
+        )
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        metrics = result["metrics"]
+        assert metrics["tokens"] == 1020
+        assert metrics["cost"] == pytest.approx(0.0021)
+        assert metrics["cost_is_estimate"] is False
 
     async def test_concerns_verdict_carries_concern_list(self, patch_client) -> None:
         stub = _StubClient(text=_CONCERNS_RESPONSE)
@@ -200,6 +242,45 @@ class TestPromptIsSemanticScoped:
             assert ("do not produce a facet" in prompt) or ("no facet" in prompt)
 
 
+class TestCostIsEstimateSemantics:
+    """Issue #99 (Finding 3): cost_is_estimate must be False on zero-cost paths.
+
+    Mirrors Finding 2 in intake_compiler: auth errors and no-credential failures
+    cost definitively $0. Transport errors remain ``True`` (unknown billing).
+    """
+
+    async def test_no_credential_blocked_has_cost_is_estimate_false(self, patch_client) -> None:
+        """No AIClient → definitively $0; cost_is_estimate must be False."""
+        patch_client(None)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["metrics"]["cost_is_estimate"] is False, (
+            "No-credential BLOCKED is definitively $0 (provider never called); "
+            "cost_is_estimate must be False, not True"
+        )
+
+    async def test_auth_error_blocked_has_cost_is_estimate_false(self, patch_client) -> None:
+        """Auth error → provider rejected before billing; cost_is_estimate must be False."""
+        stub = _StubClient(raises=AIClientAuthError("no key"))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["metrics"]["cost_is_estimate"] is False, (
+            "Auth error is a pre-billing rejection; cost is definitively $0; "
+            "cost_is_estimate must be False"
+        )
+
+    async def test_transport_error_blocked_retains_cost_is_estimate_true(
+        self, patch_client
+    ) -> None:
+        """Transport error → unknown whether provider billed; cost_is_estimate stays True."""
+        stub = _StubClient(raises=AIClientTransportError("timeout"))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["metrics"]["cost_is_estimate"] is True
+
+
 class TestNoClientAvailable:
     async def test_returns_structured_failure_when_no_client(self, patch_client) -> None:
         patch_client(None)
@@ -267,7 +348,23 @@ class TestFailSoftErrorPaths:
         assert result["verdict"] == "BLOCKED"
         assert result["verdict"] != "APPROVED"
         assert result["metrics"]["tokens"] == 2000
+        # No provider cost on the error → labelled flat-rate estimate.
         assert result["metrics"]["cost"] == pytest.approx(2.0)
+        assert result["metrics"]["cost_is_estimate"] is True
+
+    async def test_truncation_records_real_cost_when_available(
+        self, patch_client, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HESTAI_REVIEW_MAX_COST_USD", "1000000")
+        stub = _StubClient(
+            raises=AIClientTruncationError("truncated", consumed_tokens=2000, cost=0.0031)
+        )
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["metrics"]["tokens"] == 2000
+        assert result["metrics"]["cost"] == pytest.approx(0.0031)
+        assert result["metrics"]["cost_is_estimate"] is False
 
 
 class TestCostCap:

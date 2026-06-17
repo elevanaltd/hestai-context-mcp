@@ -57,6 +57,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientTransportError,
     AIClientTruncationError,
     CompletionRequest,
+    CompletionResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,11 +94,17 @@ _REQUEST_TIMEOUT_SECONDS = 60
 
 
 class ReviewMetrics(TypedDict):
-    """Per-call metrics (PROD::I4). ``cost`` is the projected USD cost."""
+    """Per-call metrics (PROD::I4).
+
+    ``tokens`` / ``cost`` are the provider's REAL figures when available
+    (issue #98). ``cost_is_estimate`` is ``True`` when the provider reported no
+    cost and the value is a flat-rate local estimate, not a billed actual.
+    """
 
     tokens: int
     cost: float
     model: str
+    cost_is_estimate: bool
 
 
 class ReviewResult(TypedDict):
@@ -212,6 +219,20 @@ def _estimate_input_tokens(octave_content: str) -> int:
     return _ceil_div(input_chars, _CHARS_PER_TOKEN)
 
 
+def _resolve_cost(
+    provider_cost: float | None, tokens: int, price_per_1k: float
+) -> tuple[float, bool]:
+    """Return ``(cost, is_estimate)`` preferring the provider's real cost.
+
+    Issue #98: a real provider cost is used verbatim and marked actual; absence
+    falls back to the flat-rate projection and is marked an estimate so consumers
+    never mistake the local approximation for a billed figure.
+    """
+    if provider_cost is not None:
+        return provider_cost, False
+    return (tokens / 1000.0) * price_per_1k, True
+
+
 def _blocked(
     model: str,
     assessment: str,
@@ -219,13 +240,19 @@ def _blocked(
     *,
     tokens: int = 0,
     cost: float = 0.0,
+    cost_is_estimate: bool = True,
 ) -> ReviewResult:
     """Build a fail-soft BLOCKED result. NEVER fabricates an APPROVED verdict."""
     return {
         "verdict": "BLOCKED",
         "assessment": assessment,
         "concerns": concerns,
-        "metrics": {"tokens": tokens, "cost": cost, "model": model},
+        "metrics": {
+            "tokens": tokens,
+            "cost": cost,
+            "model": model,
+            "cost_is_estimate": cost_is_estimate,
+        },
     }
 
 
@@ -240,7 +267,9 @@ def _parse_concerns(raw_block: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _parse_review(raw: str, model: str, tokens: int, cost: float) -> ReviewResult:
+def _parse_review(
+    raw: str, model: str, tokens: int, cost: float, *, cost_is_estimate: bool
+) -> ReviewResult:
     """Parse the model's line-oriented response into a structured result.
 
     An unparseable verdict degrades to ``CONCERNS`` (never silently
@@ -257,6 +286,12 @@ def _parse_review(raw: str, model: str, tokens: int, cost: float) -> ReviewResul
         if assessment_match
         else raw.strip()[:500] or "No assessment text returned."
     )
+    metrics: ReviewMetrics = {
+        "tokens": tokens,
+        "cost": cost,
+        "model": model,
+        "cost_is_estimate": cost_is_estimate,
+    }
 
     if verdict_match is None:
         # No recognisable verdict -> do not approve; route to a human.
@@ -265,7 +300,7 @@ def _parse_review(raw: str, model: str, tokens: int, cost: float) -> ReviewResul
             "verdict": "CONCERNS",
             "assessment": assessment,
             "concerns": concerns,
-            "metrics": {"tokens": tokens, "cost": cost, "model": model},
+            "metrics": metrics,
         }
 
     verdict: Verdict = verdict_match.group(1)  # type: ignore[assignment]
@@ -273,13 +308,13 @@ def _parse_review(raw: str, model: str, tokens: int, cost: float) -> ReviewResul
         "verdict": verdict,
         "assessment": assessment,
         "concerns": concerns,
-        "metrics": {"tokens": tokens, "cost": cost, "model": model},
+        "metrics": metrics,
     }
 
 
 async def _run_completion(
     client: AIClient, system_prompt: str, user_prompt: str, max_tokens: int
-) -> str:
+) -> CompletionResult:
     async with client as c:
         return await c.complete_text(
             CompletionRequest(
@@ -351,20 +386,25 @@ async def review_governance(
 
     client = build_default_ai_client(tier=tier)
     if client is None:
+        # Issue #99 (Finding 3): no credential → definitively $0; the provider
+        # was never called so cost_is_estimate=False (not an approximation).
         return _blocked(
             model,
             "No AIClient available (no credential configured); cannot run semantic review.",
             ["No AI client/credential available for the semantic review."],
+            cost_is_estimate=False,
         )
 
     user_prompt = f"BEGIN_RECORD\n{octave_content}\nEND_RECORD"
     try:
-        raw = await _run_completion(client, _REVIEW_SYSTEM_PROMPT, user_prompt, out_cap)
+        result = await _run_completion(client, _REVIEW_SYSTEM_PROMPT, user_prompt, out_cap)
     except AIClientAuthError as exc:
+        # Issue #99 (Finding 3): auth rejection is pre-billing; definitively $0.
         return _blocked(
             model,
             f"AIClient auth error (permanent, no retry): {exc}",
             [f"auth error: {exc}"],
+            cost_is_estimate=False,
         )
     except AIClientTransportError as exc:
         return _blocked(
@@ -374,17 +414,19 @@ async def review_governance(
         )
     except AIClientTruncationError as exc:
         # Issue #96: the provider hit the output-token cap and BILLED for the
-        # truncated call. Record the REAL tokens/cost (no 0/0 leak) and do NOT
-        # retry — an identical re-issue would re-truncate. Never fabricate a
-        # verdict; degrade to BLOCKED.
+        # truncated call. Record the REAL tokens (no 0/0 leak) and do NOT retry —
+        # an identical re-issue would re-truncate. Never fabricate a verdict;
+        # degrade to BLOCKED. Issue #98: price with the provider's REAL cost when
+        # reported; else a labelled flat-rate estimate.
         consumed = exc.consumed_tokens
-        truncation_cost = (consumed / 1000.0) * price_per_1k
+        billed_cost, cost_is_estimate = _resolve_cost(exc.cost, consumed, price_per_1k)
         logger.warning(
-            "governance review truncated: model=%s consumed_tokens=%d billed_cost=$%.4f "
+            "governance review truncated: model=%s consumed_tokens=%d cost=$%.4f estimate=%s "
             "(output cap hit; not retried)",
             model,
             consumed,
-            truncation_cost,
+            billed_cost,
+            cost_is_estimate,
         )
         return _blocked(
             model,
@@ -394,7 +436,8 @@ async def review_governance(
             ),
             [f"truncation: {exc}"],
             tokens=consumed,
-            cost=truncation_cost,
+            cost=billed_cost,
+            cost_is_estimate=cost_is_estimate,
         )
     except AIClientError as exc:
         return _blocked(
@@ -403,21 +446,28 @@ async def review_governance(
             [f"{exc.__class__.__name__}: {exc}"],
         )
 
-    if not isinstance(raw, str) or not raw.strip():
+    raw = result.content
+    if not raw.strip():
         return _blocked(
             model,
             "Backend returned an empty response; no semantic verdict produced.",
             ["Empty reviewer response."],
         )
 
-    # Reported metric = input estimate + ACTUAL output (NOT the output ceiling).
-    actual_output_tokens = _ceil_div(len(raw), _CHARS_PER_TOKEN)
-    actual_tokens = _estimate_input_tokens(octave_content) + actual_output_tokens
-    cost = (actual_tokens / 1000.0) * price_per_1k
+    # Issue #98: report the provider's REAL usage and cost. Prefer the provider
+    # total; fall back to a char-based estimate only when usage is absent. Prefer
+    # the real cost; fall back to a labelled flat-rate estimate when None.
+    if result.total_tokens is not None:
+        actual_tokens = result.total_tokens
+    else:
+        actual_output_tokens = _ceil_div(len(raw), _CHARS_PER_TOKEN)
+        actual_tokens = _estimate_input_tokens(octave_content) + actual_output_tokens
+    cost, cost_is_estimate = _resolve_cost(result.cost, actual_tokens, price_per_1k)
     logger.info(
-        "governance review ok: model=%s actual_tokens=%d est_cost=$%.4f",
+        "governance review ok: model=%s tokens=%d cost=$%.4f estimate=%s",
         model,
         actual_tokens,
         cost,
+        cost_is_estimate,
     )
-    return _parse_review(raw, model, actual_tokens, cost)
+    return _parse_review(raw, model, actual_tokens, cost, cost_is_estimate=cost_is_estimate)

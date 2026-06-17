@@ -29,6 +29,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+from dataclasses import dataclass
 from types import TracebackType
 from typing import cast
 
@@ -42,6 +43,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientTransportError,
     AIClientTruncationError,
     CompletionRequest,
+    CompletionResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,43 @@ __all__ = [
     "OpenAICompatAIClient",
     "build_default_ai_client",
 ]
+
+
+@dataclass(frozen=True)
+class _Usage:
+    """Adapter-internal parsed view of a provider ``usage`` block.
+
+    Distinct from the port's :class:`CompletionResult`: this is a transient
+    parse result used to build both the success result and the truncation error.
+    """
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    cost: float | None = None
+
+
+def _coerce_non_negative_int(value: object) -> int | None:
+    """Return ``value`` if it is a non-negative, non-bool int, else ``None``.
+
+    Issue #97: a negative count is invalid telemetry — treat it as absent so it
+    can never bill negative tokens.
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _coerce_non_negative_float(value: object) -> float | None:
+    """Return ``value`` as a non-negative float, else ``None``.
+
+    Accepts int or float (but not bool). A negative or non-numeric cost is
+    invalid telemetry and degrades to ``None`` so the caller falls back to its
+    labelled estimate rather than reporting a bogus actual (issue #98).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and value >= 0:
+        return float(value)
+    return None
 
 
 class OpenAICompatAIClient:
@@ -110,8 +149,8 @@ class OpenAICompatAIClient:
             await self._client.aclose()
             self._client = None
 
-    async def complete_text(self, request: CompletionRequest) -> str:
-        """Execute a chat completion call and return the raw text content."""
+    async def complete_text(self, request: CompletionRequest) -> CompletionResult:
+        """Execute a chat completion call and return content + real usage/cost."""
         if self._client is None:
             # Guarded by the async-context-manager contract; defensive
             # here so misuse fails predictably rather than with a
@@ -153,7 +192,7 @@ class OpenAICompatAIClient:
 
         return self._interpret_response(response)
 
-    def _interpret_response(self, response: httpx.Response) -> str:
+    def _interpret_response(self, response: httpx.Response) -> CompletionResult:
         status = response.status_code
         if status in (401, 403):
             # Do NOT include the response body — it may contain the key
@@ -189,50 +228,60 @@ class OpenAICompatAIClient:
         # carrying the real tokens billed. We deliberately do NOT fall back to
         # ``reasoning``/``reasoning_content``: surfacing chain-of-thought as a
         # compiled artifact is a safety hazard for governance content.
+        usage = self._extract_usage(body)
         finish_reason = first.get("finish_reason")
         if finish_reason == "length":
-            consumed, prompt_tokens, completion_tokens = self._extract_usage(body)
             raise AIClientTruncationError(
                 "provider truncated output at the token cap (finish_reason='length')",
-                consumed_tokens=consumed,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+                consumed_tokens=usage.total_tokens or 0,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                cost=usage.cost,
             )
         content = message.get("content")
         if not isinstance(content, str):
             raise AIClientProtocolError(
                 "provider response 'choices[0].message.content' is not a string"
             )
-        return content
+        # Issue #98: return the provider's real usage + cost alongside content so
+        # the application layer reports accurate metrics, not local estimates.
+        return CompletionResult(
+            content=content,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            cost=usage.cost,
+        )
 
     @staticmethod
-    def _extract_usage(body: object) -> tuple[int, int | None, int | None]:
-        """Pull token counts from an OpenAI-compat ``usage`` block.
+    def _extract_usage(body: object) -> _Usage:
+        """Pull real token counts and cost from an OpenAI-compat ``usage`` block.
 
-        Returns ``(total_tokens, prompt_tokens, completion_tokens)``. Missing or
-        malformed fields degrade to ``0`` for the total and ``None`` for the
-        split — telemetry being unavailable must never mask the truncation.
+        Returns a :class:`_Usage` carrying ``total_tokens`` / ``prompt_tokens`` /
+        ``completion_tokens`` (``None`` when absent) and the real ``cost``
+        (``None`` when the provider reports none). Missing or malformed numeric
+        fields degrade to ``None`` rather than masking a truncation or billing a
+        bogus figure. ``total_tokens`` is reconstructed from the split when the
+        provider omits it but supplies the parts.
         """
         usage = body.get("usage") if isinstance(body, dict) else None
         if not isinstance(usage, dict):
-            return 0, None, None
+            return _Usage()
 
-        def _as_int(value: object) -> int | None:
-            # Issue #97: a negative count is invalid telemetry — treat it as
-            # absent so it can never bill negative tokens / negative cost.
-            return (
-                value
-                if isinstance(value, int) and not isinstance(value, bool) and value >= 0
-                else None
-            )
-
-        prompt_tokens = _as_int(usage.get("prompt_tokens"))
-        completion_tokens = _as_int(usage.get("completion_tokens"))
-        total = _as_int(usage.get("total_tokens"))
-        if total is None:
-            # Reconstruct the total from the split when the provider omits it.
+        prompt_tokens = _coerce_non_negative_int(usage.get("prompt_tokens"))
+        completion_tokens = _coerce_non_negative_int(usage.get("completion_tokens"))
+        total = _coerce_non_negative_int(usage.get("total_tokens"))
+        if total is None and (prompt_tokens is not None or completion_tokens is not None):
+            # Reconstruct the total from the split when the provider omits it but
+            # supplies at least one part. If nothing is reported, leave it None.
             total = (prompt_tokens or 0) + (completion_tokens or 0)
-        return total, prompt_tokens, completion_tokens
+        cost = _coerce_non_negative_float(usage.get("cost"))
+        return _Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total,
+            cost=cost,
+        )
 
 
 def build_default_ai_client(*, tier: str = "default") -> AIClient | None:

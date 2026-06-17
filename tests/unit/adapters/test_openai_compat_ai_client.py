@@ -116,7 +116,8 @@ class TestSuccessPath:
         client = _build_client_with_transport(handler)
         async with client as c:
             out = await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
-        assert out == "synthesised-octave"
+        # Issue #98: complete_text now returns a CompletionResult, not a bare str.
+        assert out.content == "synthesised-octave"
         assert len(calls) == 1
 
     @pytest.mark.asyncio
@@ -134,6 +135,154 @@ class TestSuccessPath:
             await c.complete_text(CompletionRequest(system_prompt="", user_prompt=""))
         auth = seen_headers.get("authorization", "")
         assert auth == "Bearer THE_KEY"
+
+
+class TestSuccessUsageAccounting:
+    """Issue #98: the success path reports the provider's real usage and cost."""
+
+    @pytest.mark.asyncio
+    async def test_usage_field_absent_when_no_provider_payload(self):
+        """Issue #99 (Finding 1): usage must be config-sourced, not hardcoded.
+
+        When ``provider_payload`` is None (no OpenRouter config), the outgoing
+        request body must NOT contain a ``usage`` key. Hardcoding
+        ``{"usage": {"include": True}}`` into the adapter violates PROD::I3 by
+        injecting an OpenRouter-specific knob into every provider.
+        """
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        # No provider_payload → no OpenRouter-specific keys in the payload.
+        client = _build_client_with_transport(handler, provider_payload=None)
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert "usage" not in body, (
+            "PROD::I3 violation: 'usage' is an OpenRouter-specific field and "
+            "must not be hardcoded in the generic adapter; it must come from "
+            "provider_payload in ai_config.py"
+        )
+
+    @pytest.mark.asyncio
+    async def test_usage_field_present_when_in_provider_payload(self):
+        """Issue #99 (Finding 1): usage is forwarded when config-sourced.
+
+        When ``provider_payload`` carries ``{"usage": {"include": True}}`` (set
+        by ``ai_config.resolve_provider_payload`` for OpenRouter), the adapter
+        must forward it verbatim to the provider. This validates the positive
+        path after the config-sourcing fix.
+        """
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        seen: dict[str, object] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return _ok_response("x")
+
+        # Simulate what ai_config.resolve_provider_payload returns for OpenRouter.
+        payload = {
+            "provider": {"order": ["MiniMax"], "allow_fallbacks": True},
+            "usage": {"include": True},
+        }
+        client = _build_client_with_transport(handler, provider_payload=payload)
+        async with client as c:
+            await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        body = seen["body"]
+        assert isinstance(body, dict)
+        assert body.get("usage") == {"include": True}
+
+    @pytest.mark.asyncio
+    async def test_success_returns_real_usage_and_cost(self):
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": "octave"}, "index": 0, "finish_reason": "stop"},
+                    ],
+                    "usage": {
+                        "prompt_tokens": 6900,
+                        "completion_tokens": 3100,
+                        "total_tokens": 10000,
+                        "cost": 0.0043,
+                    },
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        async with client as c:
+            out = await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert out.content == "octave"
+        assert out.prompt_tokens == 6900
+        assert out.completion_tokens == 3100
+        assert out.total_tokens == 10000
+        assert out.cost == 0.0043
+
+    @pytest.mark.asyncio
+    async def test_success_cost_none_when_provider_omits_it(self):
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": "octave"}, "index": 0, "finish_reason": "stop"},
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        async with client as c:
+            out = await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert out.total_tokens == 30
+        assert out.cost is None
+
+    @pytest.mark.asyncio
+    async def test_success_with_no_usage_block_has_none_usage_and_cost(self):
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        client = _build_client_with_transport(lambda req: _ok_response("octave"))
+        async with client as c:
+            out = await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert out.content == "octave"
+        assert out.prompt_tokens is None
+        assert out.completion_tokens is None
+        assert out.total_tokens is None
+        assert out.cost is None
+
+    @pytest.mark.asyncio
+    async def test_negative_cost_is_treated_as_absent(self):
+        """A negative cost is invalid telemetry (mirrors issue #97 token clamp)."""
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": "octave"}, "index": 0, "finish_reason": "stop"},
+                    ],
+                    "usage": {"total_tokens": 30, "cost": -0.5},
+                },
+            )
+
+        client = _build_client_with_transport(handler)
+        async with client as c:
+            out = await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        assert out.cost is None
 
 
 class TestAuthErrorPath:
@@ -394,6 +543,7 @@ class TestTruncationPath:
                         "prompt_tokens": 200,
                         "completion_tokens": 8000,
                         "total_tokens": 8200,
+                        "cost": 0.0142,
                     },
                 },
             )
@@ -406,6 +556,8 @@ class TestTruncationPath:
         assert exc.consumed_tokens == 8200
         assert exc.prompt_tokens == 200
         assert exc.completion_tokens == 8000
+        # Issue #98: the real cost is threaded into the truncation error.
+        assert exc.cost == 0.0142
 
     @pytest.mark.asyncio
     async def test_length_takes_precedence_over_content_type_check(self):

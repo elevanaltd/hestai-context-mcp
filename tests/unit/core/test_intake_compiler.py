@@ -31,6 +31,7 @@ from hestai_context_mcp.ports.ai_client import (
     AIClientTransportError,
     AIClientTruncationError,
     CompletionRequest,
+    CompletionResult,
 )
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 
@@ -45,11 +46,30 @@ def _ctx(prose: str = "record a provider routing decision") -> IntakeContext:
 
 
 class _StubClient:
-    """Async-context AIClient stub capturing the request it received."""
+    """Async-context AIClient stub capturing the request it received.
 
-    def __init__(self, *, text: str = "", raises: BaseException | None = None) -> None:
+    Returns a ``CompletionResult`` (issue #98). ``prompt_tokens`` /
+    ``completion_tokens`` / ``total_tokens`` / ``cost`` default to ``None`` so a
+    bare ``_StubClient(text=...)`` exercises the estimate-fallback path; pass
+    them explicitly to exercise the real-usage path.
+    """
+
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        raises: BaseException | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+        cost: float | None = None,
+    ) -> None:
         self._text = text
         self._raises = raises
+        self._prompt_tokens = prompt_tokens
+        self._completion_tokens = completion_tokens
+        self._total_tokens = total_tokens
+        self._cost = cost
         self.request: CompletionRequest | None = None
         self.entered = False
         self.closed = False
@@ -61,11 +81,17 @@ class _StubClient:
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self.closed = True
 
-    async def complete_text(self, request: CompletionRequest) -> str:
+    async def complete_text(self, request: CompletionRequest) -> CompletionResult:
         self.request = request
         if self._raises is not None:
             raise self._raises
-        return self._text
+        return CompletionResult(
+            content=self._text,
+            prompt_tokens=self._prompt_tokens,
+            completion_tokens=self._completion_tokens,
+            total_tokens=self._total_tokens,
+            cost=self._cost,
+        )
 
 
 @pytest.fixture
@@ -88,10 +114,80 @@ class TestCompileSuccess:
         assert result["octave"] == octave
         assert result["error"] is None
         metrics = result["metrics"]
-        assert set(metrics) == {"tokens", "cost", "model"}
+        assert set(metrics) == {"tokens", "cost", "model", "cost_is_estimate"}
         assert isinstance(metrics["tokens"], int) and metrics["tokens"] > 0
         assert isinstance(metrics["cost"], float) and metrics["cost"] >= 0.0
         assert isinstance(metrics["model"], str) and metrics["model"]
+        # No provider cost on this bare stub → flat-rate estimate, labelled.
+        assert metrics["cost_is_estimate"] is True
+
+
+class TestRealUsageAccounting:
+    """Issue #98: success metrics report the provider's REAL tokens + cost."""
+
+    async def test_real_usage_and_cost_reported_not_estimated(self, patch_client) -> None:
+        octave = "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n===END==="
+        stub = _StubClient(
+            text=octave,
+            prompt_tokens=6900,
+            completion_tokens=3137,
+            total_tokens=10037,
+            cost=0.0043,
+        )
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        metrics = result["metrics"]
+        # Real provider totals, not the char-based estimate.
+        assert metrics["tokens"] == 10037
+        assert metrics["cost"] == pytest.approx(0.0043)
+        assert metrics["cost_is_estimate"] is False
+
+    async def test_real_total_tokens_used_verbatim(self, patch_client) -> None:
+        # The adapter delivers a reconstructed/real total; the caller trusts it.
+        stub = _StubClient(
+            text="===DECISION_RECORD===\n===END===",
+            prompt_tokens=100,
+            completion_tokens=50,
+            total_tokens=150,
+            cost=0.001,
+        )
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["metrics"]["tokens"] == 150
+        assert result["metrics"]["cost"] == pytest.approx(0.001)
+        assert result["metrics"]["cost_is_estimate"] is False
+
+    async def test_no_provider_usage_falls_back_to_char_estimate_tokens(self, patch_client) -> None:
+        # total_tokens absent (provider sent no usage) → char-based token estimate.
+        stub = _StubClient(text="===DECISION_RECORD===\n===END===", total_tokens=None, cost=None)
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        # Falls back to the char estimate (>0) and labels the cost an estimate.
+        assert result["metrics"]["tokens"] > 0
+        assert result["metrics"]["cost_is_estimate"] is True
+
+    async def test_cost_none_falls_back_to_labelled_estimate(
+        self, patch_client, monkeypatch
+    ) -> None:
+        # Real tokens present but NO provider cost → estimate cost, real tokens.
+        monkeypatch.setenv("HESTAI_INTAKE_USD_PER_1K_TOKENS", "1.0")
+        # Raise the abort cap so the pre-call guard does not short-circuit.
+        monkeypatch.setenv("HESTAI_INTAKE_MAX_COST_USD", "1000000")
+        stub = _StubClient(
+            text="===DECISION_RECORD===\n===END===",
+            prompt_tokens=100,
+            completion_tokens=50,
+            total_tokens=150,
+            cost=None,
+        )
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        metrics = result["metrics"]
+        # Real tokens are still used even when cost is estimated.
+        assert metrics["tokens"] == 150
+        # Estimate = real tokens * flat rate, clearly labelled.
+        assert metrics["cost"] == pytest.approx(150 / 1000.0)
+        assert metrics["cost_is_estimate"] is True
 
     async def test_uses_jit_prompt_from_context(self, patch_client) -> None:
         stub = _StubClient(text="===DECISION_RECORD===\n===END===")
@@ -103,6 +199,49 @@ class TestCompileSuccess:
         assert stub.request.system_prompt == ctx.prompt
         # The prose is the user prompt (delimited).
         assert ctx.prose_input in stub.request.user_prompt
+
+
+class TestCostIsEstimateSemantics:
+    """Issue #99 (Finding 2): cost_is_estimate must be False on zero-cost paths.
+
+    Auth errors and no-credential failures cost definitively $0 — the provider
+    never billed. Marking them ``cost_is_estimate=True`` is semantically wrong;
+    the cost is not estimated, it is exactly $0.
+
+    Transport errors and generic AIClientError are left as ``True`` (genuinely
+    unknown whether the provider billed before the connection was lost).
+    """
+
+    async def test_no_credential_failure_has_cost_is_estimate_false(self, patch_client) -> None:
+        """No AIClient → definitively $0; cost_is_estimate must be False."""
+        patch_client(None)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is False
+        assert result["metrics"]["cost_is_estimate"] is False, (
+            "No-credential failure is definitively $0 (provider never called); "
+            "cost_is_estimate must be False, not True"
+        )
+
+    async def test_auth_error_failure_has_cost_is_estimate_false(self, patch_client) -> None:
+        """Auth error → provider rejected before billing; cost_is_estimate must be False."""
+        stub = _StubClient(raises=AIClientAuthError("no key"))
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is False
+        assert result["metrics"]["cost_is_estimate"] is False, (
+            "Auth error is a pre-billing rejection; cost is definitively $0; "
+            "cost_is_estimate must be False"
+        )
+
+    async def test_transport_error_failure_retains_cost_is_estimate_true(
+        self, patch_client
+    ) -> None:
+        """Transport error → unknown whether provider billed; cost_is_estimate stays True."""
+        stub = _StubClient(raises=AIClientTransportError("timeout"))
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is False
+        assert result["metrics"]["cost_is_estimate"] is True
 
 
 class TestNoClientAvailable:
@@ -154,7 +293,7 @@ class _CountingStub:
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         return None
 
-    async def complete_text(self, request: CompletionRequest) -> str:
+    async def complete_text(self, request: CompletionRequest) -> CompletionResult:
         self.calls += 1
         raise self._raises
 
@@ -179,21 +318,40 @@ class TestTruncationAccounting:
         assert result["error"]
         assert "truncat" in result["error"].lower()
 
-    async def test_truncation_records_real_tokens_and_cost(self, patch_client, monkeypatch) -> None:
-        # Deterministic pricing so cost is exactly tokens/1000 * price.
+    async def test_truncation_records_real_tokens_estimated_cost(
+        self, patch_client, monkeypatch
+    ) -> None:
+        # Deterministic pricing so the estimate is exactly tokens/1000 * price.
         monkeypatch.setenv("HESTAI_INTAKE_USD_PER_1K_TOKENS", "1.0")
         # Raise the abort cap so the pre-call cost guard does not short-circuit;
         # we want the truncation branch (post-call) to be exercised.
         monkeypatch.setenv("HESTAI_INTAKE_MAX_COST_USD", "1000000")
+        # No real cost on the error → fall back to the labelled estimate.
         stub = _StubClient(raises=AIClientTruncationError("truncated", consumed_tokens=8000))
         patch_client(stub)
         result = await compile_prose_to_octave(_ctx())
         metrics = result["metrics"]
         # The REAL billed tokens, not 0.
         assert metrics["tokens"] == 8000
-        # NON-zero cost computed from consumed tokens at the configured price.
+        # No provider cost → estimate from consumed tokens at the configured price.
         assert metrics["cost"] == pytest.approx(8.0)
+        assert metrics["cost_is_estimate"] is True
         assert metrics["model"]
+
+    async def test_truncation_records_real_cost_when_available(
+        self, patch_client, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HESTAI_INTAKE_MAX_COST_USD", "1000000")
+        # Issue #98: the error carries the provider's real cost → use it verbatim.
+        stub = _StubClient(
+            raises=AIClientTruncationError("truncated", consumed_tokens=8000, cost=0.0142)
+        )
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        metrics = result["metrics"]
+        assert metrics["tokens"] == 8000
+        assert metrics["cost"] == pytest.approx(0.0142)
+        assert metrics["cost_is_estimate"] is False
 
     async def test_truncation_is_not_retried(self, patch_client) -> None:
         stub = _CountingStub(raises=AIClientTruncationError("truncated", consumed_tokens=8000))
