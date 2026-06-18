@@ -201,6 +201,44 @@ class TestCompressionContract:
         assert marker not in ctx.prompt
 
 
+class TestMetadataFidelityContract:
+    """The prompt must forbid fabricating governance provenance.
+
+    Live-tool testing showed the compiler copied RATIFIED / RATIFIED_BY /
+    ISSUE_REF / dates from the exemplar corpus, auto-asserting a human
+    ratification that never happened. The contract must constrain metadata to
+    what the prose supports and leave ratification to the human merge.
+    """
+
+    def test_prompt_defaults_status_to_proposed(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        assert "PROPOSED" in ctx.prompt
+
+    def test_prompt_forbids_fabricated_ratification(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        lower = ctx.prompt.lower()
+        assert "fabricate" in lower
+        # The specific fabricated provenance fields are named so the model knows.
+        assert "RATIFIED_BY" in ctx.prompt
+        assert "ratification" in lower and "merge" in lower
+
+    def test_prompt_treats_corpus_as_shape_not_data_to_clone(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        lower = ctx.prompt.lower()
+        # Dates / issue refs must not be copied from the exemplar corpus.
+        assert "copy" in lower or "clone" in lower
+
+    def test_prompt_suppresses_reasoning_output(self, tmp_path: Path) -> None:
+        # Output discipline: emit ONLY the OCTAVE block (curbs the reasoning-token
+        # spend that truncated large inputs at the output cap).
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        assert "no reasoning" in ctx.prompt.lower()
+
+
 class TestVerifySupersessionTarget:
     def test_existing_target_returns_true(self, tmp_path: Path) -> None:
         _seed_repo(tmp_path)
