@@ -42,6 +42,19 @@ _VALID_OCTAVE = (
 )
 _INVALID_OCTAVE = "this is not octave at all"
 
+# Syntactically VALID (passes Gates A+B) but verbose: a single DECISION value far
+# over the word ceiling. Exercises the density backstop in ``_gate``.
+_VERBOSE_DECISION = " ".join(f"word{i}" for i in range(200))
+_VERBOSE_OCTAVE = (
+    "===DECISION_RECORD===\n"
+    "META:\n"
+    "  TYPE::DECISION_RECORD\n"
+    f'  TOKEN::"{RECORD_TOKEN}"\n'
+    "---\n"
+    f'DECISION::"{_VERBOSE_DECISION}"\n'
+    "===END===\n"
+)
+
 
 def _ctx(prose: str = "record a decision") -> IntakeContext:
     return IntakeContext(prose_input=prose, corpus="", prompt="PROMPT", relevant_tokens=())
@@ -113,6 +126,30 @@ class TestRetryOnce:
         assert "sentinel" in retry_ctx.prompt.lower() or "octave" in retry_ctx.prompt.lower()
 
 
+class TestVerbosityBackstop:
+    async def test_verbose_but_valid_then_compressed_retries_once(
+        self, tmp_path: Path, stub_backend
+    ) -> None:
+        # First attempt is valid-but-verbose -> density lint fails the gate ->
+        # informed retry -> second (compressed) attempt passes.
+        stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VALID_OCTAVE)])
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is True
+        assert result["octave"] == _VALID_OCTAVE
+        assert result["attempts"] == 2
+        # The retry prompt must carry the verbosity feedback so the 2nd attempt is informed.
+        retry_ctx = stub_backend.calls[1][0]
+        assert "VERBOSITY" in retry_ctx.prompt
+
+    async def test_persistently_verbose_aborts(self, tmp_path: Path, stub_backend) -> None:
+        stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VERBOSE_OCTAVE)])
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is False
+        assert result["octave"] is None
+        assert any("VERBOSITY" in e for e in result["validation_errors"])
+        assert result["attempts"] == 2
+
+
 class TestAbortImmunity:
     async def test_double_fail_aborts_with_errors(self, tmp_path: Path, stub_backend) -> None:
         stub_backend.script([_compile_result(_INVALID_OCTAVE), _compile_result(_INVALID_OCTAVE)])
@@ -132,6 +169,22 @@ class TestAbortImmunity:
         await run_intake_pipeline(tmp_path, _ctx())
         after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
         assert before == after  # ZERO filesystem writes on double-fail
+
+    async def test_persistent_verbosity_writes_nothing_to_filesystem(
+        self, tmp_path: Path, stub_backend
+    ) -> None:
+        # Mirror of test_double_fail_writes_nothing_to_filesystem for the
+        # VERBOSITY-driven abort path: two valid-but-verbose attempts fail the
+        # density gate, so the pipeline aborts. Hallucination immunity must hold
+        # on this path too -> ZERO filesystem writes.
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+        stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VERBOSE_OCTAVE)])
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        # Precondition: this really is the verbosity abort path.
+        assert result["ok"] is False
+        assert any("VERBOSITY" in e for e in result["validation_errors"])
+        after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+        assert before == after  # ZERO filesystem writes on verbosity-driven abort
 
     async def test_validate_retry_abort_loop_never_invokes_linker(self) -> None:
         # Structural invariant: the Stage-3 validate->retry->abort LOOP
