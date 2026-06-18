@@ -170,6 +170,22 @@ class TestAbortImmunity:
         after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
         assert before == after  # ZERO filesystem writes on double-fail
 
+    async def test_persistent_verbosity_writes_nothing_to_filesystem(
+        self, tmp_path: Path, stub_backend
+    ) -> None:
+        # Mirror of test_double_fail_writes_nothing_to_filesystem for the
+        # VERBOSITY-driven abort path: two valid-but-verbose attempts fail the
+        # density gate, so the pipeline aborts. Hallucination immunity must hold
+        # on this path too -> ZERO filesystem writes.
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+        stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VERBOSE_OCTAVE)])
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        # Precondition: this really is the verbosity abort path.
+        assert result["ok"] is False
+        assert any("VERBOSITY" in e for e in result["validation_errors"])
+        after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+        assert before == after  # ZERO filesystem writes on verbosity-driven abort
+
     async def test_validate_retry_abort_loop_never_invokes_linker(self) -> None:
         # Structural invariant: the Stage-3 validate->retry->abort LOOP
         # (run_intake_pipeline) must never call the linker. The Stage-4

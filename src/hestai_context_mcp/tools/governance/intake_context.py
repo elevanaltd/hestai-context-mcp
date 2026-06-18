@@ -12,9 +12,17 @@ It composes, deterministically and read-only:
       relevant to ``prose_input``,
   (d) a clip to the ~25k-char budget that RETAINS the newest AGRs (date-suffix
       ordered) rather than naive head truncation of the feed, and
-  (e) a JIT-compiled prompt built from the live corpus at call time — there is
-      NO module-level hardcoded system-prompt constant (A9; enforced by
-      ``tests/unit/test_source_invariants.py``).
+  (e) a JIT-compiled prompt built from the live corpus at call time. A9 forbids
+      a baked *full-prompt/corpus* constant — i.e. the assembled system prompt
+      (compression contract + token note + exemplar corpus) must NOT be frozen
+      into a module-level constant, because the corpus and the referenced-token
+      note are JIT-composed from live repo state on every call. A9 does NOT
+      forbid a static INSTRUCTION contract: the fixed compiler directives live in
+      the ``_COMPRESSION_CONTRACT`` constant (it carries no corpus and no token
+      note) and are interpolated into the JIT prompt by ``_compile_jit_prompt``.
+      Enforced by ``tests/unit/test_source_invariants.py`` (the regex bans a
+      module constant named ``*SYSTEM_PROMPT``/``*JIT_PROMPT``/``*PROMPT_TEMPLATE``,
+      not the instruction contract).
 
 North Star boundary (PROD §4 IS_NOT: octave-mcp owns the format): regex and
 string search only — no OCTAVE AST, no LLM. Deterministic for identical
