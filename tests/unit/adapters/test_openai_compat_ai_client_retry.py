@@ -304,6 +304,148 @@ class TestNoRetryOnPermanentOrDistinctErrors:
         assert len(calls) == 1
         assert sleep.calls == []
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [400, 404, 422])
+    async def test_deterministic_non_200_status_is_not_retried(self, status: int):
+        """Critical-engineer (#1186): a 4xx 'protocol surprise' is NOT the flaky
+        malformed-body signature — it fails identically on every attempt, so the
+        retry loop must NOT re-issue it. It raises the plain AIClientProtocolError
+        base (not the retryable _MalformedBodyError subclass) and propagates on
+        the first response.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientProtocolError,
+            CompletionRequest,
+        )
+
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(status, json={"error": "client error"})
+
+        sleep = _SleepSpy()
+        client = _build_client_with_transport(
+            handler, max_attempts=3, retry_backoff_seconds=0.0, sleep=sleep
+        )
+        with pytest.raises(AIClientProtocolError) as excinfo:
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        # Exactly one POST — no pointless re-issue of a deterministic failure.
+        assert len(calls) == 1
+        assert sleep.calls == []
+        # Surfaces the unexpected-status message, not the generic exhaustion text.
+        assert "unexpected HTTP status" in str(excinfo.value)
+        assert "after" not in str(excinfo.value)  # not the exhaustion message
+
+
+class TestAllMalformed200ShapesAreRetried:
+    """Every malformed-200 BODY shape is the transient signature → retried.
+
+    Pins the retry-eligible set precisely: non-JSON body, missing/empty
+    ``choices``, non-object ``choices[0]``, non-object ``message``, and non-string
+    ``content``. Each malformed-then-valid sequence must SUCCEED on the retry.
+    """
+
+    @staticmethod
+    def _malformed_then_ok(first: httpx.Response):
+        responses = [first, _ok_response("recovered")]
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return responses[len(calls) - 1]
+
+        return handler, calls
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "first_response",
+        [
+            httpx.Response(200, text="not-json-at-all"),
+            httpx.Response(200, json={"no_choices": "here"}),
+            httpx.Response(200, json={"choices": []}),
+            httpx.Response(200, json={"choices": ["not-an-object"]}),
+            httpx.Response(200, json={"choices": [{"message": "not-an-object"}]}),
+            httpx.Response(200, json={"choices": [{"message": None}]}),
+            # CRS (#1186): a truthy NON-LIST ``choices`` (dict/scalar) must NOT
+            # leak a raw KeyError/TypeError past the port taxonomy — it is a
+            # malformed body and must surface as the retryable _MalformedBodyError.
+            httpx.Response(200, json={"choices": {"message": {"content": "x"}}}),
+            httpx.Response(200, json={"choices": 1}),
+            httpx.Response(200, json={"choices": True}),
+            httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": None}, "finish_reason": "stop"}]},
+            ),
+        ],
+        ids=[
+            "non_json_body",
+            "missing_choices",
+            "empty_choices",
+            "choices0_not_object",
+            "message_not_object",
+            "message_null",
+            "choices_dict_not_list",
+            "choices_scalar_int",
+            "choices_scalar_bool",
+            "content_not_string",
+        ],
+    )
+    async def test_malformed_200_shape_is_retried_then_succeeds(
+        self, first_response: httpx.Response
+    ):
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        handler, calls = self._malformed_then_ok(first_response)
+        sleep = _SleepSpy()
+        client = _build_client_with_transport(
+            handler, max_attempts=3, retry_backoff_seconds=0.0, sleep=sleep
+        )
+        async with client as c:
+            out = await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        assert out.content == "recovered"
+        assert len(calls) == 2  # retried exactly once, then succeeded
+        assert len(sleep.calls) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "choices_value",
+        [{"message": {"content": "x"}}, 1, True, "a-string"],
+        ids=["dict", "int", "bool", "str"],
+    )
+    async def test_truthy_non_list_choices_surfaces_as_port_protocol_error(
+        self, choices_value: object
+    ):
+        """CRS (#1186): a truthy non-list ``choices`` must surface through the port
+        exception taxonomy (AIClientProtocolError), never as a raw KeyError /
+        TypeError that bypasses every caller's ``except AIClientError`` fallback.
+        With all attempts malformed it must raise the clearer exhaustion error.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientProtocolError,
+            CompletionRequest,
+        )
+
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(200, json={"choices": choices_value})
+
+        sleep = _SleepSpy()
+        client = _build_client_with_transport(
+            handler, max_attempts=2, retry_backoff_seconds=0.0, sleep=sleep
+        )
+        # Must be a port-taxonomy error, NOT a raw KeyError/TypeError.
+        with pytest.raises(AIClientProtocolError):
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+        # And it is the retryable signature: both attempts were issued.
+        assert len(calls) == 2
+
 
 class TestRetryDefaultsAndBackCompat:
     @pytest.mark.asyncio
@@ -326,7 +468,106 @@ class TestRetryDefaultsAndBackCompat:
         assert len(calls) == 1
         assert sleep.calls == []
 
-    def test_default_max_attempts_is_bounded_and_small(self):
-        """A sensible bounded default exists (MIP): >1 to retry, but small."""
-        client = _build_client_with_transport(lambda req: _ok_response("x"))
-        assert 2 <= client._max_attempts <= 3
+    @pytest.mark.asyncio
+    async def test_default_budget_tolerates_one_transient_malformed(self):
+        """Behavioural proof the DEFAULT budget retries (MIP: >1 attempt).
+
+        With no retry knobs supplied, a single malformed-then-valid sequence must
+        still recover — pinning that the shipped default is >1 attempt without
+        reaching into the private ``_max_attempts`` attribute.
+        """
+        from hestai_context_mcp.ports.ai_client import CompletionRequest
+
+        responses = [_malformed_response(), _ok_response("default-recovered")]
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return responses[len(calls) - 1]
+
+        # Inject only the sleep spy so no real backoff elapses; attempts/backoff
+        # use the shipped defaults.
+        sleep = _SleepSpy()
+        client = _build_client_with_transport(handler, sleep=sleep)
+        async with client as c:
+            out = await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        assert out.content == "default-recovered"
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_max_attempts_one_disables_retry(self):
+        """``max_attempts=1`` makes exactly one POST and never retries/sleeps."""
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientProtocolError,
+            CompletionRequest,
+        )
+
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return _malformed_response()
+
+        sleep = _SleepSpy()
+        client = _build_client_with_transport(handler, max_attempts=1, sleep=sleep)
+        with pytest.raises(AIClientProtocolError):
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        assert len(calls) == 1
+        assert sleep.calls == []
+
+    @pytest.mark.asyncio
+    async def test_max_attempts_zero_is_clamped_to_one_call(self):
+        """A misconfigured ``max_attempts=0`` clamps to 1 — the request still fires.
+
+        The clamp guarantees a bad config can never silently disable the call.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientProtocolError,
+            CompletionRequest,
+        )
+
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return _malformed_response()
+
+        sleep = _SleepSpy()
+        client = _build_client_with_transport(handler, max_attempts=0, sleep=sleep)
+        with pytest.raises(AIClientProtocolError):
+            async with client as c:
+                await c.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        assert len(calls) == 1
+        assert sleep.calls == []
+
+
+class TestMisuseGuardIsNotRetried:
+    @pytest.mark.asyncio
+    async def test_complete_text_outside_async_with_raises_immediately(self):
+        """Calling ``complete_text`` without entering ``async with`` is a misuse
+        (programming error, not a transient flake) and must raise immediately —
+        it must NOT be swallowed and re-issued by the retry loop.
+        """
+        from hestai_context_mcp.ports.ai_client import (
+            AIClientProtocolError,
+            CompletionRequest,
+        )
+
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return _ok_response("never-reached")
+
+        sleep = _SleepSpy()
+        client = _build_client_with_transport(handler, sleep=sleep)
+        # NOTE: deliberately NOT using ``async with`` — the client is never opened.
+        with pytest.raises(AIClientProtocolError, match="async-with"):
+            await client.complete_text(CompletionRequest(system_prompt="s", user_prompt="u"))
+
+        assert calls == []  # no POST ever issued
+        assert sleep.calls == []  # not retried

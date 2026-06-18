@@ -66,6 +66,24 @@ _DEFAULT_MAX_ATTEMPTS = 3
 _DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
 
 
+class _MalformedBodyError(AIClientProtocolError):
+    """Adapter-private marker: a 200-OK response whose BODY shape is malformed.
+
+    Issue #1186: this is the *transient* protocol failure worth retrying — the
+    provider returned HTTP 200 but the JSON envelope was unparseable or shaped
+    wrong (non-JSON body, missing/empty ``choices``, non-object ``choices[0]`` /
+    ``message``, or non-string ``content``). The SAME input typically compiles on
+    the next attempt, so the retry loop re-issues ONLY this subclass.
+
+    Deliberately a *subclass* of :class:`AIClientProtocolError` so callers and
+    the port contract are unchanged (it still surfaces as a protocol error). A
+    *deterministic* protocol surprise — an unexpected non-200 status such as 400
+    / 404 / 422 — keeps raising the plain ``AIClientProtocolError`` base, which
+    the retry loop does NOT catch: re-issuing a 4xx would burn latency/budget for
+    a guaranteed-identical failure (critical-engineer review, #1186).
+    """
+
+
 @dataclass(frozen=True)
 class _Usage:
     """Adapter-internal parsed view of a provider ``usage`` block.
@@ -175,31 +193,35 @@ class OpenAICompatAIClient:
     async def complete_text(self, request: CompletionRequest) -> CompletionResult:
         """Execute a chat completion call and return content + real usage/cost.
 
-        Issue #1186: a single transient ``AIClientProtocolError`` (a 200-OK body
-        whose shape is malformed — e.g. ``content`` is not a string) is retried
-        up to ``max_attempts`` total POSTs with a small backoff. The retry is
-        deliberately NARROW: only ``AIClientProtocolError`` re-issues the call.
-        ``AIClientAuthError`` (permanent), ``AIClientTransportError`` (the port
-        contract says "do not retry within the request"), and
+        Issue #1186: a transient malformed 200-OK body (``_MalformedBodyError``
+        — e.g. non-JSON body, missing/empty ``choices``, or ``content`` not a
+        string) is retried up to ``max_attempts`` total POSTs with a small
+        backoff. The retry is deliberately NARROW: only ``_MalformedBodyError``
+        (the malformed-200-body subclass of ``AIClientProtocolError``) re-issues
+        the call. ``AIClientAuthError`` (permanent), ``AIClientTransportError``
+        (the port contract says "do not retry within the request"),
         ``AIClientTruncationError`` (a re-issue would re-truncate and burn
-        budget) are distinct exception classes that propagate immediately on the
-        first occurrence. On exhaustion a clearer, actionable
-        ``AIClientProtocolError`` is raised, preserving the underlying detail on
-        the exception chain.
+        budget), AND a deterministic non-200 protocol surprise (the plain
+        ``AIClientProtocolError`` base, e.g. 400/404/422 — fails identically
+        every time) all propagate immediately on the first occurrence. On
+        exhaustion a clearer, actionable ``AIClientProtocolError`` is raised,
+        preserving the underlying detail on the exception chain.
         """
         if self._client is None:
             # Guarded by the async-context-manager contract; defensive here so
             # misuse fails predictably (and is NOT swallowed by the retry loop —
             # this is a programming error, not a transient provider flake).
             raise AIClientProtocolError("OpenAICompatAIClient used outside an async-with block")
-        last_protocol_error: AIClientProtocolError | None = None
+        last_protocol_error: _MalformedBodyError | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
                 return await self._attempt_completion(request)
-            except AIClientProtocolError as exc:
+            except _MalformedBodyError as exc:
                 # Transient malformed 200-OK body: retry the whole call until the
-                # budget is exhausted. Auth/transport/truncation are NOT caught
-                # here (distinct classes) so they propagate without retry.
+                # budget is exhausted. Auth, transport, truncation, AND a
+                # deterministic non-200 protocol surprise (plain
+                # AIClientProtocolError, e.g. 400/404/422) are NOT caught here, so
+                # they propagate immediately without a pointless re-issue.
                 last_protocol_error = exc
                 if attempt < self._max_attempts:
                     logger.warning(
@@ -274,21 +296,30 @@ class OpenAICompatAIClient:
         if status in (408, 429) or 500 <= status < 600:
             raise AIClientTransportError(f"provider returned HTTP {status}")
         if status != 200:
-            # Unknown non-2xx: treat as protocol-level surprise.
+            # Unknown non-2xx (e.g. 400/404/422): a DETERMINISTIC protocol
+            # surprise, NOT the transient malformed-body signature. Raise the
+            # plain base so the #1186 retry loop does NOT re-issue it — a 4xx will
+            # fail identically on every attempt (critical-engineer review).
             raise AIClientProtocolError(f"unexpected HTTP status from provider: {status}")
+        # --- Everything below is a 200-OK whose BODY shape is malformed: the
+        # transient signature the #1186 retry loop re-issues (_MalformedBodyError).
         try:
             body = response.json()
         except (json.JSONDecodeError, ValueError) as exc:
-            raise AIClientProtocolError(f"provider returned non-JSON body: {exc}") from exc
+            raise _MalformedBodyError(f"provider returned non-JSON body: {exc}") from exc
         choices = body.get("choices") if isinstance(body, dict) else None
-        if not choices:
-            raise AIClientProtocolError("provider response missing or empty 'choices' array")
+        # Validate the CONTAINER type before indexing: a truthy non-list value
+        # (e.g. a dict or scalar) would otherwise raise a raw KeyError/TypeError
+        # that escapes the port exception taxonomy and bypasses both this retry
+        # loop and every caller's ``except AIClientError`` fallback (CRS, #1186).
+        if not isinstance(choices, list) or not choices:
+            raise _MalformedBodyError("provider response missing or empty 'choices' array")
         first = choices[0]
         if not isinstance(first, dict):
-            raise AIClientProtocolError("provider response 'choices[0]' is not an object")
+            raise _MalformedBodyError("provider response 'choices[0]' is not an object")
         message = first.get("message")
         if not isinstance(message, dict):
-            raise AIClientProtocolError("provider response 'choices[0].message' is not an object")
+            raise _MalformedBodyError("provider response 'choices[0].message' is not an object")
         # Issue #96: inspect the stop condition BEFORE the content type-check.
         # ``finish_reason == "length"`` means the generation hit the output-token
         # cap (budget exhaustion) — a well-formed envelope whose body is
@@ -309,7 +340,7 @@ class OpenAICompatAIClient:
             )
         content = message.get("content")
         if not isinstance(content, str):
-            raise AIClientProtocolError(
+            raise _MalformedBodyError(
                 "provider response 'choices[0].message.content' is not a string"
             )
         # Issue #98: return the provider's real usage + cost alongside content so
