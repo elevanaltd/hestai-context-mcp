@@ -157,6 +157,50 @@ class TestAssembleIntakeContext:
         assert ctx.corpus == "" or isinstance(ctx.corpus, str)
 
 
+class TestCompressionContract:
+    """The JIT prompt must carry an explicit compression contract, not delegate
+    density entirely to the exemplar corpus (the root cause of verbose output).
+    """
+
+    def test_prompt_states_compression_tier(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        assert "CONSERVATIVE" in ctx.prompt
+
+    def test_prompt_mandates_loss_accounting_meta(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        assert "COMPRESSION_TIER" in ctx.prompt
+        assert "LOSS_PROFILE" in ctx.prompt
+
+    def test_prompt_mandates_telegraphic_value_form(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        lower = ctx.prompt.lower()
+        assert "telegraphic" in lower
+        # Operators are named so the model knows what carries the connectives.
+        assert "⊕" in ctx.prompt and "⇌" in ctx.prompt and "→" in ctx.prompt
+
+    def test_prompt_bans_prose_paragraph_values(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        lower = ctx.prompt.lower()
+        # It must reframe the task as COMPRESS, not faithfully transcribe prose.
+        assert "compress" in lower
+        # And forbid the enumerated mega-string / prose paragraph anti-pattern.
+        assert "paragraph" in lower or "prose" in lower
+
+    def test_prompt_still_carries_corpus_and_no_prose(self, tmp_path: Path) -> None:
+        # The compression contract is ADDED; the exemplar corpus contract and the
+        # no-prose-embedding invariant must remain intact.
+        _seed_repo(tmp_path)
+        marker = "ZZ_PROSE_MARKER_QWERTY"
+        ctx = assemble_intake_context(tmp_path, f"{marker} record a decision")
+        assert "BEGIN_EXEMPLAR_CORPUS" in ctx.prompt
+        assert "CONCEPT_CARD" in ctx.prompt
+        assert marker not in ctx.prompt
+
+
 class TestVerifySupersessionTarget:
     def test_existing_target_returns_true(self, tmp_path: Path) -> None:
         _seed_repo(tmp_path)

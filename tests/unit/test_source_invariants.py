@@ -140,12 +140,20 @@ class TestGateCBackendIsProviderAgnostic:
 
 
 class TestGateCContextAssemblerHasNoHardcodedSystemPrompt:
-    """A9: the Stage-1 prompt is JIT-compiled from live repo state.
+    """A9: the assembled Stage-1 *full prompt* is JIT-compiled, never baked.
 
-    There must be no module-level hardcoded multi-line system-prompt
-    constant in ``intake_context.py`` — the prompt is assembled at call
-    time from the live corpus. We assert the absence of a long string
-    literal assigned to a SYSTEM_PROMPT-like module constant.
+    The precise invariant: A9 forbids a module-level constant that bakes the
+    *full prompt or its corpus* — the assembled system prompt is
+    ``_COMPRESSION_CONTRACT`` + a JIT token note + the live exemplar corpus, and
+    the corpus and token note are composed from live repo state on every call,
+    so they must never be frozen into a constant.
+
+    A9 does NOT forbid a static INSTRUCTION contract. The fixed compiler
+    directives legitimately live in the ``_COMPRESSION_CONTRACT`` constant (it
+    carries no corpus and no token note); ``_compile_jit_prompt`` interpolates it
+    with the live corpus at call time. This test therefore bans only a constant
+    NAMED like a baked full prompt (``*SYSTEM_PROMPT``/``*JIT_PROMPT``/
+    ``*PROMPT_TEMPLATE``); it intentionally permits ``_COMPRESSION_CONTRACT``.
     """
 
     _CONTEXT_FILE = _SRC_ROOT / "tools" / "governance" / "intake_context.py"
