@@ -233,7 +233,11 @@ class TestNoRetryOnPermanentOrDistinctErrors:
                     "choices": [
                         {"message": {"content": None}, "index": 0, "finish_reason": "length"},
                     ],
-                    "usage": {"prompt_tokens": 200, "completion_tokens": 8000, "total_tokens": 8200},
+                    "usage": {
+                        "prompt_tokens": 200,
+                        "completion_tokens": 8000,
+                        "total_tokens": 8200,
+                    },
                 },
             )
 

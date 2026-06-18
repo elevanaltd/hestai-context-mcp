@@ -26,9 +26,11 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import cast
@@ -52,6 +54,16 @@ __all__ = [
     "OpenAICompatAIClient",
     "build_default_ai_client",
 ]
+
+# Issue #1186: bounded retry for the transient malformed-response signature.
+# Some providers intermittently return a 200-OK body whose
+# ``choices[0].message.content`` is not a string (or whose ``choices`` shape is
+# otherwise malformed) for an input that compiles fine on the very next call.
+# A small bounded retry below the port turns that flake into a success without
+# changing any caller. Kept minimal (MIP): a sensible hardcoded default rather
+# than a new env knob — the values are constructor-overridable for tests.
+_DEFAULT_MAX_ATTEMPTS = 3
+_DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -103,11 +115,22 @@ class OpenAICompatAIClient:
         timeout_seconds: float = 15.0,
         transport: httpx.AsyncBaseTransport | None = None,
         provider_payload: dict[str, object] | None = None,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        retry_backoff_seconds: float = _DEFAULT_RETRY_BACKOFF_SECONDS,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = float(timeout_seconds)
+        # Issue #1186: bounded retry for the transient malformed-response
+        # signature. ``max_attempts`` is the TOTAL number of POSTs (clamped to a
+        # floor of 1 so a misconfiguration can never disable the request). The
+        # backoff between attempts and the sleep coroutine are injectable so the
+        # retry loop is deterministic and instant under test (no real seconds).
+        self._max_attempts = max(1, int(max_attempts))
+        self._retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+        self._sleep: Callable[[float], Awaitable[None]] = sleep or asyncio.sleep
         # Issue #96: a generic, opaque payload merged into every outgoing
         # /chat/completions body (e.g. OpenRouter ``provider`` routing
         # preferences). The adapter is agnostic about its contents; the
@@ -150,12 +173,58 @@ class OpenAICompatAIClient:
             self._client = None
 
     async def complete_text(self, request: CompletionRequest) -> CompletionResult:
-        """Execute a chat completion call and return content + real usage/cost."""
+        """Execute a chat completion call and return content + real usage/cost.
+
+        Issue #1186: a single transient ``AIClientProtocolError`` (a 200-OK body
+        whose shape is malformed — e.g. ``content`` is not a string) is retried
+        up to ``max_attempts`` total POSTs with a small backoff. The retry is
+        deliberately NARROW: only ``AIClientProtocolError`` re-issues the call.
+        ``AIClientAuthError`` (permanent), ``AIClientTransportError`` (the port
+        contract says "do not retry within the request"), and
+        ``AIClientTruncationError`` (a re-issue would re-truncate and burn
+        budget) are distinct exception classes that propagate immediately on the
+        first occurrence. On exhaustion a clearer, actionable
+        ``AIClientProtocolError`` is raised, preserving the underlying detail on
+        the exception chain.
+        """
         if self._client is None:
-            # Guarded by the async-context-manager contract; defensive
-            # here so misuse fails predictably rather than with a
-            # ``NoneType`` attribute error.
+            # Guarded by the async-context-manager contract; defensive here so
+            # misuse fails predictably (and is NOT swallowed by the retry loop —
+            # this is a programming error, not a transient provider flake).
             raise AIClientProtocolError("OpenAICompatAIClient used outside an async-with block")
+        last_protocol_error: AIClientProtocolError | None = None
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                return await self._attempt_completion(request)
+            except AIClientProtocolError as exc:
+                # Transient malformed 200-OK body: retry the whole call until the
+                # budget is exhausted. Auth/transport/truncation are NOT caught
+                # here (distinct classes) so they propagate without retry.
+                last_protocol_error = exc
+                if attempt < self._max_attempts:
+                    logger.warning(
+                        "provider returned a malformed response (attempt %d/%d): %s; retrying",
+                        attempt,
+                        self._max_attempts,
+                        exc,
+                    )
+                    await self._sleep(self._retry_backoff_seconds)
+        # Exhausted every attempt on the malformed-response signature. Surface a
+        # clearer, actionable error while preserving the low-level cause.
+        raise AIClientProtocolError(
+            f"provider returned an unparseable response after {self._max_attempts} attempts; "
+            "retry later or resubmit in octave_content mode"
+        ) from last_protocol_error
+
+    async def _attempt_completion(self, request: CompletionRequest) -> CompletionResult:
+        """Single POST + response interpretation (one attempt of the retry loop).
+
+        ``complete_text`` has already verified the async-context-manager contract
+        (``self._client`` is open) before entering the retry loop, so the guard
+        below is purely a type-narrowing assertion for mypy — it is never the
+        live failure path.
+        """
+        assert self._client is not None  # narrowed by complete_text's guard
         payload: dict[str, object] = {}
         if self._provider_payload:
             # Merge the opaque config-sourced payload first so the reserved
