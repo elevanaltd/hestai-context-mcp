@@ -230,9 +230,7 @@ class TestStatusEnum:
             target = "HO-CONTEXT-MCP-SUCCESSOR-20260619"
             decisions = tmp_path / ".hestai" / "decisions"
             decisions.mkdir(parents=True, exist_ok=True)
-            (decisions / f"{target}.oct.md").write_text(
-                _record(token=target), encoding="utf-8"
-            )
+            (decisions / f"{target}.oct.md").write_text(_record(token=target), encoding="utf-8")
             extra = f'  SUPERSEDED_BY::"{target}"'
         result = validate_octave_content(tmp_path, _record(status=status, extra_lines=extra))
         assert result.valid, result.errors
@@ -280,14 +278,10 @@ class TestTierEnum:
 
 class TestReservedNames:
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "reserved", ["DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"]
-    )
+    @pytest.mark.parametrize("reserved", ["DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"])
     def test_reserved_field_rejected(self, tmp_path: Path, reserved: str) -> None:
         """A v1.x record carrying a reserved field name is rejected (§1.2)."""
-        result = validate_octave_content(
-            tmp_path, _record(extra_lines=f'  {reserved}::"whatever"')
-        )
+        result = validate_octave_content(tmp_path, _record(extra_lines=f'  {reserved}::"whatever"'))
         assert result.valid is False
         assert any(reserved in e for e in result.errors), result.errors
 
@@ -444,9 +438,7 @@ class TestWriteReadParity:
             _record(status=None),
         ],
     )
-    def test_read_unparseable_record_now_fails_gate_a(
-        self, tmp_path: Path, content: str
-    ) -> None:
+    def test_read_unparseable_record_now_fails_gate_a(self, tmp_path: Path, content: str) -> None:
         # Precondition: the read side considers this an AGR but unparseable.
         assert is_decision_record(content) is True
         assert record_is_parseable(parse_decision_record(content)) is False

@@ -80,6 +80,61 @@ _ISSUE_REF_SHAPE_RE = re.compile(
 # ^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$
 _TOKEN_FORMAT_RE = re.compile(r"^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$")
 
+# --- ADR-RFC-ARCH-004 §1.2 / §4.1 shared write/read contract constants --------
+# These are the SINGLE SOURCE OF TRUTH for the AGR required-field set and the
+# STATUS/TIER enums. The read side (``agr_read``) derives its parse-completeness
+# tuple from ``REQUIRED_META_FIELDS`` (lowercased) so the write-side Gate A and
+# the read-side parser can never disagree on what a parseable record requires
+# (issue #88 write/read parity; MIP one-source-of-truth).
+
+# §1.2 required META fields (uppercase OCTAVE keys), every record / every state.
+REQUIRED_META_FIELDS = (
+    "TYPE",
+    "VERSION",
+    "TOKEN",
+    "STATUS",
+    "TIER",
+    "DECISION",
+    "BECAUSE",
+    "AUTHORED_AT",
+)
+
+# §1.4 STATUS enum and §1.2 TIER enum (case-sensitive).
+STATUS_VALUES = frozenset({"PROPOSED", "RATIFIED", "SUPERSEDED", "VOID"})
+TIER_VALUES = frozenset({"STRATEGIC", "TACTICAL", "OPERATIONAL"})
+
+# §1.2 reserved names — MUST NOT appear in any v1.x record (§4.1 #7).
+RESERVED_FIELD_NAMES = frozenset({"DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"})
+
+# A single META ``KEY::value`` assignment at line start (whitespace-tolerant —
+# OCTAVE bodies are indented). Mirrors the read-side parser's ``_FIELD_LINE_RE``
+# (core.agent_readable_governance_parser) EXACTLY so the write-side presence /
+# enum / reserved-name checks see the same field set the read parser surfaces
+# (issue #88 parity). KEY is an uppercase OCTAVE identifier; the value is the
+# rest of the line.  Regex-only — no structural OCTAVE parsing.
+_META_FIELD_LINE_RE = re.compile(r"(?m)^\s*([A-Z][A-Z0-9_]*)::(.*?)\s*$")
+
+# §1.5 VERSION shape: MAJOR.MINOR (two numeric segments, no patch level).
+# Rejects 3-segment "1.0.0" and non-numeric "v1" (§4.1 #1 envelope clause).
+_VERSION_SHAPE_RE = re.compile(r"^[0-9]+\.[0-9]+$")
+
+# AUTHORED_AT date prefix: capture the leading YYYY-MM-DD (UTC) for the §1.3
+# TOKEN-date consistency check (#3-residual). Anchored at string start; the
+# remaining time/offset portion is not constrained here (Gate B / octave-mcp
+# owns full timestamp grammar — North Star §4 boundary).
+_AUTHORED_AT_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
+# TOKEN trailing date suffix (the §1.3 YYYYMMDD), captured for #3 comparison.
+_TOKEN_DATE_SUFFIX_RE = re.compile(r"-([0-9]{8})$")
+
+# RATIFIED_BY presence (§4.1 #12 warning). Quote-optional, line-anchored —
+# same ``*FIELD::``-suffix-safe shape as the other anchored field regexes.
+_RATIFIED_BY_RE = re.compile(r'(?m)^\s*RATIFIED_BY::(?:"([^"]*)"|(\S.*?))\s*$')
+
+# HUMAN_ADR_REF value (§4.1 #11). Quote-optional, line-anchored; the captured
+# path is resolved under the repository root separately.
+_HUMAN_ADR_REF_RE = re.compile(r'(?m)^\s*HUMAN_ADR_REF::(?:"([^"]*)"|(\S.*?))\s*$')
+
 # Facet card ID format per ADR-RFC-ARCH-005 §1.3
 # ^[A-Z][A-Z0-9_]{2,127}$
 _FACET_ID_FORMAT_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
@@ -105,8 +160,13 @@ class ValidationResult:
     """Result of Gate A dumb type checking.
 
     Fields:
-        valid: True if all checks passed, False otherwise.
-        errors: List of human-readable error strings (empty when valid=True).
+        valid: True if all ERROR-severity checks passed, False otherwise.
+            (Per ADR-RFC-ARCH-004 §4.2, WARNING-severity findings do NOT flip
+            ``valid`` to False — see ``warnings``.)
+        errors: List of human-readable ERROR strings (empty when valid=True).
+        warnings: List of human-readable WARNING strings (§4.2 advisory; may be
+            non-empty even when valid=True — e.g. §4.1 #12 ratification
+            provenance). Additive field; defaults to empty.
         token: Extracted TOKEN or ID value (may be None if extraction failed).
         card_type: Extracted TYPE value (may be None if extraction failed).
         target_path: Computed target path for placement (None on error).
@@ -114,6 +174,7 @@ class ValidationResult:
 
     valid: bool
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     token: str | None = None
     card_type: str | None = None
     target_path: Path | None = None
@@ -197,6 +258,27 @@ def _extract_repo_id(content: str) -> str | None:
     return None
 
 
+def _extract_meta_fields(content: str) -> dict[str, str]:
+    """Map every line-anchored ``KEY::value`` META assignment to its raw value.
+
+    First occurrence wins (the META block precedes any prose echoes), matching
+    the read-side parser's ``setdefault`` behaviour exactly so presence/enum
+    checks agree with ``record_is_parseable`` (issue #88 parity). Quotes are NOT
+    stripped here — callers that need the bare value strip them locally.
+    """
+    fields: dict[str, str] = {}
+    for key, value in _META_FIELD_LINE_RE.findall(content):
+        fields.setdefault(key, value)
+    return fields
+
+
+def _strip_quotes(value: str) -> str:
+    """Strip one surrounding pair of double quotes (§1.1 quote-optionality)."""
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
 def _compute_target_path(
     working_dir: Path,
     card_type: str,
@@ -225,6 +307,152 @@ def _compute_target_path(
     return working_dir / ".hestai" / "context" / "concepts" / repo_id / f"{token}.oct.md"
 
 
+def _check_agr_invariants(
+    working_dir: Path,
+    content: str,
+    token: str,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """Enforce the ADR-RFC-ARCH-004 §4.1 invariants for a DECISION_RECORD (#88).
+
+    Collect-more-errors style (mirrors the established #10 ISSUE_REF / #8
+    SUPERSEDED_BY precedent): every finding is appended to ``errors`` (or
+    ``warnings`` for §4.1 #12) so a single round-trip surfaces ALL problems with
+    the offending field NAMED. Regex-only (North Star §4 / PROD I3); never
+    raises (PROD I4). ``token`` is the already-extracted, §1.3-format-valid
+    TOKEN.
+
+    Invariants enforced here (the residual set unenforced before #88):
+      #1-residual  VERSION two-segment shape (§1.5)
+      #2           Required §1.2 fields present
+      #3-residual  TOKEN YYYYMMDD suffix == UTC date of AUTHORED_AT
+      #5           STATUS enum
+      #6           TIER enum
+      #7           Reserved names absent
+      #9           SUPERSEDED_BY present IFF STATUS == SUPERSEDED
+      #11          HUMAN_ADR_REF resolves under the repository
+      #12          Ratification provenance (WARNING per §4.2)
+    """
+    meta = _extract_meta_fields(content)
+
+    # --- #2: Required fields present (the core silent-pass class) ---
+    # TYPE and TOKEN are proven present by the time we get here; check the rest
+    # so a record the read parser would mark unparseable is rejected on write.
+    for required in REQUIRED_META_FIELDS:
+        if required not in meta:
+            errors.append(
+                f"Required field '{required}' is missing from the META block "
+                "(ADR-RFC-ARCH-004 §1.2 / §4.1 #2)."
+            )
+
+    # --- #1-residual: VERSION two-segment shape (§1.5) ---
+    if "VERSION" in meta:
+        version = _strip_quotes(meta["VERSION"])
+        if not _VERSION_SHAPE_RE.match(version):
+            errors.append(
+                f"VERSION '{version}' is not a two-segment MAJOR.MINOR string "
+                "(ADR-RFC-ARCH-004 §1.5 / §4.1 #1). "
+                "Patch levels (e.g. '1.0.0') and non-numeric values are rejected."
+            )
+
+    # --- #5: STATUS enum ---
+    status = _strip_quotes(meta["STATUS"]) if "STATUS" in meta else None
+    if status is not None and status not in STATUS_VALUES:
+        errors.append(
+            f"STATUS '{status}' is not a valid value. "
+            f"Must be one of {', '.join(sorted(STATUS_VALUES))} "
+            "(ADR-RFC-ARCH-004 §1.4 / §4.1 #5)."
+        )
+
+    # --- #6: TIER enum ---
+    if "TIER" in meta:
+        tier = _strip_quotes(meta["TIER"])
+        if tier not in TIER_VALUES:
+            errors.append(
+                f"TIER '{tier}' is not a valid value. "
+                f"Must be one of {', '.join(sorted(TIER_VALUES))} "
+                "(ADR-RFC-ARCH-004 §1.2 / §4.1 #6)."
+            )
+
+    # --- #7: Reserved names MUST NOT appear (§1.2) ---
+    for reserved in sorted(RESERVED_FIELD_NAMES):
+        if reserved in meta:
+            errors.append(
+                f"Reserved field '{reserved}' MUST NOT appear in a v1.x record "
+                "(ADR-RFC-ARCH-004 §1.2 reserved-names / §4.1 #7)."
+            )
+
+    # --- #3-residual: TOKEN date suffix == UTC date of AUTHORED_AT (§1.3) ---
+    authored_at = _strip_quotes(meta["AUTHORED_AT"]) if "AUTHORED_AT" in meta else None
+    token_date_m = _TOKEN_DATE_SUFFIX_RE.search(token)
+    if authored_at is not None and token_date_m is not None:
+        date_m = _AUTHORED_AT_DATE_RE.match(authored_at)
+        if date_m is not None:
+            authored_yyyymmdd = f"{date_m.group(1)}{date_m.group(2)}{date_m.group(3)}"
+            token_yyyymmdd = token_date_m.group(1)
+            if authored_yyyymmdd != token_yyyymmdd:
+                errors.append(
+                    f"TOKEN date suffix '{token_yyyymmdd}' does not equal the UTC "
+                    f"date of AUTHORED_AT ('{authored_yyyymmdd}' from "
+                    f"'{authored_at}') (ADR-RFC-ARCH-004 §1.3 / §4.1 #3)."
+                )
+
+    # --- #9: SUPERSEDED_BY present IFF STATUS == SUPERSEDED ---
+    has_superseded_by = _extract_superseded_by(content) is not None
+    if status == "SUPERSEDED" and not has_superseded_by:
+        errors.append(
+            "STATUS is SUPERSEDED but SUPERSEDED_BY is absent; a superseded "
+            "record MUST name its successor "
+            "(ADR-RFC-ARCH-004 §1.2 / §4.1 #9)."
+        )
+    elif has_superseded_by and status is not None and status != "SUPERSEDED":
+        errors.append(
+            f"SUPERSEDED_BY is present but STATUS is '{status}', not SUPERSEDED; "
+            "SUPERSEDED_BY is required iff STATUS == SUPERSEDED "
+            "(ADR-RFC-ARCH-004 §1.2 / §4.1 #9)."
+        )
+
+    # --- #11: HUMAN_ADR_REF resolves under the repository ---
+    human_adr_m = _HUMAN_ADR_REF_RE.search(content)
+    if human_adr_m is not None:
+        ref = human_adr_m.group(1) if human_adr_m.group(1) is not None else human_adr_m.group(2)
+        ref = (ref or "").strip()
+        if not _human_adr_ref_resolves(working_dir, ref):
+            errors.append(
+                f"HUMAN_ADR_REF '{ref}' does not resolve to a file under the "
+                "repository (ADR-RFC-ARCH-004 §1.2 / §4.1 #11)."
+            )
+
+    # --- #12: Ratification provenance (WARNING per §4.2, NOT error) ---
+    has_ratified_by = _RATIFIED_BY_RE.search(content) is not None
+    if status is not None and status != "PROPOSED" and not has_ratified_by:
+        warnings.append(
+            f"RATIFIED_BY is absent on a record whose STATUS is '{status}' "
+            "(not PROPOSED); ratification provenance is recommended "
+            "(ADR-RFC-ARCH-004 §4.1 #12, severity WARNING)."
+        )
+
+
+def _human_adr_ref_resolves(working_dir: Path, ref: str) -> bool:
+    """True iff ``ref`` resolves to an existing file UNDER ``working_dir`` (#11).
+
+    Path-traversal safe: the resolved candidate MUST stay within the repository
+    root, so a ``../../../etc/passwd`` style ref is rejected even if such a file
+    exists on the host. Pure read; never raises.
+    """
+    if not ref:
+        return False
+    try:
+        root = working_dir.resolve()
+        candidate = (working_dir / ref).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    if root != candidate and root not in candidate.parents:
+        return False
+    return candidate.is_file()
+
+
 def validate_octave_content(working_dir: Path, content: str) -> ValidationResult:
     """Validate OCTAVE governance content using regex-only checks.
 
@@ -249,15 +477,21 @@ def validate_octave_content(working_dir: Path, content: str) -> ValidationResult
         ValidationResult with valid=True on success or errors populated on failure.
     """
     errors: list[str] = []
+    warnings: list[str] = []
 
     try:
-        return _validate_impl(working_dir, content, errors)
+        return _validate_impl(working_dir, content, errors, warnings)
     except Exception as exc:  # noqa: BLE001
         errors.append(f"Unexpected validation error: {exc}")
-        return ValidationResult(valid=False, errors=errors)
+        return ValidationResult(valid=False, errors=errors, warnings=warnings)
 
 
-def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> ValidationResult:
+def _validate_impl(
+    working_dir: Path,
+    content: str,
+    errors: list[str],
+    warnings: list[str],
+) -> ValidationResult:
     """Internal validation implementation."""
     # --- Check 1: OCTAVE sentinel at document start (Bug 7) ---
     sentinel = _extract_sentinel(content)
@@ -306,6 +540,14 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
                 "(ADR-RFC-ARCH-004 §1.3)"
             )
             return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
+
+        # --- Check 4c: ADR-RFC-ARCH-004 §4.1 invariants (#88) ---
+        # Required-field presence (#2), VERSION shape (#1-residual), TOKEN-date
+        # consistency (#3-residual), STATUS/TIER enums (#5/#6), reserved names
+        # (#7), SUPERSEDED_BY iff (#9), HUMAN_ADR_REF resolution (#11), and the
+        # ratification-provenance WARNING (#12). Collect-more-errors; the
+        # offending field is named in each message for operator UX.
+        _check_agr_invariants(working_dir, content, token, errors, warnings)
 
     elif card_type in _FACET_CARD_TYPES:
         token = _extract_id(content)
@@ -380,7 +622,13 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
         )
 
     if errors:
-        return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
+        return ValidationResult(
+            valid=False,
+            errors=errors,
+            warnings=warnings,
+            card_type=card_type,
+            token=token,
+        )
 
     # --- Check 7: Compute target path + path traversal guard (Bug 4 via caller) ---
     target_path: Path | None = None
@@ -388,9 +636,12 @@ def _validate_impl(working_dir: Path, content: str, errors: list[str]) -> Valida
         effective_repo_id = repo_id or ""
         target_path = _compute_target_path(working_dir, card_type, token, effective_repo_id)
 
+    # warnings (§4.2) may be non-empty even on a valid record — e.g. §4.1 #12
+    # ratification provenance. They are advisory and do NOT flip ``valid``.
     return ValidationResult(
         valid=True,
         errors=[],
+        warnings=warnings,
         token=token,
         card_type=card_type,
         target_path=target_path,

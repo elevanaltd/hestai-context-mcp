@@ -26,7 +26,11 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     parse_decision_record,
 )
 
-# §1.3 TOKEN format — reuse the authoritative Gate-A regex (do not rebuild).
+# §1.3 TOKEN format + the §1.2 required-field contract — reuse the authoritative
+# Gate-A definitions (do not rebuild). ``REQUIRED_META_FIELDS`` is the SINGLE
+# SOURCE OF TRUTH shared with the write-side validator so the read-side
+# parse-completeness check (``record_is_parseable``) and Gate A's required-field
+# presence check (§4.1 #2) can never drift (issue #88 write/read parity).
 from hestai_context_mcp.tools.governance.type_checker import (
     _DECISION_RECORD_TYPE,
     _extract_sentinel,
@@ -35,17 +39,16 @@ from hestai_context_mcp.tools.governance.type_checker import (
 from hestai_context_mcp.tools.governance.type_checker import (
     _TOKEN_FORMAT_RE as TOKEN_FORMAT_RE,
 )
-
-# The §1.2 required fields whose presence proves the OCTAVE envelope parsed.
-_REQUIRED_FIELDS = (
-    "token",
-    "type",
-    "status",
-    "tier",
-    "decision",
-    "because",
-    "authored_at",
+from hestai_context_mcp.tools.governance.type_checker import (
+    REQUIRED_META_FIELDS as _REQUIRED_META_FIELDS,
 )
+
+# The §1.2 required fields whose presence proves the OCTAVE envelope parsed,
+# expressed as the lowercase DecisionRecord keys. Derived from the shared
+# write-side tuple (excluding VERSION, which the parser surfaces but
+# record_is_parseable has never gated on — see DecisionRecord/_CORE_FIELDS) so
+# the two sides stay in lockstep by construction.
+_REQUIRED_FIELDS = tuple(name.lower() for name in _REQUIRED_META_FIELDS if name != "VERSION")
 
 # Read-side TYPE-membership regex: LINE-ANCHORED and EXACT (CRS P2 guard).
 # The KEY must be exactly ``TYPE`` at line start — a leading whitespace-only

@@ -32,8 +32,10 @@ _VALID_OCTAVE = (
     '  VERSION::"1.0"\n'
     '  TOKEN::"HO-CONTEXT-MCP-PROSE-20260601"\n'
     "  STATUS::PROPOSED\n"
+    "  TIER::OPERATIONAL\n"
     '  DECISION::"Prose-authored decision."\n'
     '  BECAUSE::"Gate C end-to-end."\n'
+    '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
     "===END===\n"
 )
 

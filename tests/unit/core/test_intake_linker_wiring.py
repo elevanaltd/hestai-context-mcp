@@ -37,7 +37,13 @@ _VALID_OCTAVE = (
     "===DECISION_RECORD===\n"
     "META:\n"
     "  TYPE::DECISION_RECORD\n"
+    '  VERSION::"1.0"\n'
     f'  TOKEN::"{RECORD_TOKEN}"\n'
+    "  STATUS::PROPOSED\n"
+    "  TIER::OPERATIONAL\n"
+    '  DECISION::"Record a decision for the linker wiring test."\n'
+    '  BECAUSE::"Exercises the Stage-4 run_linker handoff."\n'
+    '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
     "===END===\n"
 )
 

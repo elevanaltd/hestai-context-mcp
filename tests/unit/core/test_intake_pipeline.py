@@ -32,26 +32,40 @@ from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 # stays live on this file (no path-ignore).
 RECORD_TOKEN = "HO-CONTEXT-MCP-NEWREC-20260601"
 
-# A syntactically valid DECISION_RECORD that passes the regex Gate A.
+# A fully-formed DECISION_RECORD that passes the regex Gate A. Carries every
+# §1.2 required field (post-#88 Gate A enforces presence + TOKEN-date
+# consistency: the 20260601 suffix matches AUTHORED_AT's UTC date).
 _VALID_OCTAVE = (
     "===DECISION_RECORD===\n"
     "META:\n"
     "  TYPE::DECISION_RECORD\n"
+    '  VERSION::"1.0"\n'
     f'  TOKEN::"{RECORD_TOKEN}"\n'
+    "  STATUS::PROPOSED\n"
+    "  TIER::OPERATIONAL\n"
+    '  DECISION::"Record a decision for the intake pipeline test."\n'
+    '  BECAUSE::"Exercises the Stage-3 gate end to end."\n'
+    '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
     "===END===\n"
 )
 _INVALID_OCTAVE = "this is not octave at all"
 
-# Syntactically VALID (passes Gates A+B) but verbose: a single DECISION value far
-# over the word ceiling. Exercises the density backstop in ``_gate``.
+# Fully-formed and VALID (passes Gates A+B) but verbose: the DECISION value is
+# far over the word ceiling. Exercises the density backstop in ``_gate``. The
+# verbose DECISION lives INSIDE the META block (post-#88 the §1.1 envelope rule
+# means required fields after a ``---`` separator do not count as present).
 _VERBOSE_DECISION = " ".join(f"word{i}" for i in range(200))
 _VERBOSE_OCTAVE = (
     "===DECISION_RECORD===\n"
     "META:\n"
     "  TYPE::DECISION_RECORD\n"
+    '  VERSION::"1.0"\n'
     f'  TOKEN::"{RECORD_TOKEN}"\n'
-    "---\n"
-    f'DECISION::"{_VERBOSE_DECISION}"\n'
+    "  STATUS::PROPOSED\n"
+    "  TIER::OPERATIONAL\n"
+    f'  DECISION::"{_VERBOSE_DECISION}"\n'
+    '  BECAUSE::"Exercises the verbosity density backstop."\n'
+    '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
     "===END===\n"
 )
 
