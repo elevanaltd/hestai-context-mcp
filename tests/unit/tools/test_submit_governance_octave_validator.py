@@ -31,13 +31,22 @@ from hestai_context_mcp.ports.octave_validator import OctaveValidationResult
 
 @pytest.fixture()
 def decision_record_octave() -> str:
-    """A well-formed DECISION_RECORD that passes the regex Gate A."""
+    """A fully-formed DECISION_RECORD that passes the regex Gate A.
+
+    Carries every §1.2 required field (post-#88 Gate A enforces presence,
+    enums, and TOKEN-date consistency: the 20260601 suffix matches AUTHORED_AT).
+    """
     return (
         "===DECISION_RECORD===\n"
         "META:\n"
         "  TYPE::DECISION_RECORD\n"
+        '  VERSION::"1.0"\n'
         '  TOKEN::"HO-CONTEXT-MCP-GATEB-DECISION-20260601"\n'
         "  STATUS::PROPOSED\n"
+        "  TIER::OPERATIONAL\n"
+        '  DECISION::"A binding decision for the Gate B test."\n'
+        '  BECAUSE::"Exercises the real OCTAVE validator seam."\n'
+        '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
         "===END===\n"
     )
 
