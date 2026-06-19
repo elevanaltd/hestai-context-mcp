@@ -452,3 +452,102 @@ class TestWriteReadParity:
         content = _record()
         assert record_is_parseable(parse_decision_record(content)) is True
         assert validate_octave_content(tmp_path, content).valid, "no over-rejection"
+
+
+# ---------------------------------------------------------------------------
+# Review rework (T3 CE/CIV): #9 must honour the CANONICAL BARE SUPERSEDED_BY
+# form. ADR-RFC-ARCH-004 §13.1 ratified bare TOKEN edge references as canonical;
+# the §4.1 #9 iff check must therefore see a bare ``SUPERSEDED_BY::TOKEN`` exactly
+# as it sees the legacy quoted form, mirroring lineage.py's quote-optional regex.
+# ---------------------------------------------------------------------------
+
+
+class TestSupersededByBareCanonical:
+    def _seed_successor(self, tmp_path: Path) -> str:
+        target = "HO-CONTEXT-MCP-SUCCESSOR-20260619"
+        decisions = tmp_path / ".hestai" / "decisions"
+        decisions.mkdir(parents=True, exist_ok=True)
+        (decisions / f"{target}.oct.md").write_text(_record(token=target), encoding="utf-8")
+        return target
+
+    @pytest.mark.unit
+    def test_superseded_with_bare_superseded_by_accepted(self, tmp_path: Path) -> None:
+        """SUPERSEDED + BARE SUPERSEDED_BV::TOKEN satisfies #9 (canonical form)."""
+        target = self._seed_successor(tmp_path)
+        result = validate_octave_content(
+            tmp_path,
+            _record(status="SUPERSEDED", extra_lines=f"  SUPERSEDED_BY::{target}"),
+        )
+        assert result.valid, result.errors
+
+    @pytest.mark.unit
+    def test_bare_superseded_by_on_non_superseded_rejected(self, tmp_path: Path) -> None:
+        """A BARE SUPERSEDED_BY on a RATIFIED record must still trip #9."""
+        target = self._seed_successor(tmp_path)
+        result = validate_octave_content(
+            tmp_path,
+            _record(status="RATIFIED", extra_lines=f"  SUPERSEDED_BY::{target}"),
+        )
+        assert result.valid is False
+        assert any("SUPERSEDED_BY" in e for e in result.errors), result.errors
+
+
+# ---------------------------------------------------------------------------
+# Review rework (T3 CIV): #3 TOKEN-date consistency MUST use the UTC date, not a
+# lexical leading-date capture. §1.3 says the suffix equals the *UTC date portion*
+# of AUTHORED_AT — an offset timestamp must be normalised to UTC before
+# comparison, and a non-timestamp AUTHORED_AT must not silently pass #3.
+# ---------------------------------------------------------------------------
+
+
+class TestTokenDateUtcNormalisation:
+    @pytest.mark.unit
+    def test_offset_timestamp_normalised_to_utc_accepted(self, tmp_path: Path) -> None:
+        """2026-06-18T23:30-02:00 is UTC date 2026-06-19 → token 20260619 valid."""
+        content = _record(
+            token="HO-CONTEXT-MCP-GATE-A-88-20260619",
+            authored_at="2026-06-18T23:30:00-02:00",
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+
+    @pytest.mark.unit
+    def test_offset_timestamp_normalised_to_utc_mismatch_rejected(self, tmp_path: Path) -> None:
+        """Same instant: token 20260618 disagrees with UTC date 20260619 → reject."""
+        content = _record(
+            token="HO-CONTEXT-MCP-GATE-A-88-20260618",
+            authored_at="2026-06-18T23:30:00-02:00",
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("AUTHORED_AT" in e or "date" in e.lower() for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_positive_offset_normalised_to_utc(self, tmp_path: Path) -> None:
+        """2026-06-19T01:00+03:00 is UTC date 2026-06-18 → token 20260618 valid."""
+        content = _record(
+            token="HO-CONTEXT-MCP-GATE-A-88-20260618",
+            authored_at="2026-06-19T01:00:00+03:00",
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
+
+    @pytest.mark.unit
+    def test_unparseable_authored_at_rejected(self, tmp_path: Path) -> None:
+        """A non-timestamp AUTHORED_AT must NOT silently pass the #3 date check."""
+        content = _record(
+            token="HO-CONTEXT-MCP-GATE-A-88-20260619",
+            authored_at="not-a-timestamp",
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("AUTHORED_AT" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_plain_utc_z_still_accepted(self, tmp_path: Path) -> None:
+        """Regression: the common Z-suffixed UTC form still validates."""
+        content = _record(
+            token="HO-CONTEXT-MCP-GATE-A-88-20260619",
+            authored_at="2026-06-19T00:00:00Z",
+        )
+        assert validate_octave_content(tmp_path, content).valid

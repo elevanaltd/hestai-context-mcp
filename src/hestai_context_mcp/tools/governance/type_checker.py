@@ -18,6 +18,7 @@ additive and runs alongside it at the submit_governance seam.
 
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
@@ -56,13 +57,17 @@ _TOKEN_RE = re.compile(r'(?m)^\s*TOKEN::(?:"([^"]+)"|([^"\s]+))\s*$')
 # (cubic P2 — the quoted branch was previously unanchored).
 _ID_QUOTED_RE = re.compile(r'(?m)^  ID::(?:"([^"]+)"|([^"\s]+))\s*$')
 
-# SUPERSEDED_BY field: quoted string. LINE-ANCHORED (issue #85): ``^\s*`` admits
-# OCTAVE indentation but forbids a ``*SUPERSEDED_BY::``-suffixed key (e.g.
-# ``PARENT_SUPERSEDED_BY::``) from substring-leaking a supersedure target via
-# ``.search()`` — this is the supersedure-corruption vector the issue exists to
-# kill. ``\s*$`` rejects trailing garbage; the quoted-only value behavior is
-# unchanged (only anchors added).
-_SUPERSEDED_BY_RE = re.compile(r'(?m)^\s*SUPERSEDED_BY::"([^"]+)"\s*$')
+# SUPERSEDED_BY field: QUOTE-OPTIONAL (T3 CE/CIV rework — ADR-004 §13.1 ratified
+# bare TOKEN edge references as canonical, so a bare ``SUPERSEDED_BY::TOKEN`` MUST
+# be recognised exactly as the legacy quoted form; this mirrors
+# ``lineage._SUPERSEDED_BY_RE`` so the §4.1 #9 iff check and the lineage guard
+# agree). LINE-ANCHORED (issue #85): ``^\s*`` admits OCTAVE indentation but
+# forbids a ``*SUPERSEDED_BY::``-suffixed key (e.g. ``PARENT_SUPERSEDED_BY::``)
+# from substring-leaking a supersedure target via ``.search()`` — the
+# supersedure-corruption vector the issue exists to kill. The end-anchor
+# (``\s*$``) lives OUTSIDE the alternation so BOTH branches reject trailing
+# garbage. Group 1 = quoted value, group 2 = bare value.
+_SUPERSEDED_BY_RE = re.compile(r'(?m)^\s*SUPERSEDED_BY::(?:"([^"]+)"|([^"\s]+))\s*$')
 
 # ISSUE_REF field: greedy line capture (horizontal whitespace anchor only —
 # no ReDoS risk, no extractor/presence-detector asymmetry).
@@ -117,12 +122,6 @@ _META_FIELD_LINE_RE = re.compile(r"(?m)^\s*([A-Z][A-Z0-9_]*)::(.*?)\s*$")
 # §1.5 VERSION shape: MAJOR.MINOR (two numeric segments, no patch level).
 # Rejects 3-segment "1.0.0" and non-numeric "v1" (§4.1 #1 envelope clause).
 _VERSION_SHAPE_RE = re.compile(r"^[0-9]+\.[0-9]+$")
-
-# AUTHORED_AT date prefix: capture the leading YYYY-MM-DD (UTC) for the §1.3
-# TOKEN-date consistency check (#3-residual). Anchored at string start; the
-# remaining time/offset portion is not constrained here (Gate B / octave-mcp
-# owns full timestamp grammar — North Star §4 boundary).
-_AUTHORED_AT_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 
 # TOKEN trailing date suffix (the §1.3 YYYYMMDD), captured for #3 comparison.
 _TOKEN_DATE_SUFFIX_RE = re.compile(r"-([0-9]{8})$")
@@ -223,10 +222,13 @@ def _extract_id(content: str) -> str | None:
 
 
 def _extract_superseded_by(content: str) -> str | None:
-    """Extract the SUPERSEDED_BY field if present."""
+    """Extract the SUPERSEDED_BY field if present, quote-optional.
+
+    Group 1 holds the quoted value, group 2 the bare value; exactly one is set.
+    """
     m = _SUPERSEDED_BY_RE.search(content)
     if m:
-        return m.group(1)
+        return m.group(1) if m.group(1) is not None else m.group(2)
     return None
 
 
@@ -384,19 +386,27 @@ def _check_agr_invariants(
             )
 
     # --- #3-residual: TOKEN date suffix == UTC date of AUTHORED_AT (§1.3) ---
+    # The comparison is against the UTC DATE PORTION (§1.3): an offset timestamp
+    # is normalised to UTC before the date is taken (T3 CIV rework — a lexical
+    # leading-date capture mis-handles offsets and silently passes a non-
+    # timestamp AUTHORED_AT).
     authored_at = _strip_quotes(meta["AUTHORED_AT"]) if "AUTHORED_AT" in meta else None
     token_date_m = _TOKEN_DATE_SUFFIX_RE.search(token)
     if authored_at is not None and token_date_m is not None:
-        date_m = _AUTHORED_AT_DATE_RE.match(authored_at)
-        if date_m is not None:
-            authored_yyyymmdd = f"{date_m.group(1)}{date_m.group(2)}{date_m.group(3)}"
-            token_yyyymmdd = token_date_m.group(1)
-            if authored_yyyymmdd != token_yyyymmdd:
-                errors.append(
-                    f"TOKEN date suffix '{token_yyyymmdd}' does not equal the UTC "
-                    f"date of AUTHORED_AT ('{authored_yyyymmdd}' from "
-                    f"'{authored_at}') (ADR-RFC-ARCH-004 §1.3 / §4.1 #3)."
-                )
+        token_yyyymmdd = token_date_m.group(1)
+        authored_yyyymmdd = _authored_at_utc_date(authored_at)
+        if authored_yyyymmdd is None:
+            errors.append(
+                f"AUTHORED_AT '{authored_at}' is not a parseable ISO-8601 "
+                "timestamp; the §1.3 TOKEN-date consistency check (§4.1 #3) "
+                "cannot be evaluated."
+            )
+        elif authored_yyyymmdd != token_yyyymmdd:
+            errors.append(
+                f"TOKEN date suffix '{token_yyyymmdd}' does not equal the UTC "
+                f"date of AUTHORED_AT ('{authored_yyyymmdd}' from "
+                f"'{authored_at}') (ADR-RFC-ARCH-004 §1.3 / §4.1 #3)."
+            )
 
     # --- #9: SUPERSEDED_BY present IFF STATUS == SUPERSEDED ---
     has_superseded_by = _extract_superseded_by(content) is not None
@@ -432,6 +442,34 @@ def _check_agr_invariants(
             "(not PROPOSED); ratification provenance is recommended "
             "(ADR-RFC-ARCH-004 §4.1 #12, severity WARNING)."
         )
+
+
+def _authored_at_utc_date(value: str) -> str | None:
+    """Return the UTC date of an ISO-8601 ``AUTHORED_AT`` as ``YYYYMMDD``.
+
+    Per §1.3 the TOKEN suffix equals the **UTC date portion** of AUTHORED_AT, so
+    an offset timestamp (e.g. ``2026-06-18T23:30:00-02:00``) is normalised to UTC
+    (date ``20260619``) BEFORE the date is taken. A naive timestamp (no offset)
+    is treated as already-UTC. Returns ``None`` when ``value`` is not a parseable
+    ISO-8601 timestamp so the caller can flag it rather than silently pass.
+
+    Regex-only boundary preserved: this uses ``datetime`` parsing of a scalar
+    timestamp value (stdlib, deterministic), NOT OCTAVE AST parsing — North Star
+    §4 governs OCTAVE structure, which this does not touch.
+    """
+    text = value.strip()
+    # ``datetime.fromisoformat`` accepts a trailing ``Z`` only from Python 3.11+;
+    # normalise it to ``+00:00`` for portability/clarity.
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    # Naive timestamp: spec treats AUTHORED_AT as UTC, so the date is taken
+    # as-is. Offset-aware timestamp: normalise to UTC before taking the date.
+    utc = parsed if parsed.tzinfo is None else parsed.astimezone(UTC)
+    return f"{utc.year:04d}{utc.month:02d}{utc.day:02d}"
 
 
 def _human_adr_ref_resolves(working_dir: Path, ref: str) -> bool:
