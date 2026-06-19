@@ -126,6 +126,15 @@ _VERSION_SHAPE_RE = re.compile(r"^[0-9]+\.[0-9]+$")
 # TOKEN trailing date suffix (the §1.3 YYYYMMDD), captured for #3 comparison.
 _TOKEN_DATE_SUFFIX_RE = re.compile(r"-([0-9]{8})$")
 
+# AUTHORED_AT date-only guard (cubic P2): §1.2 declares AUTHORED_AT an ISO-8601
+# *timestamp* (full form, e.g. ``2026-06-11T00:00:00Z``), but
+# ``datetime.fromisoformat`` also accepts a bare date (``2026-06-19`` -> midnight),
+# which would silently pass the §4.1 #3 check whenever the TOKEN suffix matched.
+# A value carries a time component iff a ``T`` or space separator is followed by
+# at least an hour field; this regex matches the date-ONLY form (no such
+# separator+time) so the #3 check can reject it before normalisation.
+_AUTHORED_AT_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # RATIFIED_BY presence (§4.1 #12 warning). Quote-optional, line-anchored —
 # same ``*FIELD::``-suffix-safe shape as the other anchored field regexes.
 _RATIFIED_BY_RE = re.compile(r'(?m)^\s*RATIFIED_BY::(?:"([^"]*)"|(\S.*?))\s*$')
@@ -394,19 +403,29 @@ def _check_agr_invariants(
     token_date_m = _TOKEN_DATE_SUFFIX_RE.search(token)
     if authored_at is not None and token_date_m is not None:
         token_yyyymmdd = token_date_m.group(1)
-        authored_yyyymmdd = _authored_at_utc_date(authored_at)
-        if authored_yyyymmdd is None:
+        if _AUTHORED_AT_DATE_ONLY_RE.match(authored_at.strip()):
+            # §1.2: AUTHORED_AT is an ISO-8601 *timestamp*, not a bare date.
+            # ``datetime.fromisoformat`` would accept the date-only form (midnight)
+            # and silently pass #3 — reject it explicitly (cubic P2).
             errors.append(
-                f"AUTHORED_AT '{authored_at}' is not a parseable ISO-8601 "
-                "timestamp; the §1.3 TOKEN-date consistency check (§4.1 #3) "
-                "cannot be evaluated."
+                f"AUTHORED_AT '{authored_at}' must be a full ISO-8601 timestamp, "
+                "not a date (e.g. '2026-06-19T00:00:00Z'); the §1.3 TOKEN-date "
+                "consistency check (§4.1 #3) requires a time component."
             )
-        elif authored_yyyymmdd != token_yyyymmdd:
-            errors.append(
-                f"TOKEN date suffix '{token_yyyymmdd}' does not equal the UTC "
-                f"date of AUTHORED_AT ('{authored_yyyymmdd}' from "
-                f"'{authored_at}') (ADR-RFC-ARCH-004 §1.3 / §4.1 #3)."
-            )
+        else:
+            authored_yyyymmdd = _authored_at_utc_date(authored_at)
+            if authored_yyyymmdd is None:
+                errors.append(
+                    f"AUTHORED_AT '{authored_at}' is not a parseable ISO-8601 "
+                    "timestamp; the §1.3 TOKEN-date consistency check (§4.1 #3) "
+                    "cannot be evaluated."
+                )
+            elif authored_yyyymmdd != token_yyyymmdd:
+                errors.append(
+                    f"TOKEN date suffix '{token_yyyymmdd}' does not equal the UTC "
+                    f"date of AUTHORED_AT ('{authored_yyyymmdd}' from "
+                    f"'{authored_at}') (ADR-RFC-ARCH-004 §1.3 / §4.1 #3)."
+                )
 
     # --- #9: SUPERSEDED_BY present IFF STATUS == SUPERSEDED ---
     has_superseded_by = _extract_superseded_by(content) is not None

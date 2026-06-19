@@ -94,6 +94,20 @@ def _record(
     return "\n".join(lines) + "\n"
 
 
+def _seed_successor(tmp_path: Path) -> str:
+    """Write a valid successor AGR on disk and return its TOKEN.
+
+    Shared by the #9 SUPERSEDED_BY tests so a SUPERSEDED record can name an
+    existing successor (the SUPERSEDED_BY target-existence check, Gate A Check 5,
+    requires the referenced TOKEN to already exist in the store).
+    """
+    target = "HO-CONTEXT-MCP-SUCCESSOR-20260619"
+    decisions = tmp_path / ".hestai" / "decisions"
+    decisions.mkdir(parents=True, exist_ok=True)
+    (decisions / f"{target}.oct.md").write_text(_record(token=target), encoding="utf-8")
+    return target
+
+
 # ---------------------------------------------------------------------------
 # Invariant #2 — Required fields present (error)
 # ---------------------------------------------------------------------------
@@ -226,11 +240,7 @@ class TestStatusEnum:
         # SUPERSEDED requires SUPERSEDED_BY (#9); supply it so this isolates #5.
         extra = ""
         if status == "SUPERSEDED":
-            # Point at an existing token: seed it on disk.
-            target = "HO-CONTEXT-MCP-SUCCESSOR-20260619"
-            decisions = tmp_path / ".hestai" / "decisions"
-            decisions.mkdir(parents=True, exist_ok=True)
-            (decisions / f"{target}.oct.md").write_text(_record(token=target), encoding="utf-8")
+            target = _seed_successor(tmp_path)
             extra = f'  SUPERSEDED_BY::"{target}"'
         result = validate_octave_content(tmp_path, _record(status=status, extra_lines=extra))
         assert result.valid, result.errors
@@ -297,13 +307,6 @@ class TestReservedNames:
 
 
 class TestSupersededByIff:
-    def _seed_successor(self, tmp_path: Path) -> str:
-        target = "HO-CONTEXT-MCP-SUCCESSOR-20260619"
-        decisions = tmp_path / ".hestai" / "decisions"
-        decisions.mkdir(parents=True, exist_ok=True)
-        (decisions / f"{target}.oct.md").write_text(_record(token=target), encoding="utf-8")
-        return target
-
     @pytest.mark.unit
     def test_superseded_without_superseded_by_rejected(self, tmp_path: Path) -> None:
         """STATUS::SUPERSEDED with NO SUPERSEDED_BY is a hard error (#9)."""
@@ -314,7 +317,7 @@ class TestSupersededByIff:
     @pytest.mark.unit
     def test_superseded_by_on_non_superseded_rejected(self, tmp_path: Path) -> None:
         """SUPERSEDED_BY present while STATUS != SUPERSEDED is a hard error (#9)."""
-        target = self._seed_successor(tmp_path)
+        target = _seed_successor(tmp_path)
         result = validate_octave_content(
             tmp_path,
             _record(status="RATIFIED", extra_lines=f'  SUPERSEDED_BY::"{target}"'),
@@ -325,7 +328,7 @@ class TestSupersededByIff:
     @pytest.mark.unit
     def test_superseded_with_superseded_by_accepted(self, tmp_path: Path) -> None:
         """The matched case (SUPERSEDED ∧ SUPERSEDED_BY present) validates."""
-        target = self._seed_successor(tmp_path)
+        target = _seed_successor(tmp_path)
         result = validate_octave_content(
             tmp_path,
             _record(status="SUPERSEDED", extra_lines=f'  SUPERSEDED_BY::"{target}"'),
@@ -463,17 +466,10 @@ class TestWriteReadParity:
 
 
 class TestSupersededByBareCanonical:
-    def _seed_successor(self, tmp_path: Path) -> str:
-        target = "HO-CONTEXT-MCP-SUCCESSOR-20260619"
-        decisions = tmp_path / ".hestai" / "decisions"
-        decisions.mkdir(parents=True, exist_ok=True)
-        (decisions / f"{target}.oct.md").write_text(_record(token=target), encoding="utf-8")
-        return target
-
     @pytest.mark.unit
     def test_superseded_with_bare_superseded_by_accepted(self, tmp_path: Path) -> None:
-        """SUPERSEDED + BARE SUPERSEDED_BV::TOKEN satisfies #9 (canonical form)."""
-        target = self._seed_successor(tmp_path)
+        """SUPERSEDED + BARE SUPERSEDED_BY::TOKEN satisfies #9 (canonical form)."""
+        target = _seed_successor(tmp_path)
         result = validate_octave_content(
             tmp_path,
             _record(status="SUPERSEDED", extra_lines=f"  SUPERSEDED_BY::{target}"),
@@ -483,7 +479,7 @@ class TestSupersededByBareCanonical:
     @pytest.mark.unit
     def test_bare_superseded_by_on_non_superseded_rejected(self, tmp_path: Path) -> None:
         """A BARE SUPERSEDED_BY on a RATIFIED record must still trip #9."""
-        target = self._seed_successor(tmp_path)
+        target = _seed_successor(tmp_path)
         result = validate_octave_content(
             tmp_path,
             _record(status="RATIFIED", extra_lines=f"  SUPERSEDED_BY::{target}"),
@@ -542,6 +538,43 @@ class TestTokenDateUtcNormalisation:
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False
         assert any("AUTHORED_AT" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_date_only_authored_at_rejected(self, tmp_path: Path) -> None:
+        """A DATE-ONLY AUTHORED_AT (no time component) must be rejected (cubic P2).
+
+        §1.2 declares AUTHORED_AT an ISO-8601 *timestamp* (full form, e.g.
+        ``2026-06-11T00:00:00Z``). ``datetime.fromisoformat`` happily accepts a
+        bare date (``2026-06-19`` -> midnight), so before this fix a date-only
+        value silently passed #3 whenever the TOKEN suffix matched — a silent
+        pass in the very feature meant to close them.
+        """
+        content = _record(
+            token="HO-CONTEXT-MCP-GATE-A-88-20260619",
+            authored_at="2026-06-19",
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("AUTHORED_AT" in e for e in result.errors), result.errors
+        # The message must name the problem so operators can fix in one round-trip.
+        assert any(
+            "full ISO-8601 timestamp" in e or "not a date" in e.lower() for e in result.errors
+        ), result.errors
+
+    @pytest.mark.unit
+    def test_space_separated_timestamp_accepted(self, tmp_path: Path) -> None:
+        """A space-separated ISO-8601 timestamp (has a time component) is accepted.
+
+        ISO-8601 / ``datetime.fromisoformat`` permit a space in place of ``T``;
+        such a value DOES carry a time component, so it must NOT be swept up by
+        the date-only rejection.
+        """
+        content = _record(
+            token="HO-CONTEXT-MCP-GATE-A-88-20260619",
+            authored_at="2026-06-19 00:00:00+00:00",
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
 
     @pytest.mark.unit
     def test_plain_utc_z_still_accepted(self, tmp_path: Path) -> None:
