@@ -3,9 +3,11 @@ META:
   TYPE::DECISION_RECORD
   VERSION::"1.0"
   TOKEN::HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620
-  STATUS::PROPOSED
+  STATUS::RATIFIED
   TIER::STRATEGIC
   AUTHORED_AT::"2026-06-20T00:00:00Z"
+  RATIFIED_BY::"human:operator"
+  RATIFIED_AT::"2026-06-20T00:00:00Z"
   ISSUE_REF::"repo:hestai-context-mcp#101"
   HUMAN_ADR_REF::".hestai/decisions/rfc-arch/ADR-RFC-ARCH-004-agent-readable-governance-records.md"
   SCOPE::"hestai-context-mcp"
