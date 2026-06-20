@@ -3,9 +3,11 @@ META:
   TYPE::DECISION_RECORD
   VERSION::"1.0"
   TOKEN::HO-INTAKE-MODEL-RESOLUTION-PER-REPO-20260619
-  STATUS::PROPOSED
+  STATUS::RATIFIED
   TIER::STRATEGIC
   AUTHORED_AT::"2026-06-19T00:00:00Z"
+  RATIFIED_BY::"human:operator"
+  RATIFIED_AT::"2026-06-20T00:00:00Z"
   ISSUE_REF::"repo:hestai-context-mcp#106"
   HUMAN_ADR_REF::".hestai/decisions/rfc-arch/ADR-RFC-ARCH-004-agent-readable-governance-records.md"
   SCOPE::"hestai-context-mcp"
