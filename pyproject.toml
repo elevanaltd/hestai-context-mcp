@@ -90,6 +90,7 @@ markers = [
     "behavior: executable behavior tests",
     "contract: interaction/contract tests",
     "integration: full integration tests",
+    "security: security-focused tests (spoofing, injection, bypass)",
 ]
 addopts = [
     "--cov=hestai_context_mcp",
