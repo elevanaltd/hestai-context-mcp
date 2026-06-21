@@ -1850,6 +1850,40 @@ class TestStructuredMissingRoles:
             "TMG",
         }, f"Expected missing_roles={{'CE', 'CRS', 'TMG'}}, got {set(missing_roles)}"
 
+    def test_check_pr_comments_handles_null_author(self, ci_environment, monkeypatch):
+        """A comment/review with author=null (ghost/deleted user) must not crash the gate.
+
+        Regression: ``comment.get("author", {})`` returns None when the key exists
+        with a null value, so ``.get("login")`` raised AttributeError and failed the
+        gate on otherwise-valid PR data.
+        """
+        monkeypatch.setenv("PR_NUMBER", "999")
+
+        def mock_run(*args, **kwargs):
+            mock = MagicMock()
+            mock.stdout = json.dumps(
+                {
+                    "body": "",
+                    "comments": [
+                        {"author": None, "body": "just some prose from a ghost user"},
+                        {"author": {"login": "reviewer1"}, "body": "CE APPROVED: real"},
+                    ],
+                    "reviews": [
+                        {"author": None, "state": "COMMENTED", "body": "ghost review"},
+                    ],
+                }
+            )
+            return mock
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        # Must not raise AttributeError on null author; real reviewer satisfies CE.
+        approved, _message, missing_roles = validate_review.check_pr_comments(
+            required_roles={"CE"}, tier="TIER_2_STANDARD"
+        )
+        assert approved is True
+        assert missing_roles == []
+
     def test_check_pr_comments_returns_empty_missing_on_success(self, ci_environment, monkeypatch):
         """When all approvals found, missing_roles must be an empty list."""
         monkeypatch.setenv("PR_NUMBER", "999")

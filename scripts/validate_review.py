@@ -847,7 +847,7 @@ def check_pr_comments(
         # contains "APPROVED", "GO", etc. which would falsely clear the gate.
         def _is_bot_comment(comment: dict[str, Any]) -> bool:
             """Check if a comment or review is from a bot author."""
-            login = comment.get("author", {}).get("login", "")
+            login = (comment.get("author") or {}).get("login", "")
             if login in _BOT_LOGIN_SET:
                 return True
             # Catch any other [bot]-suffixed accounts (GitHub convention)
@@ -865,7 +865,7 @@ def check_pr_comments(
         skipped_bots: list[str] = []
         for c in pr_data.get("comments", []):
             if _is_bot_comment(c):
-                bot_login = c.get("author", {}).get("login", "unknown")
+                bot_login = (c.get("author") or {}).get("login", "unknown")
                 skipped_bots.append(bot_login)
             else:
                 searchable_texts.append(c.get("body", ""))
@@ -881,7 +881,7 @@ def check_pr_comments(
             if r.get("state") not in active_review_states:
                 continue
             if _is_bot_comment(r):
-                bot_login = r.get("author", {}).get("login", "unknown")
+                bot_login = (r.get("author") or {}).get("login", "unknown")
                 skipped_bots.append(bot_login)
             else:
                 review_body = r.get("body", "")
