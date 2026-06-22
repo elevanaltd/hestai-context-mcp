@@ -76,7 +76,8 @@ The server loads configuration at startup from these sources, in priority order:
 | Variable | Purpose | Required |
 |----------|---------|----------|
 | `OPENROUTER_API_KEY` | AI provider key for prose-mode governance compilation | Only if using `prose_input` in `submit_governance` |
-| `HESTAI_AI_MODEL` | Model for prose compilation (e.g. `openai/gpt-4o`) | Only if using prose mode |
+| `HESTAI_AI_MODEL` | Model for prose compilation / synthesis (e.g. `openai/gpt-4o`); optional `HESTAI_AI_MODEL_ANALYSIS` / `HESTAI_AI_MODEL_CRITICAL` per tier | Only if using prose mode |
+| `PER_REPO_OVERRIDE` | When set truthy (`true`/`1`/`yes`/`on`) in a **caller repo's** `.env`, AI-model resolution uses that repo's own `HESTAI_AI_MODEL[_TIER]`; otherwise the model is centralized (the launching process environment wins, consistent across all repos). See `HO-INTAKE-MODEL-RESOLUTION-CENTRALIZED-20260620`. | Optional (per-repo opt-in) |
 | `GITHUB_TOKEN` | GitHub PAT for `submit_review` and `submit_governance` PR creation | For governance and review tools |
 
 ## Claude / Agent Configuration

@@ -28,7 +28,9 @@ class TestSynthesizeAiContextDefault:
     """
 
     def test_returns_none_when_factory_yields_no_client(self, monkeypatch):
-        monkeypatch.setattr(synthesis_mod, "build_default_ai_client", lambda: None, raising=True)
+        monkeypatch.setattr(
+            synthesis_mod, "build_default_ai_client", lambda working_dir=None: None, raising=True
+        )
         assert (
             synthesize_ai_context(
                 role="test-role",

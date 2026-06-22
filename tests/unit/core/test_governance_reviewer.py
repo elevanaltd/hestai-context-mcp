@@ -121,8 +121,9 @@ def patch_client(monkeypatch: pytest.MonkeyPatch):
     def _install(client_or_none: Any) -> Any:
         captured: dict[str, Any] = {}
 
-        def _factory(*, tier: str = "default") -> Any:
+        def _factory(*, tier: str = "default", working_dir: Any = None) -> Any:
             captured["tier"] = tier
+            captured["working_dir"] = working_dir
             return client_or_none
 
         monkeypatch.setattr(mod, "build_default_ai_client", _factory, raising=True)

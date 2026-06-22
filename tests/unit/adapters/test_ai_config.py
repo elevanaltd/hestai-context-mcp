@@ -20,6 +20,7 @@ binding invariants tested here.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import pytest
@@ -451,6 +452,103 @@ class TestResolveProviderPayload:
         # An explicitly empty / whitespace order list means "no preference".
         monkeypatch.setenv("HESTAI_AI_PROVIDER_ORDER", "   ,  ")
         assert resolve_provider_payload("openrouter") is None
+
+
+class TestResolveModelPerRepoOverride:
+    """Issue #106 / HO-INTAKE-MODEL-RESOLUTION-CENTRALIZED-20260620.
+
+    Model selection is centralized-by-default (the process environment wins,
+    so every caller repo gets the same model) with an explicit per-repo
+    opt-in: only when the caller's ``working_dir/.env`` sets
+    ``PER_REPO_OVERRIDE`` truthy does that repo's own
+    ``HESTAI_AI_MODEL[_TIER]`` take effect. The caller ``.env`` is parsed for
+    those keys ONLY — never ``load_dotenv``'d into the shared process
+    (PROD::I2: zero caller-secret ingress).
+    """
+
+    @staticmethod
+    def _write_env(tmp_path, body: str) -> str:
+        (tmp_path / ".env").write_text(body, encoding="utf-8")
+        return str(tmp_path)
+
+    def test_working_dir_none_is_backcompat(self, monkeypatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL", "process/model")
+        assert resolve_model("default", working_dir=None) == "process/model"
+
+    def test_no_override_flag_ignores_repo_env(self, tmp_path, monkeypatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL", "process/model")
+        wd = self._write_env(tmp_path, "HESTAI_AI_MODEL=repo/model\n")
+        # No PER_REPO_OVERRIDE -> default behaviour: process env wins, repo .env ignored.
+        assert resolve_model("default", working_dir=wd) == "process/model"
+
+    def test_override_true_uses_repo_model(self, tmp_path, monkeypatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL", "process/model")
+        wd = self._write_env(tmp_path, "PER_REPO_OVERRIDE=true\nHESTAI_AI_MODEL=repo/model\n")
+        assert resolve_model("default", working_dir=wd) == "repo/model"
+
+    def test_override_true_is_tier_aware(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        wd = self._write_env(
+            tmp_path,
+            "PER_REPO_OVERRIDE=1\nHESTAI_AI_MODEL=repo/base\nHESTAI_AI_MODEL_ANALYSIS=repo/analysis\n",
+        )
+        assert resolve_model("analysis", working_dir=wd) == "repo/analysis"
+        assert resolve_model("default", working_dir=wd) == "repo/base"
+
+    def test_override_true_tier_falls_back_to_repo_base(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        wd = self._write_env(tmp_path, "PER_REPO_OVERRIDE=true\nHESTAI_AI_MODEL=repo/base\n")
+        # analysis var absent in the repo .env -> repo base.
+        assert resolve_model("analysis", working_dir=wd) == "repo/base"
+
+    def test_override_true_but_no_repo_model_falls_back_to_process(
+        self, tmp_path, monkeypatch, clean_env
+    ):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL", "process/model")
+        wd = self._write_env(tmp_path, "PER_REPO_OVERRIDE=true\n")
+        assert resolve_model("default", working_dir=wd) == "process/model"
+
+    def test_override_true_no_model_anywhere_falls_back_to_default(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import DEFAULT_MODEL, resolve_model
+
+        wd = self._write_env(tmp_path, "PER_REPO_OVERRIDE=true\n")
+        assert resolve_model("default", working_dir=wd) == DEFAULT_MODEL
+
+    def test_override_falsey_values_do_not_trigger(self, tmp_path, monkeypatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL", "process/model")
+        for val in ("false", "0", "no", '""'):
+            wd = self._write_env(tmp_path, f"PER_REPO_OVERRIDE={val}\nHESTAI_AI_MODEL=repo/model\n")
+            assert resolve_model("default", working_dir=wd) == "process/model", val
+
+    def test_missing_env_file_is_backcompat(self, tmp_path, monkeypatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        monkeypatch.setenv("HESTAI_AI_MODEL", "process/model")
+        # working_dir exists but has no .env file at all.
+        assert resolve_model("default", working_dir=str(tmp_path)) == "process/model"
+
+    def test_caller_env_not_loaded_into_process(self, tmp_path, clean_env):
+        """PROD::I2 — parsing the caller .env must NOT leak its secrets into os.environ."""
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        wd = self._write_env(
+            tmp_path,
+            "PER_REPO_OVERRIDE=true\nHESTAI_AI_MODEL=repo/model\nSECRET_TOKEN=supersecret\n",
+        )
+        assert resolve_model("default", working_dir=wd) == "repo/model"
+        assert "SECRET_TOKEN" not in os.environ
 
 
 # Dead-import helper so ``Any`` stays reachable by mypy when adding fields.

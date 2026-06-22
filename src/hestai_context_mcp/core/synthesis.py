@@ -28,7 +28,7 @@ from hestai_context_mcp.ports.ai_client import (
 logger = logging.getLogger(__name__)
 
 
-def build_default_ai_client() -> AIClient | None:
+def build_default_ai_client(working_dir: str | None = None) -> AIClient | None:
     """Return the default :class:`AIClient`, or ``None`` if none available.
 
     This is the *composition-root seam* for the AI synthesis path. It
@@ -42,6 +42,10 @@ def build_default_ai_client() -> AIClient | None:
     to inject stubs; that pattern is honoured because
     :func:`synthesize_ai_context` resolves this symbol via the module
     (not a direct name binding) on each call.
+
+    ``working_dir`` (issue #106) is forwarded to the adapter so a caller
+    repo that sets ``PER_REPO_OVERRIDE`` selects its own model; ``None``
+    keeps centralized (process-env) resolution.
     """
     # Lazy import: breaks the structural adapter-import coupling at
     # module-load time, preserving the ports-only dependency of core.
@@ -51,7 +55,7 @@ def build_default_ai_client() -> AIClient | None:
         build_default_ai_client as _factory,
     )
 
-    return _factory()
+    return _factory(working_dir=working_dir)
 
 
 # Valid values for the ``source`` discriminator. Anything else must be
@@ -104,6 +108,7 @@ def synthesize_ai_context(
     focus: str,
     phase: str,
     context_summary: str,
+    working_dir: str | None = None,
 ) -> AiSynthesisResult | None:
     """Attempt AI-backed synthesis of the clock-in context.
 
@@ -125,12 +130,14 @@ def synthesize_ai_context(
         focus: Resolved focus string.
         phase: Full phase identifier (e.g. ``"B1_FOUNDATION_COMPLETE"``).
         context_summary: Pre-built context summary for the AI to synthesise.
+        working_dir: Optional caller project root (issue #106) forwarded to
+            the client factory for the caller-repo model opt-in.
 
     Returns:
         :class:`AiSynthesisResult` with ``source == "ai"`` on success,
         otherwise ``None``.
     """
-    client = build_default_ai_client()
+    client = build_default_ai_client(working_dir=working_dir)
     if client is None:
         logger.debug("No AIClient available; seam returns None")
         return None
@@ -377,6 +384,7 @@ def resolve_ai_synthesis(
     focus: str,
     phase: str,
     context_summary: str,
+    working_dir: str | None = None,
 ) -> AiSynthesisResult:
     """Return an :class:`AiSynthesisResult`; never ``None``.
 
@@ -389,6 +397,8 @@ def resolve_ai_synthesis(
         focus: Resolved focus string.
         phase: Full phase identifier.
         context_summary: Pre-built context summary (passed through to seam).
+        working_dir: Optional caller project root (issue #106) forwarded to
+            the synthesis seam for the caller-repo model opt-in.
 
     Returns:
         Always a populated :class:`AiSynthesisResult`.
@@ -403,6 +413,7 @@ def resolve_ai_synthesis(
             focus=focus,
             phase=phase,
             context_summary=context_summary,
+            working_dir=working_dir,
         )
     except Exception as exc:  # noqa: BLE001 — seam must be total; fall back on any failure.
         # Observable degradation — log at warning so issue #5 provider failures

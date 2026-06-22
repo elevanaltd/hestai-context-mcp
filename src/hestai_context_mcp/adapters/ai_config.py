@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 import keyring
 
@@ -55,6 +56,13 @@ KEYRING_SERVICE: str = "hestai-context-mcp"
 # Provider / model defaults (match legacy hestai-mcp defaults).
 DEFAULT_PROVIDER: str = "openrouter"
 DEFAULT_MODEL: str = "google/gemini-2.0-flash-lite"
+
+# Issue #106 — per-repo model opt-in flag (HO-INTAKE-MODEL-RESOLUTION-CENTRALIZED).
+# Model selection is centralized-by-default (the process env wins, so every
+# caller repo gets the same model). A caller repo opts in to its OWN model only
+# by setting this key truthy in its ``working_dir/.env``.
+_PER_REPO_OVERRIDE_KEY: str = "PER_REPO_OVERRIDE"
+_TRUTHY_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
 # Tier -> env-var name for that tier's model. The ``default`` tier reads the
 # base ``HESTAI_AI_MODEL``; richer tiers read their own var and fall back to
@@ -104,7 +112,35 @@ def resolve_provider() -> str:
     return os.environ.get("HESTAI_AI_PROVIDER", DEFAULT_PROVIDER)
 
 
-def resolve_model(tier: str = "default") -> str:
+def _read_caller_env_keys(working_dir: str, keys: tuple[str, ...]) -> dict[str, str]:
+    """Parse ``{working_dir}/.env`` and return ONLY the requested keys.
+
+    Issue #106 / PROD::I2: this is a *read-only parse*, NOT ``load_dotenv`` —
+    the caller's ``.env`` is never merged into ``os.environ``, so no caller
+    secret enters the shared process. Only the keys in ``keys`` are returned;
+    everything else in the file is ignored. A missing or unreadable file
+    yields an empty mapping (the caller falls back to centralized resolution).
+    """
+    try:
+        text = (Path(working_dir) / ".env").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return {}
+    wanted = set(keys)
+    found: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if name.startswith("export "):
+            name = name[len("export ") :].strip()
+        if name in wanted:
+            found[name] = value.strip().strip('"').strip("'")
+    return found
+
+
+def resolve_model(tier: str = "default", working_dir: str | None = None) -> str:
     """Return the configured model identifier for ``tier``.
 
     Tiers (issue #77):
@@ -112,14 +148,26 @@ def resolve_model(tier: str = "default") -> str:
         * ``"analysis"`` -> ``HESTAI_AI_MODEL_ANALYSIS``
         * ``"critical"`` -> ``HESTAI_AI_MODEL_CRITICAL``
 
-    Resolution for a tier is a fallback chain: the tier's own env var, then
-    the base ``HESTAI_AI_MODEL``, then :data:`DEFAULT_MODEL`. For the
-    ``"default"`` tier this collapses to the pre-#77 behaviour exactly
-    (``HESTAI_AI_MODEL`` else :data:`DEFAULT_MODEL`), so the zero-arg call
-    remains back-compatible.
+    Resolution is centralized-by-default (issue #106,
+    HO-INTAKE-MODEL-RESOLUTION-CENTRALIZED): the process environment is the
+    source, so every caller repo gets the same model regardless of
+    ``working_dir``. The chain is the tier's own env var, then the base
+    ``HESTAI_AI_MODEL``, then :data:`DEFAULT_MODEL`. The zero-arg call keeps
+    pre-#77 behaviour exactly (back-compatible).
+
+    Per-repo opt-in: when ``working_dir`` is supplied AND that repo's
+    ``.env`` sets ``PER_REPO_OVERRIDE`` truthy, the repo's OWN
+    ``HESTAI_AI_MODEL[_TIER]`` (read from its ``.env``) wins — with the same
+    tier -> base fallback. If the override is on but the repo declares no
+    model, resolution falls through to the centralized chain. The caller
+    ``.env`` is parsed for the flag + model keys ONLY; it is never
+    ``load_dotenv``'d, so no caller secret enters the process (PROD::I2).
 
     Args:
         tier: One of ``"default"``, ``"analysis"``, ``"critical"``.
+        working_dir: Optional caller project root. When ``None`` (the
+            default), resolution is purely centralized — identical to the
+            pre-#106 behaviour.
 
     Raises:
         ValueError: if ``tier`` is not a recognised tier.
@@ -130,7 +178,23 @@ def resolve_model(tier: str = "default") -> str:
         raise ValueError(
             f"Unknown model tier: {tier!r} (expected one of {sorted(_TIER_ENV_VARS)})"
         ) from exc
-    # Tier var first; fall back to the base model var, then the hard default.
+
+    # Per-repo opt-in: only when the caller's .env explicitly enables it.
+    if working_dir is not None:
+        caller = _read_caller_env_keys(
+            working_dir, (_PER_REPO_OVERRIDE_KEY, tier_var, "HESTAI_AI_MODEL")
+        )
+        if caller.get(_PER_REPO_OVERRIDE_KEY, "").strip().lower() in _TRUTHY_VALUES:
+            repo_tier_value = caller.get(tier_var)
+            if repo_tier_value:
+                return repo_tier_value
+            repo_base = caller.get("HESTAI_AI_MODEL")
+            if repo_base:
+                return repo_base
+            # Override on but no model declared in the repo .env -> fall
+            # through to the centralized chain below.
+
+    # Centralized default: tier var first, then base var, then hard default.
     tier_value = os.environ.get(tier_var)
     if tier_value:
         return tier_value

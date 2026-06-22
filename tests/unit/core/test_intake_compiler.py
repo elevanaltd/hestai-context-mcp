@@ -99,7 +99,9 @@ def patch_client(monkeypatch: pytest.MonkeyPatch):
     """Patch the module-level AIClient factory to return a supplied stub."""
 
     def _install(client_or_none: Any) -> None:
-        monkeypatch.setattr(mod, "build_default_ai_client", lambda: client_or_none, raising=True)
+        monkeypatch.setattr(
+            mod, "build_default_ai_client", lambda working_dir=None: client_or_none, raising=True
+        )
 
     return _install
 

@@ -145,7 +145,10 @@ async def run_intake_pipeline(
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         compiled = await compile_prose_to_octave(
-            ctx, max_output_tokens=max_output_tokens, max_cost_usd=max_cost_usd
+            ctx,
+            max_output_tokens=max_output_tokens,
+            max_cost_usd=max_cost_usd,
+            working_dir=str(working_dir),
         )
         last_metrics = compiled["metrics"]
 

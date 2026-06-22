@@ -159,31 +159,36 @@ _REVIEW_SYSTEM_PROMPT = (
 )
 
 
-def build_default_ai_client(*, tier: str = _DEFAULT_TIER) -> AIClient | None:
+def build_default_ai_client(
+    *, tier: str = _DEFAULT_TIER, working_dir: str | None = None
+) -> AIClient | None:
     """Return the tier-aware default :class:`AIClient`, or ``None``.
 
     Composition-root seam (lazy import of the adapter) so this ``core`` module
     depends only on ``ports`` at module-load time. Tests monkeypatch this
     symbol on the module to inject stubs; it is resolved via the module
     attribute on each call, so patches are honoured.
+
+    ``working_dir`` (issue #106) is forwarded for the caller-repo model opt-in.
     """
     from hestai_context_mcp.adapters.openai_compat_ai_client import (
         build_default_ai_client as _factory,
     )
 
-    return _factory(tier=tier)
+    return _factory(tier=tier, working_dir=working_dir)
 
 
-def _resolve_model_name(tier: str) -> str:
+def _resolve_model_name(tier: str, working_dir: str | None = None) -> str:
     """Return the configured model identifier for ``tier`` (value, not literal).
 
     Lazy import keeps the adapter/config dependency out of module-load scope
     (DIP) and keeps any provider/model *literal* out of this file's source
     (PROD::I3) — the model name is a runtime value resolved below the port.
+    ``working_dir`` (issue #106) enables the caller-repo opt-in.
     """
     from hestai_context_mcp.adapters import ai_config
 
-    return ai_config.resolve_model(tier)
+    return ai_config.resolve_model(tier, working_dir=working_dir)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -332,6 +337,7 @@ async def review_governance(
     tier: str = _DEFAULT_TIER,
     max_output_tokens: int | None = None,
     max_cost_usd: float | None = None,
+    working_dir: str | None = None,
 ) -> ReviewResult:
     """Run a scoped SEMANTIC review of a governance record over the AIClient port.
 
@@ -345,6 +351,8 @@ async def review_governance(
             ``HESTAI_REVIEW_MAX_OUTPUT_TOKENS`` then 2000.
         max_cost_usd: Abort threshold for projected cost. Defaults to
             ``HESTAI_REVIEW_MAX_COST_USD`` then 0.50.
+        working_dir: Optional caller project root (issue #106) forwarded to
+            model resolution + the client factory for the caller-repo opt-in.
 
     Returns:
         :class:`ReviewResult`. A semantic verdict on success; a structured
@@ -363,7 +371,7 @@ async def review_governance(
     )
     price_per_1k = _env_float("HESTAI_REVIEW_USD_PER_1K_TOKENS", _DEFAULT_USD_PER_1K_TOKENS)
 
-    model = _resolve_model_name(tier)
+    model = _resolve_model_name(tier, working_dir)
 
     # --- Cost cap: project BEFORE the call; abort on breach (no fabrication). ---
     projected_tokens = _estimate_input_tokens(octave_content) + out_cap
@@ -384,7 +392,7 @@ async def review_governance(
             tokens=projected_tokens,
         )
 
-    client = build_default_ai_client(tier=tier)
+    client = build_default_ai_client(tier=tier, working_dir=working_dir)
     if client is None:
         # Issue #99 (Finding 3): no credential → definitively $0; the provider
         # was never called so cost_is_estimate=False (not an approximation).

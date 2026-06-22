@@ -94,31 +94,36 @@ class CompileResult(TypedDict):
     error: str | None
 
 
-def build_default_ai_client() -> AIClient | None:
+def build_default_ai_client(working_dir: str | None = None) -> AIClient | None:
     """Return the default :class:`AIClient`, or ``None`` if none available.
 
     Composition-root seam (lazy import of the adapter) so this ``core`` module
     depends only on ``ports`` at module-load time. Tests monkeypatch this symbol
     on the module to inject stubs; it is resolved via the module attribute on
     each call, so patches are honoured.
+
+    ``working_dir`` (issue #106) is forwarded so a caller repo that sets
+    ``PER_REPO_OVERRIDE`` selects its own model; ``None`` keeps centralized
+    resolution.
     """
     from hestai_context_mcp.core.synthesis import (
         build_default_ai_client as _factory,
     )
 
-    return _factory()
+    return _factory(working_dir=working_dir)
 
 
-def _resolve_model_name() -> str:
+def _resolve_model_name(working_dir: str | None = None) -> str:
     """Return the configured model identifier (value, not a source literal).
 
     Lazy import keeps the adapter/config dependency out of module-load scope
     (DIP) and keeps any provider/model *literal* out of this file's source
     (PROD::I3) — the model name is a runtime value resolved below the port.
+    ``working_dir`` (issue #106) enables the caller-repo opt-in.
     """
     from hestai_context_mcp.adapters import ai_config
 
-    return ai_config.resolve_model()
+    return ai_config.resolve_model(working_dir=working_dir)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -224,6 +229,7 @@ async def compile_prose_to_octave(
     *,
     max_output_tokens: int | None = None,
     max_cost_usd: float | None = None,
+    working_dir: str | None = None,
 ) -> CompileResult:
     """Transduce prose into a raw OCTAVE string over the AIClient port.
 
@@ -251,7 +257,7 @@ async def compile_prose_to_octave(
     )
     price_per_1k = _env_float("HESTAI_INTAKE_USD_PER_1K_TOKENS", _DEFAULT_USD_PER_1K_TOKENS)
 
-    model = _resolve_model_name()
+    model = _resolve_model_name(working_dir)
 
     # --- Cost cap: project BEFORE the call; abort on breach (no truncation). ---
     projected_tokens = _project_tokens(intake_context, out_cap)
@@ -267,7 +273,7 @@ async def compile_prose_to_octave(
             tokens=projected_tokens,
         )
 
-    client = build_default_ai_client()
+    client = build_default_ai_client(working_dir)
     if client is None:
         # Issue #99 (Finding 2): no credential → definitively $0; the provider
         # was never called so cost_is_estimate=False (not an approximation).
