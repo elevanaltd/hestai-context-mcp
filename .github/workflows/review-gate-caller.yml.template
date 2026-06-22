@@ -1,0 +1,46 @@
+# Review Gate - Governance Socket
+# Copy this file to .github/workflows/review-gate.yml in your repo.
+# Source: https://github.com/elevanaltd/hestai-context-mcp
+#
+# This delegates PR review-gate enforcement to the reusable workflow
+# hosted in hestai-context-mcp. The reusable workflow will:
+#   - Checkout your repo and the review-gate tooling
+#   - Determine review tier based on changed files
+#   - Check for required approval comments on the PR
+#   - Post a status comment on the PR
+name: Review Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  issue_comment:
+    types: [created, edited]
+
+jobs:
+  check-review:
+    # Only invoke for PR events, or PR comments containing review verdicts.
+    # Filters out irrelevant comments (discussion, bot noise) that can't change gate outcome.
+    # Keywords match review_formats.py: APPROVED, REVIEWED (covers SELF-REVIEWED), GO.
+    # Also matches markdown-bold variants (**APPROVED**, **GO**) since review_formats.py
+    # strips bold markers before pattern matching.
+    # IMPORTANT: Exclude bot comments to prevent self-triggering — the gate's own status
+    # comment contains 'APPROVED'/'REVIEWED' in guidance text which would re-trigger the gate.
+    if: >-
+      github.event_name == 'pull_request'
+      || (github.event.issue.pull_request
+          && github.event.comment.user.type != 'Bot'
+          && (contains(github.event.comment.body, 'APPROVED')
+              || contains(github.event.comment.body, 'REVIEWED')
+              || contains(github.event.comment.body, ' GO')
+              || contains(github.event.comment.body, ' GO:')
+              || contains(github.event.comment.body, '**GO**')))
+    uses: elevanaltd/hestai-context-mcp/.github/workflows/review-gate.yml@main
+    # Caller must declare permissions explicitly - the reusable workflow
+    # cannot elevate beyond what the caller allows. Without these, orgs
+    # with restrictive default permissions will block PR commenting.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    with:
+      pr_number: ${{ github.event.pull_request.number || github.event.issue.number }}

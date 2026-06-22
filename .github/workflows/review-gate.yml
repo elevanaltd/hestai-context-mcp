@@ -1,0 +1,484 @@
+# HestAI Review Gate v3.0.0 - Governance Socket
+# Source: https://github.com/elevanaltd/HestAI-MCP
+# Last updated: 2026-02-10 (Governance Socket: reusable workflow_call support)
+#
+# This workflow runs review validation for PRs. It supports two modes:
+#   1. LOCAL:  Triggered directly by HestAI-MCP's own PRs (pull_request / issue_comment)
+#   2. REMOTE: Called by other repos via workflow_call (Governance Socket pattern)
+#
+# For consuming repos, copy review-gate-caller.yml.template to your
+# .github/workflows/review-gate.yml - see that file for details.
+
+name: Review Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created, edited]
+  workflow_call:
+    inputs:
+      pr_number:
+        description: 'PR number from the calling workflow'
+        required: true
+        type: string
+
+jobs:
+  check-review:
+    runs-on: ubuntu-latest
+    # Only run on PR events, workflow_call, or PR comments containing review verdicts.
+    # Filters out irrelevant comments (discussion, bot noise) that can't change gate outcome.
+    # Keywords match review_formats.py: APPROVED, REVIEWED (covers SELF-REVIEWED), GO.
+    # Also matches markdown-bold variants (**APPROVED**, **GO**) since review_formats.py
+    # strips bold markers before pattern matching.
+    # IMPORTANT: Exclude bot comments to prevent self-triggering — the gate's own ❌ status
+    # comment contains 'APPROVED'/'REVIEWED' in guidance text which would re-trigger the gate.
+    if: >-
+      github.event_name == 'pull_request'
+      || github.event_name == 'workflow_call'
+      || github.event_name == 'pull_request_review'
+      || (github.event.issue.pull_request
+          && github.event.comment.user.type != 'Bot'
+          && (contains(github.event.comment.body, 'APPROVED')
+              || contains(github.event.comment.body, 'REVIEWED')
+              || contains(github.event.comment.body, ' GO')
+              || contains(github.event.comment.body, ' GO:')
+              || contains(github.event.comment.body, '**GO**')))
+
+    # Required for PR commenting and commit status updates
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      statuses: write
+
+    steps:
+      # --- Determine execution context ---
+      - name: Detect execution context
+        id: context
+        run: |
+          if [ "${{ github.repository }}" = "elevanaltd/hestai-context-mcp" ]; then
+            echo "mode=local" >> $GITHUB_OUTPUT
+            echo "script_path=scripts/validate_review.py" >> $GITHUB_OUTPUT
+          else
+            echo "mode=remote" >> $GITHUB_OUTPUT
+            echo "script_path=.review-gate-tools/scripts/validate_review.py" >> $GITHUB_OUTPUT
+          fi
+
+      # --- Checkout the target repo (caller or self) ---
+      # NOTE: This MUST come before the tools checkout below, because
+      # actions/checkout with clean:true (default) runs git clean -ffdx
+      # which would delete any previously checked-out untracked directories.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --- Cross-repo: fetch review-gate tooling from HestAI-MCP ---
+      # Checked out into a subdirectory of the already-checked-out repo.
+      # Must come AFTER the target repo checkout to survive git clean.
+      - name: Checkout review-gate tooling
+        if: steps.context.outputs.mode == 'remote'
+        uses: actions/checkout@v4
+        with:
+          repository: elevanaltd/hestai-context-mcp
+          path: .review-gate-tools
+          sparse-checkout: |
+            scripts/validate_review.py
+            src/hestai_context_mcp/tools/shared/review_formats.py
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Get PR Number
+        id: pr
+        run: |
+          if [ -n "${{ inputs.pr_number }}" ]; then
+            echo "number=${{ inputs.pr_number }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          else
+            # For issue_comment events on PRs
+            PR_NUMBER=$(echo "${{ github.event.issue.pull_request.url }}" | grep -oE '[0-9]+$')
+            echo "number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+          fi
+
+      # --- Comment-event fast path ---
+      # On issue_comment events, the diff hasn't changed — only approvals may have.
+      # Parse the existing status comment for cached tier/reviewers/SHA to avoid
+      # re-running file classification. If the cached SHA matches the PR head,
+      # pass the cached data to validate_review.py via CACHED_GATE_DATA.
+      - name: Extract cached gate data (comment and review events)
+        id: cached_gate
+        if: github.event_name == 'issue_comment' || github.event_name == 'pull_request_review'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        with:
+          script: |
+            const prNumber = process.env.PR_NUMBER;
+            try {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100
+              });
+
+              const marker = '<!-- review-gate-status -->';
+              // Use reverse search to find the newest marker comment in case
+              // multiple exist (e.g. from workflow re-runs before update logic).
+              const botComment = comments.reverse().find(c =>
+                c.user.type === 'Bot' && c.body.includes(marker)
+              );
+
+              if (botComment) {
+                const dataMatch = botComment.body.match(/<!-- review-gate-data:(.*?) -->/);
+                if (dataMatch) {
+                  const cached = JSON.parse(dataMatch[1]);
+                  // Get current PR data to compare against cached SHAs
+                  const { data: pr } = await github.rest.pulls.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: prNumber
+                  });
+                  const headSha = pr.head.sha;
+                  const baseSha = pr.base.sha;
+
+                  if (cached.sha && cached.sha !== 'unknown' && cached.sha === headSha) {
+                    // Head SHA matches — now check base branch tip SHA to detect base movement.
+                    // If base_sha is missing from cached data (old format), treat as cache miss.
+                    if (!cached.base_sha) {
+                      console.log('Cache miss: cached data missing base_sha (old format)');
+                      core.setOutput('cache_hit', 'false');
+                    } else if (cached.base_sha !== baseSha) {
+                      console.log(`Cache miss: base branch moved (cached base=${cached.base_sha.substring(0, 7)}, current=${baseSha.substring(0, 7)})`);
+                      core.setOutput('cache_hit', 'false');
+                    } else {
+                      console.log(`Fast path: cached SHA ${cached.sha.substring(0, 7)} matches PR head, base ${baseSha.substring(0, 7)} matches`);
+                      core.setOutput('cache_hit', 'true');
+                      core.setOutput('cached_data', JSON.stringify(cached));
+                    }
+                  } else {
+                    console.log(`Cache miss: cached SHA=${cached.sha || 'none'}, head SHA=${headSha}`);
+                    core.setOutput('cache_hit', 'false');
+                  }
+                } else {
+                  console.log('No cached gate data found in status comment');
+                  core.setOutput('cache_hit', 'false');
+                }
+              } else {
+                console.log('No review-gate status comment found');
+                core.setOutput('cache_hit', 'false');
+              }
+            } catch (error) {
+              console.warn('Failed to extract cached gate data:', error.message);
+              core.setOutput('cache_hit', 'false');
+            }
+
+      - name: Check Review Requirements
+        id: review_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI: true
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          CACHED_GATE_DATA: ${{ steps.cached_gate.outputs.cached_data || '' }}
+        run: |
+          # Universal PR checkout - works for both same-repo and fork PRs
+
+          # Get base ref for comparison
+          if [ "$EVENT_NAME" = "pull_request" ] || [ -n "$PR_BASE_REF" ]; then
+            BASE_REF="$PR_BASE_REF"
+          else
+            # For issue_comment or workflow_call events, fetch PR details via API
+            PR_DATA=$(gh pr view "$PR_NUMBER" --json baseRefName)
+            BASE_REF=$(echo "$PR_DATA" | jq -r '.baseRefName')
+          fi
+
+          echo "PR Number: $PR_NUMBER"
+          echo "Base ref: $BASE_REF"
+
+          # Fetch base branch
+          git fetch origin "$BASE_REF"
+          export GITHUB_BASE_REF="origin/$BASE_REF"
+
+          # Fetch and checkout PR using GitHub's universal PR ref
+          # This works for all PRs (same-repo and forks)
+          git fetch origin "refs/pull/$PR_NUMBER/head:pr-$PR_NUMBER"
+          git checkout "pr-$PR_NUMBER"
+
+          # Run validation using context-appropriate script path
+          SCRIPT_PATH="${{ steps.context.outputs.script_path }}"
+          echo "Running: python3 $SCRIPT_PATH"
+
+          set +e  # Don't exit on error
+          OUTPUT=$(python3 "$SCRIPT_PATH" 2>&1)
+          EXIT_CODE=$?
+          set -e
+
+          # Save output for next step
+          echo "$OUTPUT"
+          echo "$OUTPUT" > /tmp/review_output.txt
+
+          # Set output for next step
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          exit $EXIT_CODE
+
+      - name: Update PR Status
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          REVIEW_EXIT_CODE: ${{ steps.review_check.outputs.exit_code }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const prNumber = process.env.PR_NUMBER;
+            const exitCode = process.env.REVIEW_EXIT_CODE;
+            const success = exitCode === '0';
+
+            // Read validation output if available
+            let validationOutput = '';
+            try {
+              validationOutput = fs.readFileSync('/tmp/review_output.txt', 'utf8');
+            } catch (e) {
+              validationOutput = 'Unable to read validation output';
+            }
+
+            // Parse key information from output.
+            // Strategy: Try structured JSON first (emitted by validate_review.py v2.1+),
+            // fall back to regex parsing for backward compatibility with older versions
+            // that cross-repo callers might still reference.
+            let gateData = null;
+            const jsonMatch = validationOutput.match(/<!-- REVIEW_GATE_JSON:(.*?) -->/);
+            if (jsonMatch) {
+              try {
+                gateData = JSON.parse(jsonMatch[1]);
+                console.log('Parsed structured JSON from validate_review.py');
+              } catch (e) {
+                console.warn('Failed to parse REVIEW_GATE_JSON, falling back to regex:', e.message);
+              }
+            }
+
+            // Extract tier, reason, roles, and provenance — prefer JSON, fall back to regex
+            let tier, reason, roles, provenance;
+            if (gateData) {
+              tier = gateData.tier || 'UNKNOWN';
+              reason = gateData.reason || '';
+              roles = (gateData.reviewers || []).sort();
+              // Per-role provenance map (issue #412): { ROLE: [DIFF|HEAD|BASE|PR_BODY] }.
+              provenance = (gateData.provenance && typeof gateData.provenance === 'object')
+                ? gateData.provenance
+                : {};
+            } else {
+              // Regex fallback for backward compatibility
+              const tierMatch = validationOutput.match(/📋 Review Tier: (\S+)/);
+              const reasonMatch = validationOutput.match(/Reason: (.+)/);
+              const rolesMatch = validationOutput.match(/Reviewers: \[([^\]]+)\]/);
+              tier = tierMatch ? tierMatch[1] : 'UNKNOWN';
+              reason = reasonMatch ? reasonMatch[1] : '';
+              roles = rolesMatch ? rolesMatch[1].split(', ').sort() : [];
+              provenance = {};
+            }
+
+            // Render the per-role provenance table (issue #412 §4). Source labels
+            // map to human-readable origins. A role contributed ONLY by BASE
+            // (present in the base blob, removed in head) shows `BASE` alone — the
+            // visible audit trail of an attempted downgrade that set-union refused.
+            // Returns '' when no escalation provenance is present (pure diff-shape).
+            function renderProvenance(roleList, prov) {
+              // Only render when at least one role was escalated by a declaration
+              // (i.e. a non-DIFF source contributed). Pure diff-shape PRs stay quiet.
+              const escalated = roleList.some(r => {
+                const s = prov[r];
+                return Array.isArray(s) && s.some(x => x !== 'DIFF');
+              });
+              if (!escalated) return '';
+              // Sources: DIFF=facets, HEAD/BASE=blob declaration, PR_BODY=declared in PR body.
+              // BASE-only = role was present in base but removed in head (ratchet retained it).
+              let table = '**Required reviewers** (sources: DIFF=facets, HEAD/BASE=blob, PR\\_BODY=PR body):\n';
+              table += '```\n';
+              for (const role of roleList) {
+                const srcs = Array.isArray(prov[role]) ? prov[role] : [];
+                // Pad role to 5 chars for column alignment (e.g. "TMG  — ...").
+                const padded = (role + '     ').slice(0, 5);
+                table += `${padded}— ${srcs.join(', ') || 'DIFF'}\n`;
+              }
+              table += '```\n';
+              return table;
+            }
+            const provenanceTable = renderProvenance(roles, provenance);
+
+            // Build status message
+            const status = success ? '✅' : '❌';
+            let message = '';
+
+            if (success) {
+              message = '**Review requirements satisfied**\n\n';
+              message += `**Tier**: ${tier}\n`;
+              message += validationOutput.includes('TIER_0_EXEMPT')
+                ? '✓ Exempt from review (docs/tests only)\n'
+                : '✓ Required approvals found\n';
+              if (provenanceTable) {
+                message += '\n' + provenanceTable;
+              }
+            } else {
+              message = '**Review requirements not met**\n\n';
+              message += `**Tier**: ${tier}\n`;
+
+              if (reason) {
+                message += `**Reason**: ${reason}\n\n`;
+              }
+
+              if (provenanceTable) {
+                message += provenanceTable + '\n';
+              }
+
+              // Extract required reviewers dynamically from validation output.
+              // The validator prints lines like "   - 'CE APPROVED: [assessment]' (or CE GO:)"
+              // for each required role. Parse these to build the guidance block.
+              if (tier === 'TIER_1_SELF') {
+                message += '**Required**: Self-review or HO supervisory review:\n';
+                message += '```\n{your-role} SELF-REVIEWED: [your rationale]\n-- or --\nHO REVIEWED: [rationale after delegated work]\n```\nAny role or name accepted (e.g., IL, skills-expert, Shaun).\n';
+              } else {
+                if (roles.length > 0) {
+                  message += `**Required**: ${roles.join(' + ')} approval:\n`;
+                  message += '```\n';
+                  for (const role of roles) {
+                    message += `${role} APPROVED: [assessment] (or ${role} GO:)\n`;
+                  }
+                  message += '```\n';
+                } else {
+                  message += '**Required**: See validation output for details\n';
+                }
+              }
+
+              message += '\n<details><summary>📋 Full Validation Output</summary>\n\n';
+              message += '```\n' + validationOutput + '\n```\n';
+              message += '</details>\n';
+            }
+
+            // Embed structured gate data as HTML comment for comment-event fast path.
+            // On issue_comment events, the gate can parse this cached data instead of
+            // re-running full file classification (the diff hasn't changed).
+            // Include both head SHA and base branch SHA to detect base branch movement.
+            const sha = gateData ? (gateData.sha || 'unknown') : 'unknown';
+            let base_sha = 'unknown';
+            try {
+              const { data: prData } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              base_sha = prData.base.sha || 'unknown';
+            } catch (e) {
+              console.warn('Failed to fetch PR base SHA for caching:', e.message);
+            }
+            // Persist provenance in the cached payload so the comment-event fast
+            // path (which skips re-classification) can re-render the audit trail
+            // without re-reading the base/head blobs.
+            const cachedData = JSON.stringify({ tier, reason, roles, sha, base_sha, provenance });
+            const dataComment = `<!-- review-gate-data:${cachedData} -->`;
+
+            // Add or update status comment
+            const marker = '<!-- review-gate-status -->';
+            const body = `${marker}\n${dataComment}\n## Review Gate Status: ${status}\n\n${message}\n\n<sub>Evaluated at commit ${sha.substring(0, 7)}</sub>`;
+
+            try {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100
+              });
+
+              // Reverse to update the NEWEST marker comment, matching the
+              // extract step above; avoids leaving stale marker/cache comments.
+              const botComment = comments.reverse().find(c =>
+                c.user.type === 'Bot' && c.body.includes(marker)
+              );
+
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body
+                });
+                console.log('Updated existing review status comment');
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body
+                });
+                console.log('Created new review status comment');
+              }
+            } catch (error) {
+              console.error('Failed to update PR comment:', error);
+              core.setFailed(`Failed to update PR status: ${error.message}`);
+            }
+
+      # --- Set commit status on PR head SHA ---
+      # GitHub Actions creates check runs on the default branch for issue_comment
+      # triggers, NOT on the PR's head SHA. This means the PR's check status badge
+      # doesn't update when approvals are posted via comments. To fix this, we
+      # explicitly set a commit status on the PR's head SHA using the Statuses API.
+      # This runs for both pull_request and issue_comment events so the "Review Gate"
+      # status is always consistent. Skipped for workflow_call (remote repos handle
+      # their own status).
+      - name: Set commit status on PR head
+        if: always() && steps.context.outputs.mode == 'local'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REVIEW_EXIT_CODE: ${{ steps.review_check.outputs.exit_code }}
+        run: |
+          # Get the PR's head SHA
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            PR_HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            # For issue_comment events, fetch from API
+            PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json headRefOid --jq '.headRefOid')
+          fi
+
+          if [ -z "$PR_HEAD_SHA" ]; then
+            echo "::warning::Could not determine PR head SHA, skipping commit status"
+            exit 0
+          fi
+
+          # Determine pass/fail from exit code
+          if [ "$REVIEW_EXIT_CODE" = "0" ]; then
+            STATE="success"
+            DESC="All required approvals found"
+          else
+            STATE="failure"
+            DESC="Review requirements not met"
+          fi
+
+          echo "Setting commit status: state=$STATE on SHA=$PR_HEAD_SHA"
+
+          # Set commit status on PR head SHA
+          gh api "repos/${{ github.repository }}/statuses/$PR_HEAD_SHA" \
+            -f state="$STATE" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="$DESC" \
+            -f context="Review Gate"
+
+      # AI code review bots (all advisory, non-blocking):
+      # - Cubic Dev AI: auto-reviews on PR activity (no configuration available)
+      # - GitHub Copilot: auto-reviews on PR activity
+      #
+      # The CRS/CE chain (via submit-review tool) remains the structural gate.
