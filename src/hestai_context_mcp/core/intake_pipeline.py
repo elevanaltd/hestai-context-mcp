@@ -41,7 +41,6 @@ from hestai_context_mcp.tools.governance.type_checker import (
     ValidationResult,
     validate_octave_content,
 )
-from hestai_context_mcp.tools.governance.verbosity_lint import lint_verbosity
 
 __all__ = ["PipelineResult", "run_intake_pipeline", "run_intake_to_pr"]
 
@@ -76,6 +75,12 @@ def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[
     Stage 4). The real Gate B validator runs additively; its structured errors
     are flattened into the error list. The pass requires BOTH to be clean.
     """
+    # Gate A (regex) carries the §4.1 #13 reasoning-density guard (≤40 words,
+    # no newline on DECISION/BECAUSE), so the verbosity rule is enforced HERE,
+    # by the SAME shared invariant the octave_content path uses — one source of
+    # truth across all submission paths (#108-item-2 unification). A verbose
+    # record therefore fails Gate A directly; the failure flows through the same
+    # informed-retry/abort path as any schema failure (no separate Gate-C lint).
     regex_result = validate_octave_content(working_dir, octave)
     if not regex_result.valid:
         return False, regex_result, list(regex_result.errors)
@@ -86,14 +91,6 @@ def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[
             f"[{e.get('code', '')}] {e.get('message', '')}".strip() for e in octave_result.errors
         ]
         return False, regex_result, errors
-
-    # Density backstop: a record can be syntactically valid (Gates A+B clean) yet
-    # be uncompressed prose in OCTAVE clothing. The deterministic verbosity lint
-    # closes that gap; a failure flows through the SAME informed-retry/abort path
-    # as a schema failure, so a verbose second attempt aborts — no write, no PR.
-    verbosity_errors = lint_verbosity(octave)
-    if verbosity_errors:
-        return False, regex_result, verbosity_errors
 
     return True, regex_result, []
 

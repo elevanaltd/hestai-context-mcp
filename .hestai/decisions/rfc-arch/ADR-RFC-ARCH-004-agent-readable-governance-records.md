@@ -1,6 +1,6 @@
 # ADR-RFC-ARCH-004 — Agent-Readable Governance Records (AGR) — Format, Lifecycle, Tool Contracts
 
-- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13)
+- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13). **Schema v1.1** — MINOR-additive amendment transcribing HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED): §1.2 `DECISION`/`BECAUSE` bytecode density (≤40 words, no newline), §1.5 v1.1 semantics, §4.1 #13 value-level guard, `HUMAN_ADR_REF` greppable-TOKEN form. No structural parser change; v1.0 records remain valid.
 - **Ratified-by**: standards-reviewer + critical-implementation-validator (stamped close-out 2026-06-11), HO-orchestrated, operator-authorised
 - **Date**: 2026-05-19
 - **Scope**: `hestai-context-mcp` repository. Specifies the L1 AGR record format and consumer-side MCP tool contracts. Specification only; code implementation is deferred to a successor PR (PR-D′ / PR-H) routed via oa-router to implementation-lead.
@@ -71,12 +71,12 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 | Field | Type | Notes |
 |---|---|---|
 | `TYPE` | literal | MUST be `DECISION_RECORD` |
-| `VERSION` | semver-2-segment | `MAJOR.MINOR` per §1.5. Current: `1.0`. |
+| `VERSION` | semver-2-segment | `MAJOR.MINOR` per §1.5. Current: `1.1` (records authored before the v1.1 amendment remain valid at `1.0`; v1.1 is MINOR-additive — see §1.5). |
 | `TOKEN` | string | Globally unique identifier within the repository (see §1.3) |
 | `STATUS` | enum | One of `PROPOSED`, `RATIFIED`, `SUPERSEDED`, `VOID` (see §1.4) |
 | `TIER` | enum | One of `STRATEGIC`, `TACTICAL`, `OPERATIONAL`. Semantic gravity per the cited research brief. |
-| `DECISION` | string | One-sentence statement of what is binding. Mandatory even on `PROPOSED`. |
-| `BECAUSE` | string | One-sentence rationale. Mandatory even on `PROPOSED`. |
+| `DECISION` | string | One-sentence statement of what is binding. Mandatory even on `PROPOSED`. **v1.1 bytecode form**: a single flat line — AT MOST 40 words, NO embedded newline — using compressed-OCTAVE operators (`→ ⇌ ∴ ⊕`) to carry connectives, never nested custom keys. Enforced as §4.1 #13 (per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620). |
+| `BECAUSE` | string | One-sentence rationale. Mandatory even on `PROPOSED`. **v1.1 bytecode form**: same ≤40-word, no-newline, compressed-OCTAVE constraint as `DECISION` (§4.1 #13). |
 | `AUTHORED_AT` | ISO-8601 timestamp | UTC. Set once at record creation; never edited. |
 
 #### Optional (any record, any lifecycle state)
@@ -84,7 +84,7 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 | Field | Type | Notes |
 |---|---|---|
 | `ISSUE_REF` | string | GitHub issue URL or `repo:<repo-id>#<n>` shorthand. Optional on `PROPOSED`/`RATIFIED`; recommended on `SUPERSEDED`/`VOID` if origin is on issue tracker. |
-| `HUMAN_ADR_REF` | string | Path to a `docs/adr/` entry or equivalent. Optional. Records without a human ADR are first-class. |
+| `HUMAN_ADR_REF` | string | Reference to a human ADR. Optional; records without a human ADR are first-class. **v1.0**: a repository-relative path (resolved by §4.1 #11). **v1.1**: a greppable cross-repo-survivable TOKEN is the canonical form (per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 `ADR_REF_FORM::greppable_TOKEN`); a path remains accepted for back-compat and is path-resolved under §4.1 #11 only when it is path-shaped. |
 | `SUPERSEDED_BY` | string | TOKEN of the superseding record. Required iff `STATUS == SUPERSEDED`. |
 | `EXTENDS` | list of TOKENs | Records this record extends (additive, not replacing). May be empty. |
 | `AMENDS` | list of TOKENs | Records this record amends (partial replacement). May be empty. |
@@ -147,7 +147,9 @@ Rules:
 - **MINOR bump** — additive. New optional fields, new admissible enum values for non-required fields, new reserved names. Parsers written against `MAJOR=N.MINOR=K` MUST tolerate `MAJOR=N.MINOR>K` by ignoring unknown optional fields.
 - No patch level. Spec corrections land at the next MINOR.
 
-Current schema is `1.0`. Future additive extensions become `1.1`, `1.2`, etc.
+Current schema is `1.1`. Future additive extensions become `1.2`, `1.3`, etc.
+
+**v1.1 (MINOR-additive, per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101)**: AGRs are treated as LLM "bytecode". The reasoning-bearing fields `DECISION` and `BECAUSE` are constrained to a single flat line of ≤40 words with no embedded newline, using compressed-OCTAVE operators for connectives (new value-level invariant §4.1 #13; no structural parser change). `HUMAN_ADR_REF` gains a greppable-TOKEN canonical form alongside the legacy path form. Both are MINOR-additive: a `1.0` record that already satisfies the ≤40-word/no-newline density (as every conforming one-sentence `DECISION`/`BECAUSE` does) remains valid, and v1.1 introduces no new required field. Parsers written against `1.0` continue to parse `1.1` records (the structural grammar is unchanged).
 
 **Spec-only period**: Between this ADR's merge and the PR-D′/PR-H code landing, AGR records may be authored by hand. Such records MUST carry `VERSION::"1.0"` and conform to §1.1–§1.6 exactly as if the validator (§4) were running. When the validator subsequently lands, it MUST enforce v1.0 against every record under `.hestai/decisions/**/*.oct.md`, regardless of authoring date; there is no grandfather clause.
 
@@ -456,8 +458,9 @@ The validator is a CLI tool (name suggestion: `validate_agent_readable_governanc
 8. **Supersession DAG (same-repo only)** — `SUPERSEDED_BY`, `EXTENDS`, `AMENDS` references resolve to TOKENs that exist **in the same repository**; per §1.6 each edge-type subgraph is acyclic independently (cross-edge interactions per §1.6 are admissible and NOT cycles); `SUPERSEDED_BY` chain is a chain not a tree. Cross-repo edges (per §2.4) are **out of scope** for automated validation — the validator does not fetch remote repositories. This is consistent with ADR-RFC-ARCH-002 PE amendment 1 (CI gate scoped to LOCAL repo-relative paths only) and §2.4's "cross-repo reciprocity is advisory" stance. Cross-repo edge correctness is enforced by editorial review.
 9. **`SUPERSEDED_BY` invariant** — present iff `STATUS == SUPERSEDED`.
 10. **`ISSUE_REF` shape** — when present, parses as a GitHub URL or `repo:<repo-id>#<n>`.
-11. **`HUMAN_ADR_REF` resolution** — when present, the path resolves under the repository.
+11. **`HUMAN_ADR_REF` form (v1.1)** — when present, the ref is EITHER a well-formed greppable TOKEN (matches the §1.3 TOKEN regex; the v1.1 canonical cross-repo-survivable form per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 — validated as a token, NOT path-resolved) OR a v1.0 path that resolves to a file under the repository. The §1.3 TOKEN pattern admits no path separator and no `.`, so the two forms are mutually exclusive: token-form is matched first; anything else is treated as a path and must resolve under the repo. A ref that is neither is a hard error.
 12. **Ratification provenance (warning)** — when `STATUS != PROPOSED` and `RATIFIED_BY` is absent, the validator emits a **warning** (not error) per §4.2. Closes a portion of the TOKEN-squatting / lookalike-record gap without forcing legacy `HO-*` records into rework. May be promoted to error in a MINOR bump (see §11 Q5).
+13. **Reasoning-field density (v1.1)** — `DECISION` and `BECAUSE` are each AT MOST 40 words and contain NO embedded newline (the v1.1 bytecode form, §1.2). A value-level check ONLY: the structural flat-regex parse is unchanged (no structural parser change), so write/read parity (the shared `type_checker` ↔ `agr_read` constants) is preserved. Per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101). Severity: error.
 
 ### 4.2 Severities
 

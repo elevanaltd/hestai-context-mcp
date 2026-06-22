@@ -26,13 +26,18 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     parse_decision_record,
 )
 
-# §1.3 TOKEN format + the §1.2 required-field contract — reuse the authoritative
-# Gate-A definitions (do not rebuild). ``REQUIRED_META_FIELDS`` is the SINGLE
-# SOURCE OF TRUTH shared with the write-side validator so the read-side
-# parse-completeness check (``record_is_parseable``) and Gate A's required-field
-# presence check (§4.1 #2) can never drift (issue #88 write/read parity).
+# §1.3 TOKEN format + the §1.2 required-field contract + the v1.1 §4.1 #13
+# reasoning-density contract — reuse the authoritative Gate-A definitions (do not
+# rebuild). ``REQUIRED_META_FIELDS`` is the SINGLE SOURCE OF TRUTH shared with
+# the write-side validator so the read-side parse-completeness check
+# (``record_is_parseable``) and Gate A's required-field presence check (§4.1 #2)
+# can never drift; likewise ``MAX_REASONING_WORDS`` / ``REASONING_FIELDS`` keep
+# the read side and the write-side density guard in lockstep on what "compressed
+# bytecode" means (issue #88 write/read parity).
 from hestai_context_mcp.tools.governance.type_checker import (
     _DECISION_RECORD_TYPE,
+    MAX_REASONING_WORDS,  # noqa: F401  (re-export for read/write parity)
+    REASONING_FIELDS,  # noqa: F401  (re-export for read/write parity)
     _extract_sentinel,
     _extract_token,
 )

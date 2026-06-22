@@ -50,10 +50,11 @@ _VALID_OCTAVE = (
 )
 _INVALID_OCTAVE = "this is not octave at all"
 
-# Fully-formed and VALID (passes Gates A+B) but verbose: the DECISION value is
-# far over the word ceiling. Exercises the density backstop in ``_gate``. The
-# verbose DECISION lives INSIDE the META block (post-#88 the §1.1 envelope rule
-# means required fields after a ``---`` separator do not count as present).
+# Fully-formed but verbose: the DECISION value is far over the v1.1 ≤40-word
+# ceiling. Post-unification (#108-item-2) this is rejected by the SHARED Gate A
+# reasoning-density guard (ADR-RFC-ARCH-004 §4.1 #13) — the same rule the
+# octave_content path enforces — NOT a separate Gate C verbosity lint. The
+# verbose DECISION lives INSIDE the META block.
 _VERBOSE_DECISION = " ".join(f"word{i}" for i in range(200))
 _VERBOSE_OCTAVE = (
     "===DECISION_RECORD===\n"
@@ -141,26 +142,32 @@ class TestRetryOnce:
 
 
 class TestVerbosityBackstop:
-    async def test_verbose_but_valid_then_compressed_retries_once(
-        self, tmp_path: Path, stub_backend
-    ) -> None:
-        # First attempt is valid-but-verbose -> density lint fails the gate ->
+    """Gate C verbosity is now the SHARED Gate A density guard (#108-item-2).
+
+    The prose path enforces the identical ADR-RFC-ARCH-004 §4.1 #13 ≤40-word
+    rule that the octave_content path enforces — one source of truth. A verbose
+    record is rejected by Gate A itself, so the rejection text is the Gate A
+    DECISION/40-word message (no separate ``VERBOSITY`` lint).
+    """
+
+    async def test_verbose_then_compressed_retries_once(self, tmp_path: Path, stub_backend) -> None:
+        # First attempt is verbose -> Gate A density guard fails the gate ->
         # informed retry -> second (compressed) attempt passes.
         stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VALID_OCTAVE)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         assert result["ok"] is True
         assert result["octave"] == _VALID_OCTAVE
         assert result["attempts"] == 2
-        # The retry prompt must carry the verbosity feedback so the 2nd attempt is informed.
+        # The retry prompt must carry the density feedback so the 2nd attempt is informed.
         retry_ctx = stub_backend.calls[1][0]
-        assert "VERBOSITY" in retry_ctx.prompt
+        assert "DECISION" in retry_ctx.prompt and "40" in retry_ctx.prompt
 
     async def test_persistently_verbose_aborts(self, tmp_path: Path, stub_backend) -> None:
         stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VERBOSE_OCTAVE)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         assert result["ok"] is False
         assert result["octave"] is None
-        assert any("VERBOSITY" in e for e in result["validation_errors"])
+        assert any("DECISION" in e and "40" in e for e in result["validation_errors"])
         assert result["attempts"] == 2
 
 
@@ -194,11 +201,11 @@ class TestAbortImmunity:
         before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
         stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VERBOSE_OCTAVE)])
         result = await run_intake_pipeline(tmp_path, _ctx())
-        # Precondition: this really is the verbosity abort path.
+        # Precondition: this really is the density (Gate A) abort path.
         assert result["ok"] is False
-        assert any("VERBOSITY" in e for e in result["validation_errors"])
+        assert any("DECISION" in e and "40" in e for e in result["validation_errors"])
         after = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-        assert before == after  # ZERO filesystem writes on verbosity-driven abort
+        assert before == after  # ZERO filesystem writes on density-driven abort
 
     async def test_validate_retry_abort_loop_never_invokes_linker(self) -> None:
         # Structural invariant: the Stage-3 validate->retry->abort LOOP

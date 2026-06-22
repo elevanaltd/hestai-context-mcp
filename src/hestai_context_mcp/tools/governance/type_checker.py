@@ -111,6 +111,27 @@ TIER_VALUES = frozenset({"STRATEGIC", "TACTICAL", "OPERATIONAL"})
 # §1.2 reserved names — MUST NOT appear in any v1.x record (§4.1 #7).
 RESERVED_FIELD_NAMES = frozenset({"DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"})
 
+# --- ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13 reasoning-density contract ---------
+# HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED) ruled AGRs are LLM
+# "bytecode": the reasoning-bearing fields DECISION and BECAUSE are flat,
+# compressed-OCTAVE strings of AT MOST 40 words with NO embedded newline. The
+# guard is a value-level word-count/newline check ONLY — no structural parser
+# change (the flat-regex parse stays as-is). These are SHARED CONSTANTS: the
+# read side (``agr_read``) imports them so the write-side guard and the read
+# side can never disagree on the density contract (issue #88 write/read parity).
+MAX_REASONING_WORDS = 40
+REASONING_FIELDS = ("DECISION", "BECAUSE")
+
+# Reasoning value capture: ``KEY::"value"`` where the double-quoted OCTAVE string
+# may span physical lines (``(?:[^"\\]|\\.)*`` consumes to the first unescaped
+# closing quote, honouring an escaped \"). Mirrors the removed verbosity_lint
+# capture so an embedded newline INSIDE the value is visible to the guard (the
+# line-anchored _META_FIELD_LINE_RE alone would only see the first physical
+# line). String-only — no OCTAVE AST.
+_REASONING_VALUE_RE = re.compile(
+    r'(?ms)^[ \t]*(?P<key>[A-Z][A-Z0-9_]*)::"(?P<val>(?:[^"\\]|\\.)*)"'
+)
+
 # A single META ``KEY::value`` assignment at line start (whitespace-tolerant —
 # OCTAVE bodies are indented). Mirrors the read-side parser's ``_FIELD_LINE_RE``
 # (core.agent_readable_governance_parser) EXACTLY so the write-side presence /
@@ -442,15 +463,29 @@ def _check_agr_invariants(
             "(ADR-RFC-ARCH-004 §1.2 / §4.1 #9)."
         )
 
-    # --- #11: HUMAN_ADR_REF resolves under the repository ---
+    # --- #11: HUMAN_ADR_REF — token-form (v1.1) OR resolvable path (v1.0) ---
+    # ADR-RFC-ARCH-004 v1.1 (per #101 ADR_REF_FORM::greppable_TOKEN) admits two
+    # canonical forms. DISCRIMINATION RULE (deterministic, regex-only): a ref
+    # that matches the §1.3 TOKEN regex (``_TOKEN_FORMAT_RE``) is TOKEN-form; the
+    # §1.3 pattern admits no ``/`` and no ``.``, so a path (which carries a
+    # separator or ``.md``) can never match it — the two classes are mutually
+    # exclusive by construction (no separate path detector invented).
+    #   * TOKEN-form  -> well-formed greppable token; NO path resolution
+    #                    (cross-repo survivable — the target may live elsewhere).
+    #   * otherwise   -> v1.0 path-form; resolve under the repo exactly as before
+    #                    (back-compat; the 5 existing path-form records still pass).
     human_adr_m = _HUMAN_ADR_REF_RE.search(content)
     if human_adr_m is not None:
         ref = human_adr_m.group(1) if human_adr_m.group(1) is not None else human_adr_m.group(2)
         ref = (ref or "").strip()
-        if not _human_adr_ref_resolves(working_dir, ref):
+        if _TOKEN_FORMAT_RE.match(ref):
+            # Token-form: well-formed greppable token, no filesystem resolution.
+            pass
+        elif not _human_adr_ref_resolves(working_dir, ref):
             errors.append(
-                f"HUMAN_ADR_REF '{ref}' does not resolve to a file under the "
-                "repository (ADR-RFC-ARCH-004 §1.2 / §4.1 #11)."
+                f"HUMAN_ADR_REF '{ref}' is neither a well-formed greppable TOKEN "
+                "(ADR-RFC-ARCH-004 §1.3 form) nor a path that resolves to a file "
+                "under the repository (ADR-RFC-ARCH-004 §1.2 / §4.1 #11)."
             )
 
     # --- #12: Ratification provenance (WARNING per §4.2, NOT error) ---
@@ -461,6 +496,49 @@ def _check_agr_invariants(
             "(not PROPOSED); ratification provenance is recommended "
             "(ADR-RFC-ARCH-004 §4.1 #12, severity WARNING)."
         )
+
+    # --- #13: Reasoning-field density (ADR-RFC-ARCH-004 v1.1 §1.2) ---
+    # DECISION and BECAUSE are LLM "bytecode": flat compressed-OCTAVE strings of
+    # AT MOST MAX_REASONING_WORDS words with NO embedded newline (the ratified
+    # GATE_A_GUARD of HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101). This is
+    # a value-level check ONLY — the structural flat-regex parse is unchanged.
+    # Collect-more-errors with the offending field NAMED (operator UX), mirroring
+    # the #10/#9 precedent.
+    _check_reasoning_density(content, errors)
+
+
+def _check_reasoning_density(content: str, errors: list[str]) -> None:
+    """Enforce the §4.1 #13 word-count / no-newline guard on DECISION & BECAUSE.
+
+    A reasoning value is admissible iff it is at most ``MAX_REASONING_WORDS``
+    words AND contains no embedded newline. Both checks operate on the captured
+    string value (``_REASONING_VALUE_RE``); the surrounding OCTAVE structure is
+    not re-parsed (value-level only). Pure; appends actionable, field-named
+    errors. Shared ``MAX_REASONING_WORDS`` / ``REASONING_FIELDS`` keep this in
+    lockstep with the read side (issue #88 parity).
+    """
+    for match in _REASONING_VALUE_RE.finditer(content):
+        key = match.group("key")
+        if key not in REASONING_FIELDS:
+            continue
+        value = match.group("val")
+
+        if "\n" in value:
+            errors.append(
+                f"{key} value contains an embedded newline; reasoning fields MUST "
+                "be a single flat line (no newline) — ADR-RFC-ARCH-004 v1.1 §1.2 / "
+                "§4.1 #13. Compress to one telegraphic line using OCTAVE operators "
+                "(→ ⇌ ∴ ⊕) for the connectives."
+            )
+
+        word_count = len(value.split())
+        if word_count > MAX_REASONING_WORDS:
+            errors.append(
+                f"{key} value is {word_count} words (max {MAX_REASONING_WORDS}); "
+                "reasoning fields MUST be compressed bytecode, not prose — "
+                "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13. Drop stopwords and let "
+                "OCTAVE operators (→ ⇌ ∴ ⊕) carry the connectives."
+            )
 
 
 def _authored_at_utc_date(value: str) -> str | None:

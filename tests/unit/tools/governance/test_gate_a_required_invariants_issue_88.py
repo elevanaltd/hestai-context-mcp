@@ -377,6 +377,50 @@ class TestHumanAdrRefResolution:
         """HUMAN_ADR_REF is OPTIONAL: absence validates."""
         assert validate_octave_content(tmp_path, _record()).valid
 
+    # --- v1.1 token-form (#101 ADR_REF_FORM::greppable_TOKEN; #113 scope) -----
+
+    @pytest.mark.unit
+    def test_token_form_human_adr_ref_accepted_without_path_resolution(
+        self, tmp_path: Path
+    ) -> None:
+        """A TOKEN-shaped HUMAN_ADR_REF validates WITHOUT any path resolution (v1.1).
+
+        #101 ratified HUMAN_ADR_REF as a greppable cross-repo TOKEN. A token-form
+        ref matches the §1.3 TOKEN regex (no path separator / no ``.md``), so #11
+        validates it as a well-formed token and never touches the filesystem —
+        the cited record need not exist on THIS repo's disk (cross-repo survivable).
+        """
+        result = validate_octave_content(
+            tmp_path,
+            _record(extra_lines="  HUMAN_ADR_REF::HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620"),
+        )
+        assert result.valid, result.errors
+
+    @pytest.mark.unit
+    def test_token_form_human_adr_ref_accepted_when_quoted(self, tmp_path: Path) -> None:
+        """The quoted legacy spelling of a token-form ref is equally accepted."""
+        result = validate_octave_content(
+            tmp_path,
+            _record(extra_lines='  HUMAN_ADR_REF::"HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620"'),
+        )
+        assert result.valid, result.errors
+
+    @pytest.mark.unit
+    def test_malformed_ref_neither_token_nor_resolvable_path_rejected(self, tmp_path: Path) -> None:
+        """A ref that is neither a valid TOKEN nor a resolvable path is still rejected.
+
+        ``not-a-token`` does not match the §1.3 TOKEN regex (lowercase, no date
+        suffix), so it falls through to path resolution — and there is no such
+        file under the repo — so #11 fires. Discrimination must not become a
+        blanket pass.
+        """
+        result = validate_octave_content(
+            tmp_path,
+            _record(extra_lines="  HUMAN_ADR_REF::not-a-token"),
+        )
+        assert result.valid is False
+        assert any("HUMAN_ADR_REF" in e for e in result.errors), result.errors
+
 
 # ---------------------------------------------------------------------------
 # Invariant #12 — Ratification provenance: WARNING (not error) per §4.2
