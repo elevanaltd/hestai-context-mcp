@@ -151,22 +151,35 @@ class TestReasoningBoundary:
 class TestNoEmbeddedNewline:
     @pytest.mark.unit
     def test_decision_with_embedded_newline_rejected(self, tmp_path: Path) -> None:
-        """A multi-physical-line DECISION value violates the flat-string rule."""
+        """A multi-physical-line DECISION value is rejected.
+
+        With the read-authoritative form check, a ``\\n``-split value's first
+        line carries an unbalanced opening quote, so it now fails the
+        double-quoted-flat-string FORM full-match rather than the inner-newline
+        branch — either way it MUST be rejected (consistent with the line-anchored
+        read parser, which only ever sees that first line).
+        """
         content = _record(decision="First clause of the decision\n  spilling onto a second line")
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False
-        assert any("DECISION" in e and "newline" in e.lower() for e in result.errors), result.errors
+        assert any("DECISION" in e for e in result.errors), result.errors
 
     @pytest.mark.unit
     def test_because_with_embedded_newline_rejected(self, tmp_path: Path) -> None:
         content = _record(because="Rationale clause one\n  rationale clause two")
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False
-        assert any("BECAUSE" in e and "newline" in e.lower() for e in result.errors), result.errors
+        assert any("BECAUSE" in e for e in result.errors), result.errors
 
     @pytest.mark.unit
     def test_decision_with_embedded_carriage_return_rejected(self, tmp_path: Path) -> None:
-        """F2: a lone CR (``\\r``) inside the value is an embedded newline too."""
+        """F2: a lone CR (``\\r``) inside the value is an embedded newline.
+
+        A lone ``\\r`` is NOT a line break for the line-anchored META regex, so
+        the whole balanced-quote value is surfaced as one field and passes the
+        FORM check — the inner ``\\r`` newline branch is what rejects it. This is
+        why the inner ``\\r``/``\\n`` check still earns its keep alongside FORM.
+        """
         content = _record(decision="First clause\r  second clause after a carriage return")
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False
@@ -174,11 +187,14 @@ class TestNoEmbeddedNewline:
 
     @pytest.mark.unit
     def test_because_with_crlf_rejected(self, tmp_path: Path) -> None:
-        """F2: a CRLF (``\\r\\n``) sequence inside the value is rejected."""
+        """F2: a CRLF (``\\r\\n``) sequence inside the value is rejected (via FORM —
+
+        the ``\\n`` splits the line, so the first line's quote is unbalanced).
+        """
         content = _record(because="Clause one\r\n  clause two after a CRLF")
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False
-        assert any("BECAUSE" in e and "newline" in e.lower() for e in result.errors), result.errors
+        assert any("BECAUSE" in e for e in result.errors), result.errors
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +254,78 @@ class TestUnquotedReasoningBypass:
         )
         result = validate_octave_content(tmp_path, content)
         assert result.valid, result.errors
+
+
+# ---------------------------------------------------------------------------
+# Read-authoritative parity — the guard MUST validate the SAME value the read
+# layer surfaces (first-line occurrence), not a separately-scanned quoted one.
+# Closes the two-source divergence bypass (cubic P1 on 50ebc3e).
+# ---------------------------------------------------------------------------
+
+
+class TestReadAuthoritativeValueChecked:
+    @pytest.mark.unit
+    def test_first_unquoted_long_then_later_quoted_rejected(self, tmp_path: Path) -> None:
+        """Case A: a malformed FIRST occurrence is what the read parser surfaces.
+
+        First ``DECISION`` line is an unquoted 60-word value (read-authoritative);
+        a later ``DECISION::"short ok"`` exists too. The guard MUST check the
+        first-occurrence value — so this is rejected — NOT the later quoted one.
+        """
+        content = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f"  TOKEN::{_VALID_TOKEN}\n"
+            "  STATUS::PROPOSED\n"
+            "  TIER::OPERATIONAL\n"
+            f"  DECISION::{_words(60)}\n"
+            '  DECISION::"short ok"\n'
+            '  BECAUSE::"A compliant rationale."\n'
+            f'  AUTHORED_AT::"{_VALID_AUTHORED_AT}"\n'
+            "===END===\n"
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("DECISION" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_trailing_garbage_after_quote_rejected(self, tmp_path: Path) -> None:
+        """Case B: ``DECISION::"short ok" <garbage>`` — trailing content after the
+
+        closing quote is part of the value the read parser surfaces, so the field
+        is not a clean double-quoted flat string and MUST be rejected (the guard
+        must not validate only the quoted substring).
+        """
+        content = _record_raw(
+            decision_line='  DECISION::"short ok" extra garbage words trailing',
+            because_line='  BECAUSE::"A compliant rationale."',
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("DECISION" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_leading_garbage_before_quote_rejected(self, tmp_path: Path) -> None:
+        """Leading content before the opening quote is likewise not a flat string."""
+        content = _record_raw(
+            decision_line='  DECISION::garbage "short ok"',
+            because_line='  BECAUSE::"A compliant rationale."',
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("DECISION" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_trailing_garbage_on_because_rejected(self, tmp_path: Path) -> None:
+        content = _record_raw(
+            decision_line='  DECISION::"A compliant decision."',
+            because_line='  BECAUSE::"short ok" then unquoted trailing words here',
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("BECAUSE" in e for e in result.errors), result.errors
 
 
 # ---------------------------------------------------------------------------

@@ -122,15 +122,17 @@ RESERVED_FIELD_NAMES = frozenset({"DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"}
 MAX_REASONING_WORDS = 40
 REASONING_FIELDS = ("DECISION", "BECAUSE")
 
-# Reasoning value capture: ``KEY::"value"`` where the double-quoted OCTAVE string
-# may span physical lines (``(?:[^"\\]|\\.)*`` consumes to the first unescaped
-# closing quote, honouring an escaped \"). Mirrors the removed verbosity_lint
-# capture so an embedded newline INSIDE the value is visible to the guard (the
-# line-anchored _META_FIELD_LINE_RE alone would only see the first physical
-# line). String-only — no OCTAVE AST.
-_REASONING_VALUE_RE = re.compile(
-    r'(?ms)^[ \t]*(?P<key>[A-Z][A-Z0-9_]*)::"(?P<val>(?:[^"\\]|\\.)*)"'
-)
+# Reasoning value FORM check: the read-authoritative value (the first-occurrence
+# value ``_extract_meta_fields`` surfaces, exactly what ``agr_read`` sees) MUST be
+# a COMPLETE double-quoted flat string — a leading ``"``, an inner body of
+# non-quote / escaped chars, a closing ``"``, and NOTHING before or after it. The
+# ``^…$`` full-match anchors reject leading garbage, trailing garbage after the
+# close quote, an unquoted value, and a partial/unbalanced quote alike. Group
+# ``inner`` is the unquoted content the density checks then run on. String-only —
+# no OCTAVE AST. The value is single-line by construction (``_extract_meta_fields``
+# is line-anchored), so an unbalanced quote from a genuinely multi-line value
+# fails this full-match — consistent with the line-anchored read parser.
+_REASONING_FLAT_STRING_RE = re.compile(r'^"(?P<inner>(?:[^"\\]|\\.)*)"$')
 
 # A single META ``KEY::value`` assignment at line start (whitespace-tolerant —
 # OCTAVE bodies are indented). Mirrors the read-side parser's ``_FIELD_LINE_RE``
@@ -513,28 +515,31 @@ def _check_reasoning_density(content: str, errors: list[str]) -> None:
     DECISION and BECAUSE MUST each be a well-formed double-quoted flat string of
     AT MOST ``MAX_REASONING_WORDS`` words with NO embedded newline (the ratified
     ``FORMAT_RULE::DECISION∧BECAUSE=flat_strings`` of #101). The check is purely
-    value-level (no structural OCTAVE re-parse):
+    value-level (no structural OCTAVE re-parse) and validates the SAME value the
+    read layer surfaces, so the guard and ``agr_read`` cannot diverge (#88 parity
+    strengthened):
 
-      1. PRESENCE/FORM — a reasoning field is detected as present via the parity-
-         shared ``_META_FIELD_LINE_RE`` (``_extract_meta_fields``), the SAME field
-         set the read parser surfaces (#88 parity). A present field that is NOT a
-         well-formed double-quoted string (``_REASONING_VALUE_RE`` did not capture
-         it) is a #13 violation — this closes the F1 quote-bypass where an
-         UNQUOTED multi-word ``DECISION::w0 w1 …`` evaded the word-count check.
-      2. DENSITY — for the quoted value, reject an embedded newline (any of
-         ``\\n``, ``\\r``, ``\\r\\n`` — F2) and reject > ``MAX_REASONING_WORDS``
+      1. READ-AUTHORITATIVE VALUE — the value is the FIRST-occurrence value from
+         the parity-shared ``_extract_meta_fields`` (``_META_FIELD_LINE_RE``),
+         i.e. exactly what the read parser surfaces. The guard never scans a
+         separate (later/quoted) occurrence — that two-source split was the
+         divergence bypass (cubic P1): a malformed first occurrence with a clean
+         later quoted one would otherwise escape.
+      2. FORM — that value must FULL-MATCH ``_REASONING_FLAT_STRING_RE``
+         (``^"…"$``). This rejects unquoted values, leading garbage, trailing
+         garbage after the close quote, and partial/unbalanced quotes in one
+         check.
+      3. DENSITY — on the inner (unquoted) content, reject an embedded newline
+         (any of ``\\n``, ``\\r``, ``\\r\\n``) and reject > ``MAX_REASONING_WORDS``
          words.
 
     Pure; appends actionable, field-named errors. Shared
     ``MAX_REASONING_WORDS`` / ``REASONING_FIELDS`` keep this in lockstep with the
     read side (issue #88 parity).
     """
-    # Quoted flat-string values, keyed (first occurrence wins, as elsewhere).
-    quoted: dict[str, str] = {}
-    for match in _REASONING_VALUE_RE.finditer(content):
-        quoted.setdefault(match.group("key"), match.group("val"))
-
-    # Present fields per the parity-shared META field detector (quote-agnostic).
+    # Read-authoritative first-occurrence values (the field set the read parser
+    # surfaces). Validating THESE — not a separately-scanned quoted occurrence —
+    # is what keeps the guard and agr_read from diverging.
     present = _extract_meta_fields(content)
 
     for key in REASONING_FIELDS:
@@ -542,19 +547,22 @@ def _check_reasoning_density(content: str, errors: list[str]) -> None:
             # Absence is handled by the §4.1 #2 required-field check, not here.
             continue
 
-        if key not in quoted:
-            # F1: present but not a well-formed double-quoted flat string —
-            # an unquoted/non-flat value can no longer slip past the density
-            # check by failing the quoted capture.
+        raw = present[key]
+        form_match = _REASONING_FLAT_STRING_RE.match(raw)
+        if form_match is None:
+            # Not a clean double-quoted flat string (unquoted, leading/trailing
+            # garbage, or unbalanced quote) — a #13 violation regardless of the
+            # inner length, with no bypass window.
             errors.append(
                 f"{key} value must be a double-quoted flat string "
-                f'({key}::"…"); an unquoted or multi-line value is rejected — '
+                f'({key}::"…") with no leading or trailing content; an unquoted, '
+                "multi-line, or garbage-padded value is rejected — "
                 "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13 "
                 "(FORMAT_RULE: DECISION∧BECAUSE = flat_strings)."
             )
             continue
 
-        value = quoted[key]
+        value = form_match.group("inner")
 
         if "\n" in value or "\r" in value:
             errors.append(
