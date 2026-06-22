@@ -508,22 +508,55 @@ def _check_agr_invariants(
 
 
 def _check_reasoning_density(content: str, errors: list[str]) -> None:
-    """Enforce the §4.1 #13 word-count / no-newline guard on DECISION & BECAUSE.
+    """Enforce the §4.1 #13 form + word-count / no-newline guard on the reasoning fields.
 
-    A reasoning value is admissible iff it is at most ``MAX_REASONING_WORDS``
-    words AND contains no embedded newline. Both checks operate on the captured
-    string value (``_REASONING_VALUE_RE``); the surrounding OCTAVE structure is
-    not re-parsed (value-level only). Pure; appends actionable, field-named
-    errors. Shared ``MAX_REASONING_WORDS`` / ``REASONING_FIELDS`` keep this in
-    lockstep with the read side (issue #88 parity).
+    DECISION and BECAUSE MUST each be a well-formed double-quoted flat string of
+    AT MOST ``MAX_REASONING_WORDS`` words with NO embedded newline (the ratified
+    ``FORMAT_RULE::DECISION∧BECAUSE=flat_strings`` of #101). The check is purely
+    value-level (no structural OCTAVE re-parse):
+
+      1. PRESENCE/FORM — a reasoning field is detected as present via the parity-
+         shared ``_META_FIELD_LINE_RE`` (``_extract_meta_fields``), the SAME field
+         set the read parser surfaces (#88 parity). A present field that is NOT a
+         well-formed double-quoted string (``_REASONING_VALUE_RE`` did not capture
+         it) is a #13 violation — this closes the F1 quote-bypass where an
+         UNQUOTED multi-word ``DECISION::w0 w1 …`` evaded the word-count check.
+      2. DENSITY — for the quoted value, reject an embedded newline (any of
+         ``\\n``, ``\\r``, ``\\r\\n`` — F2) and reject > ``MAX_REASONING_WORDS``
+         words.
+
+    Pure; appends actionable, field-named errors. Shared
+    ``MAX_REASONING_WORDS`` / ``REASONING_FIELDS`` keep this in lockstep with the
+    read side (issue #88 parity).
     """
+    # Quoted flat-string values, keyed (first occurrence wins, as elsewhere).
+    quoted: dict[str, str] = {}
     for match in _REASONING_VALUE_RE.finditer(content):
-        key = match.group("key")
-        if key not in REASONING_FIELDS:
-            continue
-        value = match.group("val")
+        quoted.setdefault(match.group("key"), match.group("val"))
 
-        if "\n" in value:
+    # Present fields per the parity-shared META field detector (quote-agnostic).
+    present = _extract_meta_fields(content)
+
+    for key in REASONING_FIELDS:
+        if key not in present:
+            # Absence is handled by the §4.1 #2 required-field check, not here.
+            continue
+
+        if key not in quoted:
+            # F1: present but not a well-formed double-quoted flat string —
+            # an unquoted/non-flat value can no longer slip past the density
+            # check by failing the quoted capture.
+            errors.append(
+                f"{key} value must be a double-quoted flat string "
+                f'({key}::"…"); an unquoted or multi-line value is rejected — '
+                "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13 "
+                "(FORMAT_RULE: DECISION∧BECAUSE = flat_strings)."
+            )
+            continue
+
+        value = quoted[key]
+
+        if "\n" in value or "\r" in value:
             errors.append(
                 f"{key} value contains an embedded newline; reasoning fields MUST "
                 "be a single flat line (no newline) — ADR-RFC-ARCH-004 v1.1 §1.2 / "

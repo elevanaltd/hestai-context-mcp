@@ -68,6 +68,29 @@ def _words(n: int) -> str:
     return " ".join(f"w{i}" for i in range(n))
 
 
+def _record_raw(*, decision_line: str, because_line: str) -> str:
+    """Build a DECISION_RECORD injecting the DECISION/BECAUSE lines VERBATIM.
+
+    Unlike ``_record`` (which always wraps the value in double quotes), this lets
+    a test emit an UNQUOTED reasoning field (e.g. ``DECISION::w0 w1 ... w59``) to
+    exercise the F1 quote-bypass guard. The caller supplies the full
+    ``  KEY::...`` line including indentation.
+    """
+    return (
+        "===DECISION_RECORD===\n"
+        "META:\n"
+        "  TYPE::DECISION_RECORD\n"
+        '  VERSION::"1.0"\n'
+        f"  TOKEN::{_VALID_TOKEN}\n"
+        "  STATUS::PROPOSED\n"
+        "  TIER::OPERATIONAL\n"
+        f"{decision_line}\n"
+        f"{because_line}\n"
+        f'  AUTHORED_AT::"{_VALID_AUTHORED_AT}"\n'
+        "===END===\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # #13a / #13b — over 40 words is an error, field-named
 # ---------------------------------------------------------------------------
@@ -140,6 +163,81 @@ class TestNoEmbeddedNewline:
         result = validate_octave_content(tmp_path, content)
         assert result.valid is False
         assert any("BECAUSE" in e and "newline" in e.lower() for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_decision_with_embedded_carriage_return_rejected(self, tmp_path: Path) -> None:
+        """F2: a lone CR (``\\r``) inside the value is an embedded newline too."""
+        content = _record(decision="First clause\r  second clause after a carriage return")
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("DECISION" in e and "newline" in e.lower() for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_because_with_crlf_rejected(self, tmp_path: Path) -> None:
+        """F2: a CRLF (``\\r\\n``) sequence inside the value is rejected."""
+        content = _record(because="Clause one\r\n  clause two after a CRLF")
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("BECAUSE" in e and "newline" in e.lower() for e in result.errors), result.errors
+
+
+# ---------------------------------------------------------------------------
+# F1 — unquoted / non-flat-string reasoning values MUST NOT bypass the guard
+# ---------------------------------------------------------------------------
+
+
+class TestUnquotedReasoningBypass:
+    @pytest.mark.unit
+    def test_unquoted_long_decision_rejected(self, tmp_path: Path) -> None:
+        """An UNQUOTED 60-word DECISION must be rejected (was a bypass — F1).
+
+        ``_META_FIELD_LINE_RE`` admits ``DECISION::w0 w1 ...`` as a present field,
+        but the quoted-only value capture used to skip it entirely, so a verbose
+        unquoted value evaded the ≤40-word guard. It must now be a #13 violation.
+        """
+        content = _record_raw(
+            decision_line=f"  DECISION::{_words(60)}",
+            because_line='  BECAUSE::"A compliant rationale."',
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("DECISION" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_unquoted_long_because_rejected(self, tmp_path: Path) -> None:
+        content = _record_raw(
+            decision_line='  DECISION::"A compliant decision."',
+            because_line=f"  BECAUSE::{_words(60)}",
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("BECAUSE" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_unquoted_short_decision_still_rejected(self, tmp_path: Path) -> None:
+        """Even a SHORT unquoted DECISION is rejected: reasoning fields MUST be
+
+        well-formed double-quoted flat strings (the ratified FORMAT_RULE
+        ``DECISION∧BECAUSE=flat_strings``). A bare unquoted form is not a flat
+        string, so it is a #13 violation regardless of length — no bypass window.
+        """
+        content = _record_raw(
+            decision_line="  DECISION::three bare words",
+            because_line='  BECAUSE::"A compliant rationale."',
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid is False
+        assert any("DECISION" in e for e in result.errors), result.errors
+
+    @pytest.mark.unit
+    def test_quoted_compliant_reasoning_still_valid(self, tmp_path: Path) -> None:
+        """Regression: the quoted flat-string form (every real record) still passes."""
+        content = _record_raw(
+            decision_line='  DECISION::"A compliant quoted decision."',
+            because_line='  BECAUSE::"A compliant quoted rationale."',
+        )
+        result = validate_octave_content(tmp_path, content)
+        assert result.valid, result.errors
 
 
 # ---------------------------------------------------------------------------

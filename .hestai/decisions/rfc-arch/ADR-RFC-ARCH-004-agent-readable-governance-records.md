@@ -75,8 +75,8 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 | `TOKEN` | string | Globally unique identifier within the repository (see §1.3) |
 | `STATUS` | enum | One of `PROPOSED`, `RATIFIED`, `SUPERSEDED`, `VOID` (see §1.4) |
 | `TIER` | enum | One of `STRATEGIC`, `TACTICAL`, `OPERATIONAL`. Semantic gravity per the cited research brief. |
-| `DECISION` | string | One-sentence statement of what is binding. Mandatory even on `PROPOSED`. **v1.1 bytecode form**: a single flat line — AT MOST 40 words, NO embedded newline — using compressed-OCTAVE operators (`→ ⇌ ∴ ⊕`) to carry connectives, never nested custom keys. Enforced as §4.1 #13 (per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620). |
-| `BECAUSE` | string | One-sentence rationale. Mandatory even on `PROPOSED`. **v1.1 bytecode form**: same ≤40-word, no-newline, compressed-OCTAVE constraint as `DECISION` (§4.1 #13). |
+| `DECISION` | string | One-sentence statement of what is binding. Mandatory even on `PROPOSED`. **v1.1 bytecode form**: a single double-quoted flat line. §4.1 #13 **machine-enforces** AT MOST 40 words and NO embedded newline (per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620). Compressed-OCTAVE operators (`→ ⇌ ∴ ⊕`) are the **recommended style** for fitting connectives within budget — not machine-checked. Nested custom keys are excluded by the flat-string grammar (the structural parse), not by #13. |
+| `BECAUSE` | string | One-sentence rationale. Mandatory even on `PROPOSED`. **v1.1 bytecode form**: same as `DECISION` — §4.1 #13 machine-enforces ≤40 words + no-newline; compressed-OCTAVE operators are the recommended (not enforced) style. |
 | `AUTHORED_AT` | ISO-8601 timestamp | UTC. Set once at record creation; never edited. |
 
 #### Optional (any record, any lifecycle state)
@@ -151,7 +151,7 @@ Current schema is `1.1`. Future additive extensions become `1.2`, `1.3`, etc.
 
 **v1.1 (MINOR-additive, per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101)**: AGRs are treated as LLM "bytecode". The reasoning-bearing fields `DECISION` and `BECAUSE` are constrained to a single flat line of ≤40 words with no embedded newline, using compressed-OCTAVE operators for connectives (new value-level invariant §4.1 #13; no structural parser change). `HUMAN_ADR_REF` gains a greppable-TOKEN canonical form alongside the legacy path form. Both are MINOR-additive: a `1.0` record that already satisfies the ≤40-word/no-newline density (as every conforming one-sentence `DECISION`/`BECAUSE` does) remains valid, and v1.1 introduces no new required field. Parsers written against `1.0` continue to parse `1.1` records (the structural grammar is unchanged).
 
-**Spec-only period**: Between this ADR's merge and the PR-D′/PR-H code landing, AGR records may be authored by hand. Such records MUST carry `VERSION::"1.0"` and conform to §1.1–§1.6 exactly as if the validator (§4) were running. When the validator subsequently lands, it MUST enforce v1.0 against every record under `.hestai/decisions/**/*.oct.md`, regardless of authoring date; there is no grandfather clause.
+**Spec-only period (CLOSED)**: Between this ADR's merge and the code landing, AGR records were authored by hand and conformed to §1.1–§1.6 as if the validator (§4) were running. The validator has now landed: Gate A (`type_checker.validate_octave_content`) enforces the §4.1 invariants against every record under `.hestai/decisions/**/*.oct.md`, regardless of authoring date — the **v1.0 envelope PLUS the v1.1 additive §4.1 #13 density invariant** (≤40 words, no embedded newline on `DECISION`/`BECAUSE`). There is no grandfather clause: every record, old or new, MUST satisfy the currently-enforced invariant set (the three pre-existing verbose records were migrated to compliant bytecode when #13 landed).
 
 ### 1.6 Supersession DAG semantics
 
