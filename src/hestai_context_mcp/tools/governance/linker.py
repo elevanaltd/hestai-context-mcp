@@ -95,6 +95,76 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
         return 1, "", str(exc)
 
 
+# Branches the global worktree-discipline pre-commit hook protects. A commit on
+# one of these, from a MAIN working tree (not a worktree), is blocked.
+_PROTECTED_BRANCHES = frozenset({"main", "master"})
+
+
+def _preflight_commit_safety(working_dir: Path) -> str | None:
+    """Return a recovery error iff committing here would be blocked, else None.
+
+    #108.3: the global worktree-discipline pre-commit hook
+    (``~/.githooks/pre-commit``) blocks a commit when ALL of the following hold:
+
+      1. ``working_dir`` is a MAIN working tree -- NOT a linked worktree. Git
+         reports the same path for ``--git-dir`` and ``--git-common-dir`` in a
+         main tree; a linked worktree's ``--git-dir`` is ``.git/worktrees/<name>``
+         and differs from the common dir.
+      2. the current branch is a protected branch (``main``/``master``).
+      3. an executable ``pre-commit`` hook is actually installed at the repo's
+         effective ``core.hooksPath`` (so a repo with hooks disabled -- e.g. the
+         isolated test fixture -- does NOT trip this guard).
+
+    The hook also auto-reverts a ``git checkout -b`` back to the protected branch
+    (a companion ``post-checkout`` hook), so the linker's own branch creation
+    cannot escape the block from a main tree -- hence we MUST fail fast *before*
+    creating a branch rather than relying on the checkout to move us off main.
+
+    When this returns a non-None error the linker aborts before touching git, so
+    no branch is created and nothing is staged (PROD::I4 structured failure with
+    explicit recovery guidance). Returns ``None`` (proceed) whenever the path is
+    not a git repo or any of conditions 1-3 do not hold -- including every linked
+    worktree, which is the supported authoring location.
+    """
+    # Not a git repo (or git unavailable) -> cannot be a blocked main tree.
+    code, git_dir, _ = _run_git(["rev-parse", "--absolute-git-dir"], working_dir)
+    if code != 0 or not git_dir:
+        return None
+    code, common_dir, _ = _run_git(
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"], working_dir
+    )
+    if code != 0 or not common_dir:
+        return None
+
+    # (1) MAIN tree iff the per-worktree git-dir IS the common dir.
+    if Path(git_dir).resolve() != Path(common_dir).resolve():
+        return None  # linked worktree -> supported, never blocked.
+
+    # (2) Protected branch only. A main tree on a feature branch commits fine.
+    code, branch, _ = _run_git(["branch", "--show-current"], working_dir)
+    if code != 0 or branch not in _PROTECTED_BRANCHES:
+        return None
+
+    # (3) An executable pre-commit hook must actually be installed at the repo's
+    #     effective hooks path; a repo with hooks disabled does not block.
+    code, hooks_dir, _ = _run_git(["rev-parse", "--git-path", "hooks"], working_dir)
+    if code != 0 or not hooks_dir:
+        return None
+    hook_path = (working_dir / hooks_dir / "pre-commit").resolve()
+    if not (hook_path.is_file() and os.access(hook_path, os.X_OK)):
+        return None
+
+    return (
+        f"BLOCKED: cannot author governance from the main working tree on "
+        f"'{branch}' -- the worktree-discipline pre-commit hook blocks commits "
+        f"here. Author from a git worktree instead:\n"
+        f"  git worktree add -b governance/your-record ../<repo>-governance main\n"
+        f"  # then re-run submit_governance with working_dir pointed at that "
+        f"worktree.\n"
+        f"No branch was created and nothing was staged."
+    )
+
+
 def _create_branch(working_dir: Path, branch_name: str) -> str | None:
     """Create and checkout a new git branch.
 
@@ -267,15 +337,35 @@ def run_linker(
             "branch": branch_name,
             "pr_url": None,
             "error": None,
+            "staged_uncommitted": False,
             "dry_run": True,
         }
 
     # --- Live path: git operations ---
     errors: list[str] = []
 
+    # 0. Pre-flight (#108.3): if committing here would be blocked by the
+    #    worktree-discipline hook, fail fast BEFORE creating any branch so no
+    #    orphan branch and no staged state is ever produced. Honours a worktree
+    #    working_dir (which is the supported authoring location) unchanged.
+    preflight_err = _preflight_commit_safety(working_dir)
+    if preflight_err:
+        # Aborted before branch creation: no branch, nothing staged.
+        return {
+            "token": token,
+            "card_type": card_type,
+            "target_path": target_path_str,
+            "branch": None,
+            "pr_url": None,
+            "error": preflight_err,
+            "staged_uncommitted": False,
+            "dry_run": False,
+        }
+
     # 1. Create branch
     err = _create_branch(working_dir, branch_name)
     if err:
+        # Branch creation itself failed: no branch, nothing staged.
         return {
             "token": token,
             "card_type": card_type,
@@ -283,11 +373,14 @@ def run_linker(
             "branch": branch_name,
             "pr_url": None,
             "error": err,
+            "staged_uncommitted": False,
             "dry_run": False,
         }
 
     # 2. Write OCTAVE content to target path
     if target_path is None:
+        # Branch WAS created but nothing was written/staged -- surface the
+        # partial state (branch exists) for recovery.
         return {
             "token": token,
             "card_type": card_type,
@@ -295,6 +388,7 @@ def run_linker(
             "branch": branch_name,
             "pr_url": None,
             "error": "target_path is None -- cannot write file",
+            "staged_uncommitted": True,
             "dry_run": False,
         }
 
@@ -302,6 +396,7 @@ def run_linker(
     try:
         target_path.resolve().relative_to(working_dir.resolve())
     except (ValueError, RuntimeError, OSError):
+        # Branch WAS created but the write was rejected -- partial state exists.
         return {
             "token": token,
             "card_type": card_type,
@@ -312,6 +407,7 @@ def run_linker(
                 f"target_path {target_path} is outside working_dir {working_dir} "
                 "-- path traversal rejected"
             ),
+            "staged_uncommitted": True,
             "dry_run": False,
         }
 
@@ -355,6 +451,14 @@ def run_linker(
 
     error_str = "; ".join(errors) if errors else None
 
+    # #108.3 orphan/partial-state surfacing: by this point the branch HAS been
+    # created (step 1 succeeded). If a later step failed, local state is left
+    # partially applied -- the branch exists and the record may be written/staged
+    # but not committed/pushed. Flag it so the operator can recover the branch
+    # rather than be handed a branch name that looks clean. On full success the
+    # state is committed (not "staged uncommitted"), so the flag is False.
+    staged_uncommitted = bool(errors)
+
     return {
         "token": token,
         "card_type": card_type,
@@ -362,5 +466,6 @@ def run_linker(
         "branch": branch_name,
         "pr_url": pr_url,
         "error": error_str,
+        "staged_uncommitted": staged_uncommitted,
         "dry_run": False,
     }
