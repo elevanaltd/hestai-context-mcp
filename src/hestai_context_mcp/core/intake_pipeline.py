@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 from functools import partial
 from pathlib import Path
 from typing import Any, TypedDict
@@ -34,13 +35,36 @@ from hestai_context_mcp.core.intake_compiler import (
     CompileMetrics,
     compile_prose_to_octave,
 )
-from hestai_context_mcp.ports.octave_validator import get_octave_validator
+from hestai_context_mcp.ports.octave_validator import (
+    fail_closed_error_message,
+    get_octave_validator,
+)
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 from hestai_context_mcp.tools.governance.linker import run_linker
 from hestai_context_mcp.tools.governance.type_checker import (
     ValidationResult,
     validate_octave_content,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_require_real_validation(working_dir: str | None = None) -> bool:
+    """Module-level seam over the adapter's fail-closed flag resolver (#108.4).
+
+    DIP boundary (enforced by ``tests/unit/test_source_invariants.py``): this
+    ``core`` module must not import ``adapters`` at module load. The adapter is
+    reached via a LAZY import inside this wrapper (composition-root pattern,
+    mirroring ``intake_compiler.build_default_ai_client``). Tests monkeypatch
+    this symbol on the module to inject the policy; production resolves it via
+    the lazy import on each call.
+    """
+    from hestai_context_mcp.adapters.ai_config import (
+        resolve_require_real_validation as _resolve,
+    )
+
+    return _resolve(working_dir)
+
 
 __all__ = ["PipelineResult", "run_intake_pipeline", "run_intake_to_pr"]
 
@@ -58,6 +82,10 @@ class PipelineResult(TypedDict):
         validation_errors: Flattened error strings (empty on success).
         metrics: Stage-2 metrics from the *last* compile attempt.
         attempts: Number of backend compile attempts performed (1 or 2).
+        real_validation_available: #108.4 — whether Gate B's real OCTAVE
+            validator actually ran (False when the ``validation`` extra is
+            absent and the pass degraded to regex-only). Surfaced so the Stage-4
+            seam can apply the loud signal + opt-in fail-closed policy.
     """
 
     ok: bool
@@ -66,14 +94,16 @@ class PipelineResult(TypedDict):
     validation_errors: list[str]
     metrics: CompileMetrics
     attempts: int
+    real_validation_available: bool
 
 
-def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[str]]:
-    """Run the existing two-stage gate. Returns (passed, regex_result, errors).
+def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[str], bool]:
+    """Run the existing two-stage gate.
 
-    Regex Gate A runs first (it also extracts token/card_type/target_path for
-    Stage 4). The real Gate B validator runs additively; its structured errors
-    are flattened into the error list. The pass requires BOTH to be clean.
+    Returns ``(passed, regex_result, errors, real_validation_available)``. The
+    last element (#108.4) reports whether Gate B's real validator actually ran;
+    it is ``True`` until Gate B is reached (regex-fail short-circuits before
+    Gate B, so availability is unknown -> reported True, no degrade observed).
     """
     # Gate A (regex) carries the §4.1 #13 reasoning-density guard (≤40 words,
     # no newline on DECISION/BECAUSE), so the verbosity rule is enforced HERE,
@@ -83,16 +113,16 @@ def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[
     # informed-retry/abort path as any schema failure (no separate Gate-C lint).
     regex_result = validate_octave_content(working_dir, octave)
     if not regex_result.valid:
-        return False, regex_result, list(regex_result.errors)
+        return False, regex_result, list(regex_result.errors), True
 
     octave_result = get_octave_validator().validate(octave)
     if not octave_result.ok:
         errors = [
             f"[{e.get('code', '')}] {e.get('message', '')}".strip() for e in octave_result.errors
         ]
-        return False, regex_result, errors
+        return False, regex_result, errors, octave_result.available
 
-    return True, regex_result, []
+    return True, regex_result, [], octave_result.available
 
 
 def _augment_prompt_with_errors(ctx: IntakeContext, errors: list[str]) -> IntakeContext:
@@ -142,6 +172,10 @@ async def run_intake_pipeline(
         "cost_is_estimate": True,
     }
     last_errors: list[str] = []
+    # #108.4: carry Gate-B availability from the last attempt that reached Gate B.
+    # Defaults True (no degrade observed) for compile-fail aborts that never
+    # reach the validator.
+    last_available = True
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         compiled = await compile_prose_to_octave(
@@ -163,10 +197,11 @@ async def run_intake_pipeline(
                 "validation_errors": [err],
                 "metrics": last_metrics,
                 "attempts": attempt,
+                "real_validation_available": last_available,
             }
 
         octave = compiled["octave"]
-        passed, regex_result, errors = _gate(working_dir, octave)
+        passed, regex_result, errors, last_available = _gate(working_dir, octave)
         if passed:
             return {
                 "ok": True,
@@ -175,6 +210,7 @@ async def run_intake_pipeline(
                 "validation_errors": [],
                 "metrics": last_metrics,
                 "attempts": attempt,
+                "real_validation_available": last_available,
             }
 
         last_errors = errors
@@ -190,6 +226,7 @@ async def run_intake_pipeline(
         "validation_errors": last_errors,
         "metrics": last_metrics,
         "attempts": _MAX_ATTEMPTS,
+        "real_validation_available": last_available,
     }
 
 
@@ -204,6 +241,30 @@ def _intake_failure_result(pipeline: PipelineResult, dry_run: bool) -> dict[str,
         "pr_url": None,
         "validation_errors": pipeline["validation_errors"],
         "octave_validation": None,
+        "real_validation_available": pipeline["real_validation_available"],
+        "metrics": pipeline["metrics"],
+        "dry_run": dry_run,
+    }
+
+
+def _fail_closed_result(pipeline: PipelineResult, dry_run: bool) -> dict[str, Any]:
+    """#108.4 Option C: hard-block shape when real validation is required but absent.
+
+    Mirrors the abort shape (no token/branch/pr_url, NEVER calls the linker) with
+    the structured fail-closed error and the loud ``real_validation_available``
+    signal. The authored OCTAVE is surfaced for parity with the success path.
+    """
+    return {
+        "success": False,
+        "token": None,
+        "card_type": None,
+        "target_path": None,
+        "branch": None,
+        "pr_url": None,
+        "validation_errors": [fail_closed_error_message()],
+        "octave_validation": None,
+        "real_validation_available": False,
+        "octave": pipeline["octave"],
         "metrics": pipeline["metrics"],
         "dry_run": dry_run,
     }
@@ -246,6 +307,21 @@ async def run_intake_to_pr(
     if not pipeline["ok"] or pipeline["octave"] is None or pipeline["validation"] is None:
         return _intake_failure_result(pipeline, dry_run)
 
+    # --- #108.4: Gate-B availability policy on the PROSE path (shared Gate B) ---
+    # Option L (unconditional): surface ``real_validation_available`` top-level
+    # (below) and log at WARNING when degraded. Option C (opt-in, default OFF):
+    # when real validation is REQUIRED but Gate B was unavailable, hard-block
+    # BEFORE the linker (no branch, no PR), mirroring the octave_content path.
+    real_validation_available = pipeline["real_validation_available"]
+    if not real_validation_available:
+        logger.warning(
+            "Gate B real OCTAVE validation unavailable (the 'validation' extra is "
+            "not installed); proceeding on regex Gate A only unless fail-closed is "
+            "required."
+        )
+        if resolve_require_real_validation(working_dir=str(working_dir)):
+            return _fail_closed_result(pipeline, dry_run)
+
     loop = asyncio.get_running_loop()
     linker_fn = partial(
         run_linker,
@@ -266,6 +342,7 @@ async def run_intake_to_pr(
         "pr_url": linker_output.get("pr_url"),
         "validation_errors": [linker_error] if linker_error else [],
         "octave_validation": None,
+        "real_validation_available": real_validation_available,
         # Surface the authored OCTAVE so the Stage-5 reviewer can read the exact
         # record that was PR'd (issue #77). Additive; ``None`` on the abort path.
         "octave": pipeline["octave"],

@@ -47,10 +47,29 @@ __all__ = [
     "RealOctaveValidator",
     "UnavailableOctaveValidator",
     "get_octave_validator",
+    "fail_closed_error_message",
 ]
 
 # Stable warning code surfaced when the optional ``validation`` extra is absent.
 REAL_VALIDATION_UNAVAILABLE = "REAL_VALIDATION_UNAVAILABLE"
+
+
+def fail_closed_error_message() -> str:
+    """Return the structured error used when fail-closed validation blocks (#108.4).
+
+    Single source of truth for the Option-C block message across both submission
+    paths (octave_content and prose). Names the missing ``validation`` extra and
+    how to install it, plus the escape hatch (unset the flag), so a blocked
+    operator has a clear recovery path (PROD::I4).
+    """
+    return (
+        f"{REAL_VALIDATION_UNAVAILABLE}: real OCTAVE validation is REQUIRED "
+        "(HESTAI_GOVERNANCE_REQUIRE_REAL_VALIDATION is set) but the optional "
+        "'validation' extra (octave-mcp) is not installed, so only regex Gate A "
+        "could run. Refusing to author governance without full AST validation. "
+        "Install it with 'pip install hestai-context-mcp[validation]', or unset "
+        "the flag to fall back to fail-soft (regex-only) authoring."
+    )
 
 
 @dataclass(frozen=True)

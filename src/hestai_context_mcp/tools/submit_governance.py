@@ -24,14 +24,17 @@ structured "real-validation unavailable" signal and the regex Gate A still runs.
 """
 
 import asyncio
+import logging
 import re
 from functools import partial
 from typing import Any
 
+from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
 from hestai_context_mcp.core.governance_reviewer import review_governance
 from hestai_context_mcp.core.intake_pipeline import run_intake_to_pr
 from hestai_context_mcp.ports.octave_validator import (
     OctaveValidationResult,
+    fail_closed_error_message,
     get_octave_validator,
 )
 from hestai_context_mcp.tools.clock_in import validate_working_dir
@@ -39,6 +42,8 @@ from hestai_context_mcp.tools.governance.intake_context import assemble_intake_c
 from hestai_context_mcp.tools.governance.linker import run_linker
 from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
 from hestai_context_mcp.tools.submit_review import submit_review
+
+logger = logging.getLogger(__name__)
 
 # review_governance and submit_review are imported as module globals (not via
 # attribute paths) so the Stage-5 seam is monkeypatchable in tests, mirroring
@@ -59,8 +64,16 @@ def _empty_result(
     dry_run: bool,
     errors: list[str],
     octave_validation: dict[str, Any] | None = None,
+    *,
+    real_validation_available: bool = True,
 ) -> dict[str, Any]:
-    """Return the I4-conformant failure shape with all fields present."""
+    """Return the I4-conformant failure shape with all fields present.
+
+    ``real_validation_available`` (#108.4 Option L) is an EXPLICIT top-level
+    signal so a fail-soft Gate-B degrade is never hidden inside
+    ``octave_validation.warnings``. It defaults True because most failures are
+    unrelated to Gate-B availability; the Gate-B paths pass it explicitly.
+    """
     return {
         "success": False,
         "token": None,
@@ -70,6 +83,7 @@ def _empty_result(
         "pr_url": None,
         "validation_errors": errors,
         "octave_validation": octave_validation,
+        "real_validation_available": real_validation_available,
         "dry_run": dry_run,
     }
 
@@ -329,6 +343,7 @@ async def _submit_octave_content(
         octave_content,
     )
     octave_validation = octave_result.to_dict()
+    real_validation_available = octave_result.available
 
     if not octave_result.ok:
         # Real validation failed: structured error, no PR / no write.
@@ -336,7 +351,30 @@ async def _submit_octave_content(
             dry_run,
             _octave_errors_to_strings(octave_result),
             octave_validation=octave_validation,
+            real_validation_available=real_validation_available,
         )
+
+    # --- #108.4: Gate-B availability policy (Option L loud + Option C opt-in) ---
+    # Option L (unconditional): the degrade is surfaced as the top-level
+    # ``real_validation_available`` signal below, and logged at WARNING here, so
+    # it can never hide inside ``octave_validation.warnings``.
+    # Option C (opt-in, default OFF): when the deployment REQUIRES real validation
+    # and it is unavailable, hard-block (no linker / no PR) with a structured
+    # PROD-I4 error naming the missing extra. Default OFF keeps the octave_content
+    # path byte-stable apart from the additive signal.
+    if not real_validation_available:
+        logger.warning(
+            "Gate B real OCTAVE validation unavailable (the 'validation' extra is "
+            "not installed); proceeding on regex Gate A only unless fail-closed is "
+            "required."
+        )
+        if resolve_require_real_validation(working_dir=str(wd)):
+            return _empty_result(
+                dry_run,
+                [fail_closed_error_message()],
+                octave_validation=octave_validation,
+                real_validation_available=False,
+            )
 
     # --- Linker (blocking: git subprocess + file writes) ---
     linker_fn = partial(
@@ -362,6 +400,7 @@ async def _submit_octave_content(
         "pr_url": linker_output.get("pr_url"),
         "validation_errors": errors,
         "octave_validation": octave_validation,
+        "real_validation_available": real_validation_available,
         "dry_run": dry_run,
     }
     return await _maybe_review(result, octave_content, dry_run, review, working_dir=str(wd))

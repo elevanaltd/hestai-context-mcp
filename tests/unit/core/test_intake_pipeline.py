@@ -120,6 +120,34 @@ class TestHappyPath:
         assert len(stub_backend.calls) == 1
 
 
+class TestRealValidationAvailabilitySurfaced:
+    """#108.4: the pipeline surfaces Gate-B availability so callers can act on it."""
+
+    async def test_available_true_when_validator_available(
+        self, tmp_path: Path, stub_backend
+    ) -> None:
+        stub_backend.script([_compile_result(_VALID_OCTAVE)])
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is True
+        assert result["real_validation_available"] is True
+
+    async def test_available_false_when_extra_absent(
+        self, tmp_path: Path, stub_backend, monkeypatch
+    ) -> None:
+        from hestai_context_mcp.ports.octave_validator import OctaveValidationResult
+
+        class _Unavailable:
+            def validate(self, content: str) -> OctaveValidationResult:
+                return OctaveValidationResult(ok=True, errors=[], warnings=[], available=False)
+
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: _Unavailable(), raising=True)
+        stub_backend.script([_compile_result(_VALID_OCTAVE)])
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        # Regex Gate A still gated -> a valid doc passes; availability is surfaced.
+        assert result["ok"] is True
+        assert result["real_validation_available"] is False
+
+
 class TestRetryOnce:
     async def test_invalid_then_valid_retries_once(self, tmp_path: Path, stub_backend) -> None:
         stub_backend.script([_compile_result(_INVALID_OCTAVE), _compile_result(_VALID_OCTAVE)])

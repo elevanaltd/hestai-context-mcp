@@ -150,7 +150,9 @@ class TestProseMode:
 
 
 class TestOctaveContentBackCompat:
-    """The octave_content path must keep its EXACT post-#70 return shape."""
+    """The octave_content path keeps its post-#70 return shape, plus the single
+    additive #108.4 Option-L ``real_validation_available`` signal (no pre-existing
+    key removed/renamed, and still no ``metrics`` key on this path)."""
 
     _POST_70_KEYS = {
         "success",
@@ -161,6 +163,7 @@ class TestOctaveContentBackCompat:
         "pr_url",
         "validation_errors",
         "octave_validation",
+        "real_validation_available",
         "dry_run",
     }
 
@@ -172,7 +175,7 @@ class TestOctaveContentBackCompat:
                 dry_run=True,
             )
         )
-        # Byte-stable shape: EXACTLY the post-#70 keys, no extra "metrics" key.
+        # Byte-stable shape beyond the additive signal: no extra "metrics" key.
         assert set(result.keys()) == self._POST_70_KEYS
         assert result["success"] is True
         assert result["token"] == "HO-CONTEXT-MCP-PROSE-20260601"

@@ -52,7 +52,7 @@ def _ctx() -> IntakeContext:
     return IntakeContext(prose_input="record a decision", corpus="", prompt="P", relevant_tokens=())
 
 
-def _pipeline_ok() -> dict[str, Any]:
+def _pipeline_ok(real_validation_available: bool = True) -> dict[str, Any]:
     return {
         "ok": True,
         "octave": _VALID_OCTAVE,
@@ -66,6 +66,7 @@ def _pipeline_ok() -> dict[str, Any]:
         "validation_errors": [],
         "metrics": {"tokens": 10, "cost": 0.01, "model": "test-model"},
         "attempts": 1,
+        "real_validation_available": real_validation_available,
     }
 
 
@@ -77,6 +78,7 @@ def _pipeline_abort() -> dict[str, Any]:
         "validation_errors": ["No OCTAVE sentinel found at document start."],
         "metrics": {"tokens": 10, "cost": 0.0, "model": "test-model"},
         "attempts": 2,
+        "real_validation_available": True,
     }
 
 
@@ -152,6 +154,53 @@ class TestAbortDoesNotWireLinker:
         assert result["pr_url"] is None
         # Hallucination immunity at the seam: linker NEVER invoked on abort.
         assert spy_linker.calls == []
+
+
+class TestRealValidationSignalAndFailClosed:
+    """#108.4 on the PROSE path (shared Gate B): top-level signal + opt-in block."""
+
+    async def test_available_surfaces_top_level_signal(
+        self, tmp_path: Path, stub_pipeline, spy_linker
+    ) -> None:
+        stub_pipeline(_pipeline_ok(real_validation_available=True))
+        result = await run_intake_to_pr(tmp_path, _ctx(), dry_run=True)
+        assert result["success"] is True
+        assert result["real_validation_available"] is True
+
+    async def test_unavailable_flag_off_proceeds_with_loud_signal(
+        self, tmp_path: Path, stub_pipeline, spy_linker, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: False)
+        stub_pipeline(_pipeline_ok(real_validation_available=False))
+        result = await run_intake_to_pr(tmp_path, _ctx(), dry_run=True)
+        # Fail-soft default: proceeds, but the degrade is surfaced top-level.
+        assert result["success"] is True
+        assert result["real_validation_available"] is False
+        assert len(spy_linker.calls) == 1
+
+    async def test_unavailable_flag_on_hard_blocks_no_linker(
+        self, tmp_path: Path, stub_pipeline, spy_linker, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: True)
+        stub_pipeline(_pipeline_ok(real_validation_available=False))
+        result = await run_intake_to_pr(tmp_path, _ctx(), dry_run=False)
+        assert result["success"] is False
+        assert result["pr_url"] is None
+        assert result["real_validation_available"] is False
+        # Fail-closed must NOT invoke the linker.
+        assert spy_linker.calls == []
+        joined = " ".join(result["validation_errors"]).lower()
+        assert "validation" in joined and ("install" in joined or "extra" in joined)
+
+    async def test_unavailable_flag_on_but_available_proceeds(
+        self, tmp_path: Path, stub_pipeline, spy_linker, monkeypatch
+    ) -> None:
+        """Flag ON but Gate B available -> normal proceed (block only on unavailable)."""
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: True)
+        stub_pipeline(_pipeline_ok(real_validation_available=True))
+        result = await run_intake_to_pr(tmp_path, _ctx(), dry_run=True)
+        assert result["success"] is True
+        assert len(spy_linker.calls) == 1
 
 
 class TestHumanPrimacy:
