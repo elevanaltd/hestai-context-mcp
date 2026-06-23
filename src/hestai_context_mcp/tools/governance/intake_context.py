@@ -149,8 +149,9 @@ def _relevant_tokens(working_dir: Path, prose_input: str, corpus: str) -> tuple[
 # states the contract the octave-compression skill teaches: COMPRESS (not transcribe),
 # CONSERVATIVE tier, telegraphic value form with operators carrying the connectives,
 # explicit loss accounting (PROD::I4), and a hard ban on prose-paragraph values. The
-# verbosity lint (tools/governance/verbosity_lint) is the deterministic backstop that
-# enforces what this contract requests.
+# Gate-A reasoning-density guard (type_checker §4.1 #13: DECISION/BECAUSE ≤40 words,
+# no embedded newline — ADR-RFC-ARCH-004 v1.1) is the deterministic backstop that
+# enforces what this contract requests, identically across all submission paths.
 #
 # METADATA FIDELITY (added after live-tool testing): the compiler was copying
 # RATIFIED / RATIFIED_BY / ISSUE_REF / dates straight out of the exemplar corpus,

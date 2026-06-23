@@ -13,5 +13,5 @@ META:
   AMENDS::[HO-AGR-DETERMINISTIC-REVIEW-CONVENTION-20260611]
   SCOPE::"hestai-context-mcp"
   DECISION::"AGR pull requests retain a scoped SEMANTIC reviewer (precedence, contradiction, scope, concept-validity only, never schema) run at the ANALYSIS tier; the deterministic validators remain the schema gate and the human merge remains the final semantic gate."
-  BECAUSE::"Operator experience shows a semantic second opinion catches what the human misses and reduces load; the redundancy the prior convention eliminated was schema-rechecking, not semantic review, so the reviewer is retained but scoped to semantics and run at a stronger analysis tier."
+  BECAUSE::"Operator experience shows a semantic second-opinion catches what the human misses∧reduces load; the redundancy the prior convention removed was schema-rechecking NOT semantic review∴reviewer retained but scoped to semantics⊕run at stronger ANALYSIS tier."
 ===END===

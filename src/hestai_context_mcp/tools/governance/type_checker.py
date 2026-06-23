@@ -111,6 +111,29 @@ TIER_VALUES = frozenset({"STRATEGIC", "TACTICAL", "OPERATIONAL"})
 # §1.2 reserved names — MUST NOT appear in any v1.x record (§4.1 #7).
 RESERVED_FIELD_NAMES = frozenset({"DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"})
 
+# --- ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13 reasoning-density contract ---------
+# HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED) ruled AGRs are LLM
+# "bytecode": the reasoning-bearing fields DECISION and BECAUSE are flat,
+# compressed-OCTAVE strings of AT MOST 40 words with NO embedded newline. The
+# guard is a value-level word-count/newline check ONLY — no structural parser
+# change (the flat-regex parse stays as-is). These are SHARED CONSTANTS: the
+# read side (``agr_read``) imports them so the write-side guard and the read
+# side can never disagree on the density contract (issue #88 write/read parity).
+MAX_REASONING_WORDS = 40
+REASONING_FIELDS = ("DECISION", "BECAUSE")
+
+# Reasoning value FORM check: the read-authoritative value (the first-occurrence
+# value ``_extract_meta_fields`` surfaces, exactly what ``agr_read`` sees) MUST be
+# a COMPLETE double-quoted flat string — a leading ``"``, an inner body of
+# non-quote / escaped chars, a closing ``"``, and NOTHING before or after it. The
+# ``^…$`` full-match anchors reject leading garbage, trailing garbage after the
+# close quote, an unquoted value, and a partial/unbalanced quote alike. Group
+# ``inner`` is the unquoted content the density checks then run on. String-only —
+# no OCTAVE AST. The value is single-line by construction (``_extract_meta_fields``
+# is line-anchored), so an unbalanced quote from a genuinely multi-line value
+# fails this full-match — consistent with the line-anchored read parser.
+_REASONING_FLAT_STRING_RE = re.compile(r'^"(?P<inner>(?:[^"\\]|\\.)*)"$')
+
 # A single META ``KEY::value`` assignment at line start (whitespace-tolerant —
 # OCTAVE bodies are indented). Mirrors the read-side parser's ``_FIELD_LINE_RE``
 # (core.agent_readable_governance_parser) EXACTLY so the write-side presence /
@@ -442,15 +465,29 @@ def _check_agr_invariants(
             "(ADR-RFC-ARCH-004 §1.2 / §4.1 #9)."
         )
 
-    # --- #11: HUMAN_ADR_REF resolves under the repository ---
+    # --- #11: HUMAN_ADR_REF — token-form (v1.1) OR resolvable path (v1.0) ---
+    # ADR-RFC-ARCH-004 v1.1 (per #101 ADR_REF_FORM::greppable_TOKEN) admits two
+    # canonical forms. DISCRIMINATION RULE (deterministic, regex-only): a ref
+    # that matches the §1.3 TOKEN regex (``_TOKEN_FORMAT_RE``) is TOKEN-form; the
+    # §1.3 pattern admits no ``/`` and no ``.``, so a path (which carries a
+    # separator or ``.md``) can never match it — the two classes are mutually
+    # exclusive by construction (no separate path detector invented).
+    #   * TOKEN-form  -> well-formed greppable token; NO path resolution
+    #                    (cross-repo survivable — the target may live elsewhere).
+    #   * otherwise   -> v1.0 path-form; resolve under the repo exactly as before
+    #                    (back-compat; the 5 existing path-form records still pass).
     human_adr_m = _HUMAN_ADR_REF_RE.search(content)
     if human_adr_m is not None:
         ref = human_adr_m.group(1) if human_adr_m.group(1) is not None else human_adr_m.group(2)
         ref = (ref or "").strip()
-        if not _human_adr_ref_resolves(working_dir, ref):
+        if _TOKEN_FORMAT_RE.match(ref):
+            # Token-form: well-formed greppable token, no filesystem resolution.
+            pass
+        elif not _human_adr_ref_resolves(working_dir, ref):
             errors.append(
-                f"HUMAN_ADR_REF '{ref}' does not resolve to a file under the "
-                "repository (ADR-RFC-ARCH-004 §1.2 / §4.1 #11)."
+                f"HUMAN_ADR_REF '{ref}' is neither a well-formed greppable TOKEN "
+                "(ADR-RFC-ARCH-004 §1.3 form) nor a path that resolves to a file "
+                "under the repository (ADR-RFC-ARCH-004 §1.2 / §4.1 #11)."
             )
 
     # --- #12: Ratification provenance (WARNING per §4.2, NOT error) ---
@@ -461,6 +498,88 @@ def _check_agr_invariants(
             "(not PROPOSED); ratification provenance is recommended "
             "(ADR-RFC-ARCH-004 §4.1 #12, severity WARNING)."
         )
+
+    # --- #13: Reasoning-field density (ADR-RFC-ARCH-004 v1.1 §1.2) ---
+    # DECISION and BECAUSE are LLM "bytecode": flat compressed-OCTAVE strings of
+    # AT MOST MAX_REASONING_WORDS words with NO embedded newline (the ratified
+    # GATE_A_GUARD of HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101). This is
+    # a value-level check ONLY — the structural flat-regex parse is unchanged.
+    # Collect-more-errors with the offending field NAMED (operator UX), mirroring
+    # the #10/#9 precedent.
+    _check_reasoning_density(content, errors)
+
+
+def _check_reasoning_density(content: str, errors: list[str]) -> None:
+    """Enforce the §4.1 #13 form + word-count / no-newline guard on the reasoning fields.
+
+    DECISION and BECAUSE MUST each be a well-formed double-quoted flat string of
+    AT MOST ``MAX_REASONING_WORDS`` words with NO embedded newline (the ratified
+    ``FORMAT_RULE::DECISION∧BECAUSE=flat_strings`` of #101). The check is purely
+    value-level (no structural OCTAVE re-parse) and validates the SAME value the
+    read layer surfaces, so the guard and ``agr_read`` cannot diverge (#88 parity
+    strengthened):
+
+      1. READ-AUTHORITATIVE VALUE — the value is the FIRST-occurrence value from
+         the parity-shared ``_extract_meta_fields`` (``_META_FIELD_LINE_RE``),
+         i.e. exactly what the read parser surfaces. The guard never scans a
+         separate (later/quoted) occurrence — that two-source split was the
+         divergence bypass (cubic P1): a malformed first occurrence with a clean
+         later quoted one would otherwise escape.
+      2. FORM — that value must FULL-MATCH ``_REASONING_FLAT_STRING_RE``
+         (``^"…"$``). This rejects unquoted values, leading garbage, trailing
+         garbage after the close quote, and partial/unbalanced quotes in one
+         check.
+      3. DENSITY — on the inner (unquoted) content, reject an embedded newline
+         (any of ``\\n``, ``\\r``, ``\\r\\n``) and reject > ``MAX_REASONING_WORDS``
+         words.
+
+    Pure; appends actionable, field-named errors. Shared
+    ``MAX_REASONING_WORDS`` / ``REASONING_FIELDS`` keep this in lockstep with the
+    read side (issue #88 parity).
+    """
+    # Read-authoritative first-occurrence values (the field set the read parser
+    # surfaces). Validating THESE — not a separately-scanned quoted occurrence —
+    # is what keeps the guard and agr_read from diverging.
+    present = _extract_meta_fields(content)
+
+    for key in REASONING_FIELDS:
+        if key not in present:
+            # Absence is handled by the §4.1 #2 required-field check, not here.
+            continue
+
+        raw = present[key]
+        form_match = _REASONING_FLAT_STRING_RE.match(raw)
+        if form_match is None:
+            # Not a clean double-quoted flat string (unquoted, leading/trailing
+            # garbage, or unbalanced quote) — a #13 violation regardless of the
+            # inner length, with no bypass window.
+            errors.append(
+                f"{key} value must be a double-quoted flat string "
+                f'({key}::"…") with no leading or trailing content; an unquoted, '
+                "multi-line, or garbage-padded value is rejected — "
+                "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13 "
+                "(FORMAT_RULE: DECISION∧BECAUSE = flat_strings)."
+            )
+            continue
+
+        value = form_match.group("inner")
+
+        if "\n" in value or "\r" in value:
+            errors.append(
+                f"{key} value contains an embedded newline; reasoning fields MUST "
+                "be a single flat line (no newline) — ADR-RFC-ARCH-004 v1.1 §1.2 / "
+                "§4.1 #13. Compress to one telegraphic line using OCTAVE operators "
+                "(→ ⇌ ∴ ⊕) for the connectives."
+            )
+
+        word_count = len(value.split())
+        if word_count > MAX_REASONING_WORDS:
+            errors.append(
+                f"{key} value is {word_count} words (max {MAX_REASONING_WORDS}); "
+                "reasoning fields MUST be compressed bytecode, not prose — "
+                "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13. Drop stopwords and let "
+                "OCTAVE operators (→ ⇌ ∴ ⊕) carry the connectives."
+            )
 
 
 def _authored_at_utc_date(value: str) -> str | None:
