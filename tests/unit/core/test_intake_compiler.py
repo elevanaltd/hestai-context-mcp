@@ -395,6 +395,36 @@ class TestCostCaps:
         assert stub.entered is False
         assert stub.request is None
 
+    async def test_aborts_when_projected_tokens_exceed_context_window(
+        self, patch_client, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HESTAI_INTAKE_CONTEXT_WINDOW_TOKENS", "1000")
+        stub = _StubClient(text="should never be returned")
+        patch_client(stub)
+
+        result = await compile_prose_to_octave(_ctx("x" * 3000), max_output_tokens=800)
+
+        assert result["ok"] is False
+        assert result["octave"] is None
+        assert "context window" in result["error"].lower()
+        assert "aborted before backend call" in result["error"].lower()
+        assert result["metrics"]["cost"] == pytest.approx(0.0)
+        assert stub.entered is False
+        assert stub.request is None
+
+    async def test_in_budget_request_still_proceeds_with_context_window_guard(
+        self, patch_client, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("HESTAI_INTAKE_CONTEXT_WINDOW_TOKENS", "5000")
+        stub = _StubClient(text="===DECISION_RECORD===\n===END===")
+        patch_client(stub)
+
+        result = await compile_prose_to_octave(_ctx("x" * 400), max_output_tokens=800)
+
+        assert result["ok"] is True
+        assert stub.entered is True
+        assert stub.request is not None
+
     async def test_env_override_for_output_cap(self, patch_client, monkeypatch) -> None:
         monkeypatch.setenv("HESTAI_INTAKE_MAX_OUTPUT_TOKENS", "256")
         stub = _StubClient(text="===DECISION_RECORD===\n===END===")
@@ -452,3 +482,26 @@ class TestMetricsAccounting:
             len(ctx.prompt) + len(ctx.prose_input) + _CHARS_PER_TOKEN - 1
         ) // _CHARS_PER_TOKEN
         assert _estimate_input_tokens(ctx) == expected
+
+
+class TestTruncationMessageContract:
+    async def test_truncation_error_message_is_actionable(self, patch_client, monkeypatch) -> None:
+        monkeypatch.setenv("HESTAI_INTAKE_MAX_COST_USD", "1000000")
+        consumed_tokens = 15523
+        stub = _StubClient(
+            raises=AIClientTruncationError(
+                "finish_reason='length'", consumed_tokens=consumed_tokens
+            )
+        )
+        patch_client(stub)
+
+        result = await compile_prose_to_octave(_ctx())
+
+        assert result["ok"] is False
+        assert result["error"] is not None
+        assert str(consumed_tokens) in result["error"]
+        assert "output hit the token cap" in result["error"].lower()
+        assert "not user-input size" in result["error"].lower()
+        assert "reduce record scope" in result["error"].lower()
+        assert "#111" in result["error"]
+        assert "max output tokens" in result["error"].lower()
