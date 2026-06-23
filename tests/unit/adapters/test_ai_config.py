@@ -644,6 +644,12 @@ class TestResolveRequireRealValidation:
         wd = self._write_env(tmp_path, f"{self._KEY}=true # enforce strict\n")
         assert resolve_require_real_validation(working_dir=wd) is True
 
+    def test_tab_prefixed_inline_comment_is_stripped_before_truthy_parse(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=true\t# enforce strict\n")
+        assert resolve_require_real_validation(working_dir=wd) is True
+
     def test_quoted_hash_is_preserved_not_treated_as_comment(self, tmp_path, clean_env):
         from hestai_context_mcp.adapters.ai_config import _read_caller_env_keys
 
@@ -661,6 +667,18 @@ class TestResolveRequireRealValidation:
 
         wd = self._write_env(tmp_path, f"{self._KEY}=false # explicit off\n")
         assert resolve_require_real_validation(working_dir=wd) is False
+
+    def test_false_value_with_tab_prefixed_inline_comment_stays_false(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=false\t# explicit off\n")
+        assert resolve_require_real_validation(working_dir=wd) is False
+
+    def test_unquoted_hash_without_leading_whitespace_is_preserved(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import _read_caller_env_keys
+
+        wd = self._write_env(tmp_path, "TOKEN=token#fragment\n")
+        assert _read_caller_env_keys(wd, ("TOKEN",)) == {"TOKEN": "token#fragment"}
 
 
 # Dead-import helper so ``Any`` stays reachable by mypy when adding fields.

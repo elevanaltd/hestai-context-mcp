@@ -325,7 +325,12 @@ async def run_intake_to_pr(
             "not installed); proceeding on regex Gate A only unless fail-closed is "
             "required."
         )
-        if resolve_require_real_validation(working_dir=str(working_dir)):
+        loop = asyncio.get_running_loop()
+        require_real_validation = await loop.run_in_executor(
+            None,
+            partial(resolve_require_real_validation, working_dir=str(working_dir)),
+        )
+        if require_real_validation:
             return _fail_closed_result(pipeline, dry_run)
 
     loop = asyncio.get_running_loop()

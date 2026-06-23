@@ -192,6 +192,29 @@ class TestRealValidationSignalAndFailClosed:
         joined = " ".join(result["validation_errors"]).lower()
         assert "validation" in joined and ("install" in joined or "extra" in joined)
 
+    async def test_unavailable_flag_resolution_is_offloaded_to_executor(
+        self, tmp_path: Path, stub_pipeline, spy_linker, monkeypatch
+    ) -> None:
+        class _Loop:
+            def __init__(self) -> None:
+                self.calls: list[object] = []
+
+            async def run_in_executor(self, executor, func, *args):
+                self.calls.append(func)
+                return func(*args)
+
+        loop = _Loop()
+        monkeypatch.setattr(mod.asyncio, "get_running_loop", lambda: loop)
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: True)
+        stub_pipeline(_pipeline_ok(real_validation_available=False))
+
+        result = await run_intake_to_pr(tmp_path, _ctx(), dry_run=False)
+
+        assert result["success"] is False
+        assert result["real_validation_available"] is False
+        assert spy_linker.calls == []
+        assert len(loop.calls) == 1
+
     async def test_unavailable_flag_on_but_available_proceeds(
         self, tmp_path: Path, stub_pipeline, spy_linker, monkeypatch
     ) -> None:

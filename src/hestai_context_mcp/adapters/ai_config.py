@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 import keyring
@@ -125,9 +126,9 @@ def resolve_provider() -> str:
 def _parse_env_value(raw_value: str) -> str:
     """Parse one dotenv-style value conservatively.
 
-    Unquoted values treat the first ``" #"`` sequence as an inline comment
-    delimiter. Quoted values preserve ``#`` and ignore trailing content after
-    the closing quote.
+    Unquoted values treat the first whitespace+``#`` sequence as an inline
+    comment delimiter. Quoted values preserve ``#`` and ignore trailing content
+    after the closing quote.
     """
     value = raw_value.lstrip()
     if not value:
@@ -140,7 +141,7 @@ def _parse_env_value(raw_value: str) -> str:
             return value[1:]
         return value[1:end]
 
-    return value.split(" #", 1)[0].strip()
+    return re.split(r"\s#", value, maxsplit=1)[0].strip()
 
 
 def _read_caller_env_keys(working_dir: str, keys: tuple[str, ...]) -> dict[str, str]:
