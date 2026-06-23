@@ -791,6 +791,106 @@ class TestRunLinkerLivePath:
         assert pr.call_args.args[-1] == "ghp_x" or pr.call_args.kwargs.get("gh_token") == "ghp_x"
 
 
+# ---------------------------------------------------------------------------
+# staged_uncommitted contract (cubic P2): True IFF the branch was created AND
+# the commit did NOT succeed (changes staged but not committed). MUST be False
+# whenever the commit succeeded -- including when a later push or PR step fails.
+# Fully mocked => hermetic (no real git).
+# ---------------------------------------------------------------------------
+
+
+class TestStagedUncommittedContract:
+    @staticmethod
+    def _run(tmp_path: Path, **overrides: object) -> dict[str, object]:
+        """Drive run_linker through the live path with all seams mocked.
+
+        ``overrides`` replaces individual seam return values (e.g.
+        ``commit="boom"``) so each test pins one outcome.
+        """
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        commit = overrides.get("commit")  # str error or None
+        push = overrides.get("push")  # str error or None
+        open_pr = overrides.get("open_pr", ("http://pr/1", None))  # (url, err)
+        with (
+            patch(f"{_LINKER}._preflight_commit_safety", return_value=None),
+            patch(f"{_LINKER}._create_branch", return_value=None),
+            patch(f"{_LINKER}._write_file", return_value=None),
+            patch(f"{_LINKER}.write_manifest"),
+            patch(f"{_LINKER}._git_add_and_commit", return_value=commit),
+            patch(f"{_LINKER}._push_branch", return_value=push),
+            patch(f"{_LINKER}._resolve_github_token", return_value=None),
+            patch(f"{_LINKER}._open_pr", return_value=open_pr),
+        ):
+            return run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", False)
+
+    @pytest.mark.unit
+    def test_commit_fails_is_staged_uncommitted(self, tmp_path: Path) -> None:
+        """Commit FAILED -> staged_uncommitted True (the genuine staged state)."""
+        out = self._run(tmp_path, commit="git commit failed: boom")
+        assert out["staged_uncommitted"] is True
+        assert out["error"] is not None and "git commit failed" in out["error"]
+        assert out["branch"] and str(out["branch"]).startswith("governance/")
+
+    @pytest.mark.unit
+    def test_push_fails_after_commit_is_not_staged_uncommitted(self, tmp_path: Path) -> None:
+        """Commit OK + push FAILS -> staged_uncommitted False (it committed).
+
+        RED on the old ``bool(errors)`` flag: the push error made errors truthy
+        even though the commit landed, mislabelling a committed state as
+        staged-uncommitted. Recovery for a push failure is described by ``error``.
+        """
+        out = self._run(tmp_path, commit=None, push="push boom")
+        assert out["staged_uncommitted"] is False
+        assert out["error"] == "push boom"
+        assert out["branch"] and str(out["branch"]).startswith("governance/")
+
+    @pytest.mark.unit
+    def test_pr_fails_after_commit_is_not_staged_uncommitted(self, tmp_path: Path) -> None:
+        """Commit OK + push OK + PR FAILS -> staged_uncommitted False (committed+pushed).
+
+        RED on the old ``bool(errors)`` flag.
+        """
+        out = self._run(tmp_path, commit=None, push=None, open_pr=(None, "pr boom"))
+        assert out["staged_uncommitted"] is False
+        assert out["error"] == "pr boom"
+
+    @pytest.mark.unit
+    def test_full_success_is_not_staged_uncommitted(self, tmp_path: Path) -> None:
+        """Full success -> staged_uncommitted False (regression guard)."""
+        out = self._run(tmp_path, commit=None, push=None, open_pr=("http://pr/1", None))
+        assert out["staged_uncommitted"] is False
+        assert out["error"] is None
+
+    @pytest.mark.unit
+    def test_traversal_reject_is_not_staged_uncommitted(self, tmp_path: Path) -> None:
+        """Path-traversal reject -> staged_uncommitted False: no `git add` ran yet.
+
+        The branch exists (surfaced via ``branch`` + ``error``) but nothing was
+        staged, so the literal "staged but not committed" flag is False.
+        """
+        # target_path OUTSIDE working_dir triggers the traversal guard, which
+        # returns before any write/add. ``_create_branch`` is stubbed so the
+        # branch-creation step "succeeds" and we reach the traversal guard.
+        outside = tmp_path.parent / "elsewhere" / "x.oct.md"
+        validation = ValidationResult(
+            valid=True,
+            errors=[],
+            token=_LIVE_RECORD_ID,
+            card_type="DECISION_RECORD",
+            target_path=outside,
+        )
+        with (
+            patch(f"{_LINKER}._preflight_commit_safety", return_value=None),
+            patch(f"{_LINKER}._create_branch", return_value=None),
+            patch(f"{_LINKER}._git_add_and_commit") as commit,
+        ):
+            out = run_linker(tmp_path, validation, "===DECISION_RECORD===\n", False)
+        assert "path traversal rejected" in out["error"]
+        assert out["staged_uncommitted"] is False
+        # The commit step was never reached.
+        commit.assert_not_called()
+
+
 @pytest.mark.unit
 def test_linker_module_exposes_run_linker() -> None:
     """Smoke: public entry point is importable and callable."""

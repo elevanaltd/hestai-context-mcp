@@ -379,8 +379,8 @@ def run_linker(
 
     # 2. Write OCTAVE content to target path
     if target_path is None:
-        # Branch WAS created but nothing was written/staged -- surface the
-        # partial state (branch exists) for recovery.
+        # Branch WAS created (surfaced via ``branch`` for recovery) but no write
+        # or ``git add`` ran, so nothing is staged-uncommitted (contract: False).
         return {
             "token": token,
             "card_type": card_type,
@@ -388,7 +388,7 @@ def run_linker(
             "branch": branch_name,
             "pr_url": None,
             "error": "target_path is None -- cannot write file",
-            "staged_uncommitted": True,
+            "staged_uncommitted": False,
             "dry_run": False,
         }
 
@@ -396,7 +396,9 @@ def run_linker(
     try:
         target_path.resolve().relative_to(working_dir.resolve())
     except (ValueError, RuntimeError, OSError):
-        # Branch WAS created but the write was rejected -- partial state exists.
+        # Branch WAS created (surfaced via ``branch``) but the write was rejected
+        # before any ``git add``, so nothing is staged-uncommitted (contract:
+        # False); the branch-exists recovery is conveyed by ``branch`` + ``error``.
         return {
             "token": token,
             "card_type": card_type,
@@ -407,7 +409,7 @@ def run_linker(
                 f"target_path {target_path} is outside working_dir {working_dir} "
                 "-- path traversal rejected"
             ),
-            "staged_uncommitted": True,
+            "staged_uncommitted": False,
             "dry_run": False,
         }
 
@@ -428,10 +430,17 @@ def run_linker(
     commit_message = f"chore(governance): add {token} [{card_type}]"
     manifest_path = working_dir / ".hestai" / "MANIFEST.md"
 
+    # Track commit failure explicitly. ``_git_add_and_commit`` stages (git add)
+    # BEFORE committing, so a commit failure leaves changes staged-but-uncommitted
+    # -- the ONLY state where ``staged_uncommitted`` is True. A successful commit,
+    # or a step that never reached the commit (write/traversal failure: nothing
+    # staged), is NOT staged-uncommitted.
+    commit_failed = False
     if not errors:
         err = _git_add_and_commit(working_dir, target_path, manifest_path, commit_message)
         if err:
             errors.append(err)
+            commit_failed = True
 
     # 5. Push branch to origin (REQUIRED before gh pr create -- issue #73).
     #    gh aborts PR creation if the branch is not on a remote. A push
@@ -451,13 +460,14 @@ def run_linker(
 
     error_str = "; ".join(errors) if errors else None
 
-    # #108.3 orphan/partial-state surfacing: by this point the branch HAS been
-    # created (step 1 succeeded). If a later step failed, local state is left
-    # partially applied -- the branch exists and the record may be written/staged
-    # but not committed/pushed. Flag it so the operator can recover the branch
-    # rather than be handed a branch name that looks clean. On full success the
-    # state is committed (not "staged uncommitted"), so the flag is False.
-    staged_uncommitted = bool(errors)
+    # #108.3 orphan/partial-state surfacing (cubic P2 contract): the branch HAS
+    # been created (step 1 succeeded) by this point. ``staged_uncommitted`` is
+    # True IFF the commit itself failed -- i.e. changes were staged (git add) but
+    # not committed. It is False whenever the commit succeeded, INCLUDING when a
+    # later push (step 5) or PR-creation (step 6) failed: those are committed
+    # states with a different recovery, already described by ``error``. The flag
+    # stays literally "staged but not committed," matching its name.
+    staged_uncommitted = commit_failed
 
     return {
         "token": token,
