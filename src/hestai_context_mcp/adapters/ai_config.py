@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 import keyring
@@ -44,6 +45,7 @@ __all__ = [
     "DEFAULT_MODEL",
     "resolve_provider",
     "resolve_model",
+    "resolve_require_real_validation",
     "resolve_api_key",
     "get_provider_base_url",
     "resolve_provider_payload",
@@ -63,6 +65,15 @@ DEFAULT_MODEL: str = "google/gemini-2.0-flash-lite"
 # by setting this key truthy in its ``working_dir/.env``.
 _PER_REPO_OVERRIDE_KEY: str = "PER_REPO_OVERRIDE"
 _TRUTHY_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+
+# Issue #108.4 — opt-in fail-closed flag for Gate-B real OCTAVE validation.
+# Default OFF: Gate B is fail-soft-but-loud (a missing ``validation`` extra
+# degrades to regex-only with an explicit signal). A deployment opts INTO strict
+# fail-closed validation by setting this key truthy. Resolved per-repo from
+# ``working_dir/.env`` in isolation (parse this key only, never load_dotenv), with
+# process-env as the launcher fallback — mirroring ``resolve_model`` per-repo
+# isolation (HO-INTAKE-MODEL-RESOLUTION-PER-REPO). A boolean is not a secret.
+_REQUIRE_REAL_VALIDATION_KEY: str = "HESTAI_GOVERNANCE_REQUIRE_REAL_VALIDATION"
 
 # Tier -> env-var name for that tier's model. The ``default`` tier reads the
 # base ``HESTAI_AI_MODEL``; richer tiers read their own var and fall back to
@@ -112,6 +123,27 @@ def resolve_provider() -> str:
     return os.environ.get("HESTAI_AI_PROVIDER", DEFAULT_PROVIDER)
 
 
+def _parse_env_value(raw_value: str) -> str:
+    """Parse one dotenv-style value conservatively.
+
+    Unquoted values treat the first whitespace+``#`` sequence as an inline
+    comment delimiter. Quoted values preserve ``#`` and ignore trailing content
+    after the closing quote.
+    """
+    value = raw_value.lstrip()
+    if not value:
+        return ""
+
+    quote = value[0]
+    if quote in {'"', "'"}:
+        end = value.find(quote, 1)
+        if end == -1:
+            return value[1:]
+        return value[1:end]
+
+    return re.split(r"\s#", value, maxsplit=1)[0].strip()
+
+
 def _read_caller_env_keys(working_dir: str, keys: tuple[str, ...]) -> dict[str, str]:
     """Parse ``{working_dir}/.env`` and return ONLY the requested keys.
 
@@ -136,7 +168,7 @@ def _read_caller_env_keys(working_dir: str, keys: tuple[str, ...]) -> dict[str, 
         if name.startswith("export "):
             name = name[len("export ") :].strip()
         if name in wanted:
-            found[name] = value.strip().strip('"').strip("'")
+            found[name] = _parse_env_value(value)
     return found
 
 
@@ -199,6 +231,37 @@ def resolve_model(tier: str = "default", working_dir: str | None = None) -> str:
     if tier_value:
         return tier_value
     return os.environ.get("HESTAI_AI_MODEL", DEFAULT_MODEL)
+
+
+def resolve_require_real_validation(working_dir: str | None = None) -> bool:
+    """Return whether Gate-B real OCTAVE validation is REQUIRED (fail-closed).
+
+    Issue #108.4 (Option C). Default is ``False`` — Gate B is fail-soft-but-loud
+    (a missing ``validation`` extra degrades to regex-only with an explicit
+    top-level signal). When this returns ``True`` the caller turns an
+    ``available=False`` Gate-B result into a HARD block (no linker / no PR).
+
+    Resolution, mirroring :func:`resolve_model` per-repo isolation
+    (HO-INTAKE-MODEL-RESOLUTION-PER-REPO):
+
+        1. ``working_dir/.env`` — parsed for THIS key ONLY (never ``load_dotenv``,
+           so no caller secret enters the process; PROD::I2). If present, it is
+           the per-call source of truth (a governance repo can demand strict
+           validation regardless of the launcher).
+        2. process env (launcher fallback) — ``HESTAI_GOVERNANCE_REQUIRE_REAL_VALIDATION``.
+        3. default ``False``.
+
+    Args:
+        working_dir: Optional caller project root. When ``None`` only the process
+            env / default are consulted (no ``.env`` is read).
+    """
+    if working_dir is not None:
+        caller = _read_caller_env_keys(working_dir, (_REQUIRE_REAL_VALIDATION_KEY,))
+        repo_value = caller.get(_REQUIRE_REAL_VALIDATION_KEY)
+        if repo_value is not None:
+            return repo_value.strip().lower() in _TRUTHY_VALUES
+
+    return os.environ.get(_REQUIRE_REAL_VALIDATION_KEY, "").strip().lower() in _TRUTHY_VALUES
 
 
 def get_provider_base_url(provider: str) -> str:

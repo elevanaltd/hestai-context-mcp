@@ -92,6 +92,7 @@ def stub_octave_pr(monkeypatch: pytest.MonkeyPatch):
 
     class _OctaveResult:
         ok = True
+        available = True
 
         def to_dict(self) -> dict[str, Any]:
             return {"ok": True, "available": True, "errors": []}
@@ -215,8 +216,13 @@ class TestOctaveContentStage5:
             "octave_validation",
             "dry_run",
         }
-        # The ONLY new top-level key is the additive semantic_review.
-        assert set(result.keys()) == post_70_keys | {"semantic_review"}
+        # Additive top-level keys: semantic_review (#77) and the #108.4 Option-L
+        # real_validation_available signal. No pre-existing key is removed or
+        # renamed (byte-stable contract beyond purely additive fields).
+        assert set(result.keys()) == post_70_keys | {
+            "semantic_review",
+            "real_validation_available",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +259,7 @@ class TestStage5SkipConditions:
 
         class _OctaveResult:
             ok = True
+            available = True
 
             def to_dict(self) -> dict[str, Any]:
                 return {"ok": True, "available": True, "errors": []}
@@ -336,6 +343,7 @@ class TestStage5FailSoft:
 
         class _OctaveResult:
             ok = True
+            available = True
 
             def to_dict(self) -> dict[str, Any]:
                 return {"ok": True, "available": True, "errors": []}

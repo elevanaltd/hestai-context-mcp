@@ -71,6 +71,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "HESTAI_AI_MODEL_CRITICAL",
         "HESTAI_AI_PROVIDER_ROUTING",
         "HESTAI_AI_PROVIDER_ORDER",
+        "HESTAI_GOVERNANCE_REQUIRE_REAL_VALIDATION",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
     ):
@@ -549,6 +550,135 @@ class TestResolveModelPerRepoOverride:
         )
         assert resolve_model("default", working_dir=wd) == "repo/model"
         assert "SECRET_TOKEN" not in os.environ
+
+    def test_unquoted_inline_comment_is_stripped_from_model(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        wd = self._write_env(
+            tmp_path,
+            "PER_REPO_OVERRIDE=true\nHESTAI_AI_MODEL=gpt-4 # default\n",
+        )
+        assert resolve_model("default", working_dir=wd) == "gpt-4"
+
+
+class TestResolveRequireRealValidation:
+    """#108.4 Option C: opt-in fail-closed flag for Gate-B real OCTAVE validation.
+
+    Default OFF (fail-soft-but-loud). Resolved per-repo from ``working_dir/.env``
+    in ISOLATION (the flag key only, never ``load_dotenv``), with process-env as
+    the launcher fallback — mirroring ``resolve_model``'s per-repo isolation
+    (HO-INTAKE-MODEL-RESOLUTION-PER-REPO). A boolean is not a secret, so a
+    per-repo flag lets a governance repo demand strict AST validation.
+    """
+
+    _KEY = "HESTAI_GOVERNANCE_REQUIRE_REAL_VALIDATION"
+
+    @staticmethod
+    def _write_env(tmp_path, body: str) -> str:
+        (tmp_path / ".env").write_text(body, encoding="utf-8")
+        return str(tmp_path)
+
+    def test_default_is_false(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        # No process env, no .env -> default OFF.
+        assert resolve_require_real_validation(working_dir=str(tmp_path)) is False
+
+    def test_working_dir_none_reads_process_env_only(self, monkeypatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        assert resolve_require_real_validation(working_dir=None) is False
+        monkeypatch.setenv(self._KEY, "true")
+        assert resolve_require_real_validation(working_dir=None) is True
+
+    def test_process_env_launcher_fallback(self, tmp_path, monkeypatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        monkeypatch.setenv(self._KEY, "1")
+        # No .env in the repo -> the process env (launcher) supplies the flag.
+        assert resolve_require_real_validation(working_dir=str(tmp_path)) is True
+
+    def test_repo_env_enables_when_process_off(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=true\n")
+        # Per-repo opt-in: a governance repo demands strict validation.
+        assert resolve_require_real_validation(working_dir=wd) is True
+
+    def test_repo_env_takes_precedence_over_process(self, tmp_path, monkeypatch, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        # Repo .env is the per-call source of truth; if present it wins.
+        monkeypatch.setenv(self._KEY, "false")
+        wd = self._write_env(tmp_path, f"{self._KEY}=true\n")
+        assert resolve_require_real_validation(working_dir=wd) is True
+
+    def test_truthy_variants(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        for val in ("1", "true", "TRUE", "yes", "on"):
+            wd = self._write_env(tmp_path, f"{self._KEY}={val}\n")
+            assert resolve_require_real_validation(working_dir=wd) is True, val
+
+    def test_falsey_variants(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        for val in ("0", "false", "no", "off", ""):
+            wd = self._write_env(tmp_path, f"{self._KEY}={val}\n")
+            assert resolve_require_real_validation(working_dir=wd) is False, val
+
+    def test_caller_env_not_loaded_into_process(self, tmp_path, clean_env):
+        """PROD::I2 — parsing the caller .env must NOT leak its secrets into os.environ."""
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(
+            tmp_path,
+            f"{self._KEY}=true\nSECRET_TOKEN=supersecret\n",
+        )
+        assert resolve_require_real_validation(working_dir=wd) is True
+        assert "SECRET_TOKEN" not in os.environ
+
+    def test_unquoted_inline_comment_is_stripped_before_truthy_parse(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=true # enforce strict\n")
+        assert resolve_require_real_validation(working_dir=wd) is True
+
+    def test_tab_prefixed_inline_comment_is_stripped_before_truthy_parse(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=true\t# enforce strict\n")
+        assert resolve_require_real_validation(working_dir=wd) is True
+
+    def test_quoted_hash_is_preserved_not_treated_as_comment(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import _read_caller_env_keys
+
+        wd = self._write_env(tmp_path, f'{self._KEY}="true # not a comment"\n')
+        assert _read_caller_env_keys(wd, (self._KEY,)) == {self._KEY: "true # not a comment"}
+
+    def test_unquoted_value_without_comment_still_reads_true(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=true\n")
+        assert resolve_require_real_validation(working_dir=wd) is True
+
+    def test_false_value_with_inline_comment_stays_false(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=false # explicit off\n")
+        assert resolve_require_real_validation(working_dir=wd) is False
+
+    def test_false_value_with_tab_prefixed_inline_comment_stays_false(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=false\t# explicit off\n")
+        assert resolve_require_real_validation(working_dir=wd) is False
+
+    def test_unquoted_hash_without_leading_whitespace_is_preserved(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import _read_caller_env_keys
+
+        wd = self._write_env(tmp_path, "TOKEN=token#fragment\n")
+        assert _read_caller_env_keys(wd, ("TOKEN",)) == {"TOKEN": "token#fragment"}
 
 
 # Dead-import helper so ``Any`` stays reachable by mypy when adding fields.

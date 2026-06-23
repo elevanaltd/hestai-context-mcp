@@ -201,6 +201,165 @@ class TestFailSoftDoesNotBlock:
         assert result["validation_errors"]
 
 
+class TestRealValidationTopLevelSignal:
+    """#108.4 Option L: the degrade must be an EXPLICIT top-level signal.
+
+    ``real_validation_available`` is surfaced at the TOP LEVEL of the result on
+    both submission paths so a fail-soft degrade cannot hide inside
+    ``octave_validation.warnings``.
+    """
+
+    @pytest.mark.unit
+    def test_available_true_surfaces_top_level_true(
+        self, tmp_path: Path, decision_record_octave: str, monkeypatch
+    ) -> None:
+        import hestai_context_mcp.tools.submit_governance as mod
+
+        stub = _StubValidator(
+            OctaveValidationResult(ok=True, errors=[], warnings=[], available=True)
+        )
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: stub)
+
+        result = _run(tmp_path, decision_record_octave)
+
+        assert result["success"] is True
+        # Explicit, top-level (NOT buried in octave_validation).
+        assert result["real_validation_available"] is True
+
+    @pytest.mark.unit
+    def test_unavailable_surfaces_top_level_false_and_proceeds(
+        self, tmp_path: Path, decision_record_octave: str, monkeypatch
+    ) -> None:
+        import hestai_context_mcp.tools.submit_governance as mod
+
+        stub = _StubValidator(
+            OctaveValidationResult(ok=True, errors=[], warnings=[], available=False)
+        )
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: stub)
+
+        result = _run(tmp_path, decision_record_octave)
+
+        # Flag OFF (default) -> proceeds (fail-soft), but the degrade is LOUD.
+        assert result["success"] is True
+        assert result["real_validation_available"] is False
+        # And it is a TOP-LEVEL key, not only inside octave_validation.warnings.
+        assert "real_validation_available" in result
+
+
+class TestFailClosedOptIn:
+    """#108.4 Option C: opt-in fail-closed flag (default OFF)."""
+
+    @pytest.mark.unit
+    def test_flag_on_unavailable_hard_blocks_no_linker(
+        self, tmp_path: Path, decision_record_octave: str, monkeypatch
+    ) -> None:
+        import hestai_context_mcp.tools.submit_governance as mod
+
+        stub = _StubValidator(
+            OctaveValidationResult(ok=True, errors=[], warnings=[], available=False)
+        )
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: stub)
+        # Force the fail-closed policy ON regardless of env/.env.
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: True)
+
+        def _boom(*args, **kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("run_linker must not run when fail-closed blocks")
+
+        monkeypatch.setattr(mod, "run_linker", _boom)
+
+        result = _run(tmp_path, decision_record_octave)
+
+        assert result["success"] is False
+        assert result["pr_url"] is None
+        assert result["real_validation_available"] is False
+        # Structured PROD-I4 error naming the missing extra + how to install.
+        joined = " ".join(result["validation_errors"]).lower()
+        assert "validation" in joined and ("install" in joined or "extra" in joined)
+
+    @pytest.mark.unit
+    def test_flag_on_but_available_proceeds(
+        self, tmp_path: Path, decision_record_octave: str, monkeypatch
+    ) -> None:
+        """Flag ON but the real validator IS available -> normal proceed (no block)."""
+        import hestai_context_mcp.tools.submit_governance as mod
+
+        stub = _StubValidator(
+            OctaveValidationResult(ok=True, errors=[], warnings=[], available=True)
+        )
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: stub)
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: True)
+
+        result = _run(tmp_path, decision_record_octave)
+
+        assert result["success"] is True
+        assert result["real_validation_available"] is True
+
+    @pytest.mark.unit
+    def test_flag_off_unavailable_is_byte_stable_proceed(
+        self, tmp_path: Path, decision_record_octave: str, monkeypatch
+    ) -> None:
+        """Flag OFF + unavailable -> proceeds (only the additive signal differs)."""
+        import hestai_context_mcp.tools.submit_governance as mod
+
+        stub = _StubValidator(
+            OctaveValidationResult(ok=True, errors=[], warnings=[], available=False)
+        )
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: stub)
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: False)
+
+        result = _run(tmp_path, decision_record_octave)
+
+        assert result["success"] is True
+        assert result["real_validation_available"] is False
+
+    @pytest.mark.unit
+    def test_unavailable_flag_resolution_is_offloaded_to_executor(
+        self, tmp_path: Path, decision_record_octave: str, monkeypatch
+    ) -> None:
+        import hestai_context_mcp.tools.submit_governance as mod
+
+        class _Loop:
+            def __init__(self) -> None:
+                self.calls: list[object] = []
+
+            async def run_in_executor(self, executor, func, *args):
+                self.calls.append(func)
+                return func(*args)
+
+        loop = _Loop()
+        stub = _StubValidator(
+            OctaveValidationResult(ok=True, errors=[], warnings=[], available=False)
+        )
+
+        monkeypatch.setattr(mod.asyncio, "get_running_loop", lambda: loop)
+        monkeypatch.setattr(mod, "validate_working_dir", lambda raw: Path(raw))
+        monkeypatch.setattr(
+            mod,
+            "validate_octave_content",
+            lambda wd, content: type("Validation", (), {"valid": True, "errors": []})(),
+        )
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: stub)
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: True)
+        monkeypatch.setattr(
+            mod,
+            "run_linker",
+            lambda **kwargs: pytest.fail("run_linker must not run when fail-closed blocks"),
+        )
+
+        result = asyncio.run(
+            mod._submit_octave_content(
+                str(tmp_path),
+                decision_record_octave,
+                True,
+                False,
+            )
+        )
+
+        assert result["success"] is False
+        assert result["real_validation_available"] is False
+        assert len(loop.calls) == 4
+
+
 class TestPublicContractUnchanged:
     @pytest.mark.unit
     def test_input_signature_adds_prose_input_back_compatibly(self) -> None:

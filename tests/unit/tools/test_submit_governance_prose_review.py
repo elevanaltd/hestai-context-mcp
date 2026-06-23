@@ -69,6 +69,7 @@ class TestRunIntakeToPrThreadsOctave:
                 "validation_errors": [],
                 "metrics": {"tokens": 10, "cost": 0.0, "model": "default-tier-model"},
                 "attempts": 1,
+                "real_validation_available": True,
             }
 
         def _fake_linker(**kw: Any) -> dict[str, Any]:
@@ -98,6 +99,7 @@ class TestRunIntakeToPrThreadsOctave:
                 "validation_errors": ["bad"],
                 "metrics": {"tokens": 0, "cost": 0.0, "model": ""},
                 "attempts": 2,
+                "real_validation_available": True,
             }
 
         monkeypatch.setattr(pipeline_mod, "run_intake_pipeline", _fake_pipeline, raising=True)
