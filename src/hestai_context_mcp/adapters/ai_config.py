@@ -122,6 +122,27 @@ def resolve_provider() -> str:
     return os.environ.get("HESTAI_AI_PROVIDER", DEFAULT_PROVIDER)
 
 
+def _parse_env_value(raw_value: str) -> str:
+    """Parse one dotenv-style value conservatively.
+
+    Unquoted values treat the first ``" #"`` sequence as an inline comment
+    delimiter. Quoted values preserve ``#`` and ignore trailing content after
+    the closing quote.
+    """
+    value = raw_value.lstrip()
+    if not value:
+        return ""
+
+    quote = value[0]
+    if quote in {'"', "'"}:
+        end = value.find(quote, 1)
+        if end == -1:
+            return value[1:]
+        return value[1:end]
+
+    return value.split(" #", 1)[0].strip()
+
+
 def _read_caller_env_keys(working_dir: str, keys: tuple[str, ...]) -> dict[str, str]:
     """Parse ``{working_dir}/.env`` and return ONLY the requested keys.
 
@@ -146,7 +167,7 @@ def _read_caller_env_keys(working_dir: str, keys: tuple[str, ...]) -> dict[str, 
         if name.startswith("export "):
             name = name[len("export ") :].strip()
         if name in wanted:
-            found[name] = value.strip().strip('"').strip("'")
+            found[name] = _parse_env_value(value)
     return found
 
 

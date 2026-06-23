@@ -312,6 +312,53 @@ class TestFailClosedOptIn:
         assert result["success"] is True
         assert result["real_validation_available"] is False
 
+    @pytest.mark.unit
+    def test_unavailable_flag_resolution_is_offloaded_to_executor(
+        self, tmp_path: Path, decision_record_octave: str, monkeypatch
+    ) -> None:
+        import hestai_context_mcp.tools.submit_governance as mod
+
+        class _Loop:
+            def __init__(self) -> None:
+                self.calls: list[object] = []
+
+            async def run_in_executor(self, executor, func, *args):
+                self.calls.append(func)
+                return func(*args)
+
+        loop = _Loop()
+        stub = _StubValidator(
+            OctaveValidationResult(ok=True, errors=[], warnings=[], available=False)
+        )
+
+        monkeypatch.setattr(mod.asyncio, "get_running_loop", lambda: loop)
+        monkeypatch.setattr(mod, "validate_working_dir", lambda raw: Path(raw))
+        monkeypatch.setattr(
+            mod,
+            "validate_octave_content",
+            lambda wd, content: type("Validation", (), {"valid": True, "errors": []})(),
+        )
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: stub)
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda working_dir: True)
+        monkeypatch.setattr(
+            mod,
+            "run_linker",
+            lambda **kwargs: pytest.fail("run_linker must not run when fail-closed blocks"),
+        )
+
+        result = asyncio.run(
+            mod._submit_octave_content(
+                str(tmp_path),
+                decision_record_octave,
+                True,
+                False,
+            )
+        )
+
+        assert result["success"] is False
+        assert result["real_validation_available"] is False
+        assert len(loop.calls) == 4
+
 
 class TestPublicContractUnchanged:
     @pytest.mark.unit

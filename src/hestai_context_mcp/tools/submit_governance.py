@@ -368,7 +368,11 @@ async def _submit_octave_content(
             "not installed); proceeding on regex Gate A only unless fail-closed is "
             "required."
         )
-        if resolve_require_real_validation(working_dir=str(wd)):
+        require_real_validation = await loop.run_in_executor(
+            None,
+            partial(resolve_require_real_validation, working_dir=str(wd)),
+        )
+        if require_real_validation:
             return _empty_result(
                 dry_run,
                 [fail_closed_error_message()],

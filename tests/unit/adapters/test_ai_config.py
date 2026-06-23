@@ -551,6 +551,15 @@ class TestResolveModelPerRepoOverride:
         assert resolve_model("default", working_dir=wd) == "repo/model"
         assert "SECRET_TOKEN" not in os.environ
 
+    def test_unquoted_inline_comment_is_stripped_from_model(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_model
+
+        wd = self._write_env(
+            tmp_path,
+            "PER_REPO_OVERRIDE=true\nHESTAI_AI_MODEL=gpt-4 # default\n",
+        )
+        assert resolve_model("default", working_dir=wd) == "gpt-4"
+
 
 class TestResolveRequireRealValidation:
     """#108.4 Option C: opt-in fail-closed flag for Gate-B real OCTAVE validation.
@@ -628,6 +637,30 @@ class TestResolveRequireRealValidation:
         )
         assert resolve_require_real_validation(working_dir=wd) is True
         assert "SECRET_TOKEN" not in os.environ
+
+    def test_unquoted_inline_comment_is_stripped_before_truthy_parse(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=true # enforce strict\n")
+        assert resolve_require_real_validation(working_dir=wd) is True
+
+    def test_quoted_hash_is_preserved_not_treated_as_comment(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import _read_caller_env_keys
+
+        wd = self._write_env(tmp_path, f'{self._KEY}="true # not a comment"\n')
+        assert _read_caller_env_keys(wd, (self._KEY,)) == {self._KEY: "true # not a comment"}
+
+    def test_unquoted_value_without_comment_still_reads_true(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=true\n")
+        assert resolve_require_real_validation(working_dir=wd) is True
+
+    def test_false_value_with_inline_comment_stays_false(self, tmp_path, clean_env):
+        from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+
+        wd = self._write_env(tmp_path, f"{self._KEY}=false # explicit off\n")
+        assert resolve_require_real_validation(working_dir=wd) is False
 
 
 # Dead-import helper so ``Any`` stays reachable by mypy when adding fields.

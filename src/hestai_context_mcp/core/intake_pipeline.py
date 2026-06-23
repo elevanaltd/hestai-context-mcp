@@ -36,6 +36,7 @@ from hestai_context_mcp.core.intake_compiler import (
     compile_prose_to_octave,
 )
 from hestai_context_mcp.ports.octave_validator import (
+    UnavailableOctaveValidator,
     fail_closed_error_message,
     get_octave_validator,
 )
@@ -101,9 +102,9 @@ def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[
     """Run the existing two-stage gate.
 
     Returns ``(passed, regex_result, errors, real_validation_available)``. The
-    last element (#108.4) reports whether Gate B's real validator actually ran;
-    it is ``True`` until Gate B is reached (regex-fail short-circuits before
-    Gate B, so availability is unknown -> reported True, no degrade observed).
+    last element (#108.4) reports whether Gate B's real validator is actually
+    available. A regex-fail short-circuit still reports backend availability
+    accurately without running full validation.
     """
     # Gate A (regex) carries the §4.1 #13 reasoning-density guard (≤40 words,
     # no newline on DECISION/BECAUSE), so the verbosity rule is enforced HERE,
@@ -112,10 +113,15 @@ def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[
     # record therefore fails Gate A directly; the failure flows through the same
     # informed-retry/abort path as any schema failure (no separate Gate-C lint).
     regex_result = validate_octave_content(working_dir, octave)
+    octave_validator = get_octave_validator()
+    real_validation_available = not isinstance(
+        octave_validator,
+        UnavailableOctaveValidator,
+    )
     if not regex_result.valid:
-        return False, regex_result, list(regex_result.errors), True
+        return False, regex_result, list(regex_result.errors), real_validation_available
 
-    octave_result = get_octave_validator().validate(octave)
+    octave_result = octave_validator.validate(octave)
     if not octave_result.ok:
         errors = [
             f"[{e.get('code', '')}] {e.get('message', '')}".strip() for e in octave_result.errors

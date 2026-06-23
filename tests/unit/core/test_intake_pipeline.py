@@ -147,6 +147,33 @@ class TestRealValidationAvailabilitySurfaced:
         assert result["ok"] is True
         assert result["real_validation_available"] is False
 
+    async def test_gate_a_failure_reports_false_when_unavailable_validator_active(
+        self, tmp_path: Path, stub_backend, monkeypatch
+    ) -> None:
+        from hestai_context_mcp.ports.octave_validator import UnavailableOctaveValidator
+
+        monkeypatch.setattr(
+            mod,
+            "get_octave_validator",
+            lambda: UnavailableOctaveValidator(),
+            raising=True,
+        )
+        passed, _, _, available = mod._gate(tmp_path, _INVALID_OCTAVE)
+        assert passed is False
+        assert available is False
+
+    async def test_gate_a_failure_reports_true_when_real_validator_is_available(
+        self, tmp_path: Path, stub_backend, monkeypatch
+    ) -> None:
+        class _Available:
+            def validate(self, content: str):  # pragma: no cover - Gate A must short-circuit first.
+                raise AssertionError("Gate B must not run on a Gate-A failure")
+
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: _Available(), raising=True)
+        passed, _, _, available = mod._gate(tmp_path, _INVALID_OCTAVE)
+        assert passed is False
+        assert available is True
+
 
 class TestRetryOnce:
     async def test_invalid_then_valid_retries_once(self, tmp_path: Path, stub_backend) -> None:
