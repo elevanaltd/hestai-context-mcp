@@ -102,7 +102,9 @@ def _compose_sr_assessment(assessment: str, concerns: list[str]) -> str:
     return body
 
 
-async def _run_semantic_review(octave_content: str, pr_url: str) -> dict[str, Any]:
+async def _run_semantic_review(
+    octave_content: str, pr_url: str, working_dir: str | None = None
+) -> dict[str, Any]:
     """Stage 5: analysis-tier scoped-semantic review + SR post (issue #77).
 
     Runs ``review_governance(octave_content, tier="analysis")`` over the authored
@@ -120,7 +122,7 @@ async def _run_semantic_review(octave_content: str, pr_url: str) -> dict[str, An
     Returns the structured ``semantic_review`` block (PROD::I4).
     """
     try:
-        review = await review_governance(octave_content, tier="analysis")
+        review = await review_governance(octave_content, tier="analysis", working_dir=working_dir)
     except Exception as exc:  # noqa: BLE001 — fail-soft: any reviewer error is recorded.
         return {"posted": False, "error": f"semantic review failed: {exc}"}
 
@@ -234,6 +236,7 @@ async def _maybe_review(
     octave_content: str | None,
     dry_run: bool,
     review: bool,
+    working_dir: str | None = None,
 ) -> dict[str, Any]:
     """Run Stage 5 over a successful real PR, attaching ``semantic_review``.
 
@@ -250,7 +253,9 @@ async def _maybe_review(
     if not result.get("success") or not pr_url or not octave_content:
         return result
 
-    result["semantic_review"] = await _run_semantic_review(octave_content, pr_url)
+    result["semantic_review"] = await _run_semantic_review(
+        octave_content, pr_url, working_dir=working_dir
+    )
     return result
 
 
@@ -276,7 +281,7 @@ async def _submit_prose_input(
 
     intake_context = await loop.run_in_executor(None, assemble_intake_context, wd, prose_input)
     result = await run_intake_to_pr(wd, intake_context, dry_run=dry_run)
-    return await _maybe_review(result, result.get("octave"), dry_run, review)
+    return await _maybe_review(result, result.get("octave"), dry_run, review, working_dir=str(wd))
 
 
 async def _submit_octave_content(
@@ -359,4 +364,4 @@ async def _submit_octave_content(
         "octave_validation": octave_validation,
         "dry_run": dry_run,
     }
-    return await _maybe_review(result, octave_content, dry_run, review)
+    return await _maybe_review(result, octave_content, dry_run, review, working_dir=str(wd))

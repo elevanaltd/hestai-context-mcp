@@ -76,7 +76,7 @@ def patch_factory(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(
             mod,
             "build_default_ai_client",
-            lambda: client_or_none,
+            lambda working_dir=None: client_or_none,
             raising=True,
         )
 

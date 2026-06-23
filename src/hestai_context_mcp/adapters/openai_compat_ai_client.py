@@ -384,7 +384,9 @@ class OpenAICompatAIClient:
         )
 
 
-def build_default_ai_client(*, tier: str = "default") -> AIClient | None:
+def build_default_ai_client(
+    *, tier: str = "default", working_dir: str | None = None
+) -> AIClient | None:
     """Build the default :class:`AIClient` from configuration.
 
     Reads provider, model, and API key via :mod:`ai_config`. Returns
@@ -398,6 +400,10 @@ def build_default_ai_client(*, tier: str = "default") -> AIClient | None:
             pre-#77 behaviour (the synthesis tier). Tier only selects the
             *model identifier*; provider and credential resolution are
             unchanged.
+        working_dir: Optional caller project root (issue #106). Forwarded
+            to :func:`ai_config.resolve_model` so a caller repo that sets
+            ``PER_REPO_OVERRIDE`` in its ``.env`` selects its own model;
+            ``None`` keeps centralized (process-env) resolution.
 
     This is the *single* env-reading site for AI client construction.
     Any other code reading ``HESTAI_AI_*`` or ``*_API_KEY`` is a
@@ -413,7 +419,7 @@ def build_default_ai_client(*, tier: str = "default") -> AIClient | None:
         # Misconfigured provider identifier — fail closed.
         logger.warning("Unknown HESTAI_AI_PROVIDER %r; cannot build AIClient", provider)
         return None
-    model = ai_config.resolve_model(tier)
+    model = ai_config.resolve_model(tier, working_dir=working_dir)
     # Issue #96: config-sourced upstream-routing pin (None for providers that
     # take no routing preference). Resolved here, in the composition root, so
     # the wire-protocol adapter stays free of any provider/model magic-string

@@ -235,6 +235,7 @@ def clock_in(
         focus=focus_resolved["value"],
         phase=phase,
         context_summary=context_summary,
+        working_dir=str(working_dir_path),
     )
 
     # ADR-0013 PSS: restore Portable Memory Artifacts and write a named
