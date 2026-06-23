@@ -65,7 +65,7 @@ class TestClockInAiSynthesisIntegration:
         monkeypatch.setattr(
             synth_mod,
             "build_default_ai_client",
-            lambda: _Stub(text=_valid_octave()),
+            lambda working_dir=None: _Stub(text=_valid_octave()),
             raising=True,
         )
 
@@ -90,7 +90,7 @@ class TestClockInAiSynthesisIntegration:
         monkeypatch.setattr(
             synth_mod,
             "build_default_ai_client",
-            lambda: _Stub(raises=port_mod.AIClientTransportError("net")),
+            lambda working_dir=None: _Stub(raises=port_mod.AIClientTransportError("net")),
             raising=True,
         )
 
