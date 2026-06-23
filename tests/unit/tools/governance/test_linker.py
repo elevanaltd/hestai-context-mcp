@@ -332,6 +332,44 @@ class TestOpenPr:
 # ---------------------------------------------------------------------------
 
 
+# Repo-local git identity for the real-git fixtures. CI runners have NO global
+# user.name/user.email (and may set user.useConfigOnly), so any real commit MUST
+# carry an explicit identity or it aborts with exit 128 ("author identity
+# unknown"). These are passed both as repo config AND inline on every commit
+# (-c) so the fixtures are hermetic regardless of the runner's global git state.
+_GIT_IDENTITY = (
+    "-c",
+    "user.email=test@example.com",
+    "-c",
+    "user.name=Test",
+)
+
+
+def _git(repo: Path, *args: str) -> None:
+    """Run a git command in ``repo``, failing the test loudly on error."""
+    subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True)
+
+
+def _hermetic_seed_commit(repo: Path) -> None:
+    """Create a seed commit in ``repo`` that succeeds with NO global git config.
+
+    Identity is supplied inline (``-c user.*``) so the commit does not depend on
+    a global/system identity (absent on CI), and ``core.hooksPath`` is pointed at
+    a nonexistent dir so the seed itself is never gated by the discipline hook.
+    """
+    (repo / "seed.txt").write_text("seed")
+    _git(repo, "add", ".")
+    _git(
+        repo,
+        *_GIT_IDENTITY,
+        "-c",
+        "core.hooksPath=/nonexistent",
+        "commit",
+        "-m",
+        "seed",
+    )
+
+
 def _git_init_main_tree(repo: Path, *, branch: str = "main", hooks: bool) -> None:
     """Initialise a real git repo as a MAIN tree on ``branch``.
 
@@ -340,6 +378,10 @@ def _git_init_main_tree(repo: Path, *, branch: str = "main", hooks: bool) -> Non
     points ``core.hooksPath`` at an empty dir with no ``pre-commit`` (simulating
     a repo where the branch-protection hook is NOT active), mirroring the
     isolated-repo fixture used by the submit_governance integration tests.
+
+    The repo is pinned onto ``branch`` via ``symbolic-ref`` (independent of the
+    runner's ``init.defaultBranch``) and given a repo-local identity so later
+    commits succeed even when the runner has no global git identity (CI).
     """
     subprocess.run(["git", "init"], cwd=str(repo), check=True, capture_output=True)
     subprocess.run(
@@ -348,6 +390,10 @@ def _git_init_main_tree(repo: Path, *, branch: str = "main", hooks: bool) -> Non
         check=True,
         capture_output=True,
     )
+    # Repo-local identity (belt-and-suspenders alongside the inline -c on commits)
+    # so this repo can commit on a CI runner with no global git identity.
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
     hooks_dir = repo / ".git" / ("real-hooks" if hooks else "no-hooks")
     hooks_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -410,18 +456,9 @@ class TestPreflightCommitSafety:
         main_repo.mkdir()
         _git_init_main_tree(main_repo, branch="main", hooks=True)
         # A repo needs at least one commit before a worktree can be added.
-        (main_repo / "seed.txt").write_text("seed")
-        env_args = {"cwd": str(main_repo), "check": True, "capture_output": True}
-        subprocess.run(["git", "add", "."], **env_args)  # type: ignore[arg-type]
-        subprocess.run(
-            ["git", "-c", "core.hooksPath=/nonexistent", "commit", "-m", "seed"],
-            **env_args,  # type: ignore[arg-type]
-        )
+        _hermetic_seed_commit(main_repo)
         wt = tmp_path / "wt"
-        subprocess.run(
-            ["git", "worktree", "add", "-b", "governance/x", str(wt), "main"],
-            **env_args,  # type: ignore[arg-type]
-        )
+        _git(main_repo, "worktree", "add", "-b", "governance/x", str(wt), "main")
         assert linker._preflight_commit_safety(wt) is None
 
     @pytest.mark.unit
@@ -439,25 +476,13 @@ class TestPreflightCommitSafety:
         main_repo = tmp_path / "main"
         main_repo.mkdir()
         _git_init_main_tree(main_repo, branch="main", hooks=True)
-        (main_repo / "seed.txt").write_text("seed")
-        env_args = {"cwd": str(main_repo), "check": True, "capture_output": True}
-        subprocess.run(["git", "add", "."], **env_args)  # type: ignore[arg-type]
-        subprocess.run(
-            ["git", "-c", "core.hooksPath=/nonexistent", "commit", "-m", "seed"],
-            **env_args,  # type: ignore[arg-type]
-        )
+        _hermetic_seed_commit(main_repo)
         # Free up ``main`` so a linked worktree can check it out: move the MAIN
         # tree onto a parking branch. The worktree then sits ON the protected
         # branch ``main`` while the main tree does not.
-        subprocess.run(
-            ["git", "-c", "core.hooksPath=/nonexistent", "checkout", "-b", "parking"],
-            **env_args,  # type: ignore[arg-type]
-        )
+        _git(main_repo, "-c", "core.hooksPath=/nonexistent", "checkout", "-b", "parking")
         wt = tmp_path / "wt-main"
-        subprocess.run(
-            ["git", "worktree", "add", str(wt), "main"],
-            **env_args,  # type: ignore[arg-type]
-        )
+        _git(main_repo, "worktree", "add", str(wt), "main")
 
         # Pre-conditions for the isolation claim: the worktree IS on the
         # protected branch, and the worktree's git-dir differs from the common
