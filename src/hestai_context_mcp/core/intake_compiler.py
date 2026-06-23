@@ -17,6 +17,10 @@ Stage 3.
 Cost caps (operator-ratified, env-overridable):
     * ``HESTAI_INTAKE_MAX_OUTPUT_TOKENS`` — per-call output ceiling
       (default 8000). Passed as ``CompletionRequest.max_tokens``.
+    * ``HESTAI_INTAKE_CONTEXT_WINDOW_TOKENS`` — pre-call fit ceiling for
+      ``estimated input + max_output_tokens`` (default 1048576). Aborts before
+      client construction when the request cannot fit the configured context
+      window.
     * ``HESTAI_INTAKE_MAX_COST_USD`` — abort *before* the call if the projected
       cost (input + max-output tokens, priced via
       ``HESTAI_INTAKE_USD_PER_1K_TOKENS``) exceeds this cap (default 0.50).
@@ -56,6 +60,7 @@ __all__ = [
 
 # Defaults for the operator-ratified cost caps. All env-overridable.
 _DEFAULT_MAX_OUTPUT_TOKENS = 8000
+_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576
 _DEFAULT_MAX_COST_USD = 0.50
 # Default blended price used only for the *pre-call* cost projection. Sized so
 # the default 8000-token ceiling stays comfortably under the $0.50 abort cap for
@@ -255,12 +260,28 @@ async def compile_prose_to_octave(
         if max_cost_usd is not None
         else _env_float("HESTAI_INTAKE_MAX_COST_USD", _DEFAULT_MAX_COST_USD)
     )
+    context_window_tokens = _env_int(
+        "HESTAI_INTAKE_CONTEXT_WINDOW_TOKENS", _DEFAULT_CONTEXT_WINDOW_TOKENS
+    )
     price_per_1k = _env_float("HESTAI_INTAKE_USD_PER_1K_TOKENS", _DEFAULT_USD_PER_1K_TOKENS)
 
     model = _resolve_model_name(working_dir)
 
-    # --- Cost cap: project BEFORE the call; abort on breach (no truncation). ---
+    # --- Pre-call fit/cost guards: abort BEFORE client construction/billing. ---
+    estimated_input_tokens = _estimate_input_tokens(intake_context)
     projected_tokens = _project_tokens(intake_context, out_cap)
+    if projected_tokens > context_window_tokens:
+        return _failure(
+            model,
+            (
+                f"Projected request size {projected_tokens} tokens exceeds context window "
+                f"ceiling {context_window_tokens} (estimated input {estimated_input_tokens} "
+                f"+ max output {out_cap}). Aborted before backend call; no output produced."
+            ),
+            tokens=projected_tokens,
+            cost_is_estimate=False,
+        )
+
     projected_cost = (projected_tokens / 1000.0) * price_per_1k
     if projected_cost > cost_cap:
         return _failure(
@@ -312,7 +333,11 @@ async def compile_prose_to_octave(
             model,
             (
                 "AIClient truncation error (output hit the token cap; not retried): "
-                f"{exc}. Consumed {consumed} tokens."
+                f"{exc}. The provider consumed {consumed} tokens before truncation. "
+                "This was an output-cap failure, not user-input size. "
+                "Remediation: reduce record scope; context-assembly compression is tracked "
+                "in #111; and lower HESTAI_INTAKE_MAX_OUTPUT_TOKENS if the current max "
+                "output tokens budget is higher than needed."
             ),
             tokens=consumed,
             cost=billed_cost,
