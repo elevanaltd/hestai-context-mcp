@@ -107,6 +107,23 @@ class TestRatifyText:
         result = validate_octave_content(Path("/tmp"), out)
         assert result.valid, result.errors
 
+    def test_fallback_injects_after_status_when_authored_at_absent(self):
+        # Defensive branch: AUTHORED_AT is a required field, but if a malformed
+        # record lacks it the injection anchors to the flipped STATUS line
+        # instead of silently dropping the metadata.
+        no_authored = _PROPOSED.replace('  AUTHORED_AT::"2026-06-22T00:00:00Z"\n', "")
+        out, changed = ratify_decision.ratify_text(
+            no_authored, reviewer="alice", timestamp="2026-06-22T12:00:00Z"
+        )
+        assert changed is True
+        assert "  STATUS::RATIFIED\n" in out
+        assert '  RATIFIED_BY::"human:operator<alice>"\n' in out
+        assert '  RATIFIED_AT::"2026-06-22T12:00:00Z"\n' in out
+        # The fields land immediately after the STATUS line (the fallback anchor).
+        i_status = out.index("  STATUS::RATIFIED")
+        i_by = out.index("RATIFIED_BY::")
+        assert i_status < i_by
+
 
 class TestRatifyDirectory:
     def test_ratifies_proposed_files_and_reports(self, tmp_path):
@@ -125,3 +142,31 @@ class TestRatifyDirectory:
         assert "STATUS::RATIFIED" in (d / "a.oct.md").read_text()
         # b was already ratified -> not rewritten.
         assert (d / "b.oct.md").read_text().count("RATIFIED_BY::") == 0
+
+    def test_ratifies_multiple_proposed_files_sorted(self, tmp_path):
+        d = tmp_path / ".hestai" / "decisions"
+        d.mkdir(parents=True)
+        # Two PROPOSED records (distinct tokens) + one already RATIFIED.
+        (d / "two.oct.md").write_text(
+            _PROPOSED.replace("HO-TEST-EXAMPLE-20260622", "HO-TEST-TWO-20260622"),
+            encoding="utf-8",
+        )
+        (d / "one.oct.md").write_text(
+            _PROPOSED.replace("HO-TEST-EXAMPLE-20260622", "HO-TEST-ONE-20260622"),
+            encoding="utf-8",
+        )
+        (d / "done.oct.md").write_text(
+            _PROPOSED.replace("STATUS::PROPOSED", "STATUS::RATIFIED"), encoding="utf-8"
+        )
+
+        changed = ratify_decision.ratify_directory(
+            d, reviewer="alice", timestamp="2026-06-22T12:00:00Z"
+        )
+
+        # Both PROPOSED files ratified, returned in sorted order; the
+        # already-RATIFIED file is untouched.
+        assert changed == [d / "one.oct.md", d / "two.oct.md"]
+        for name in ("one.oct.md", "two.oct.md"):
+            body = (d / name).read_text()
+            assert "  STATUS::RATIFIED\n" in body
+            assert body.count("RATIFIED_BY::") == 1
