@@ -238,20 +238,26 @@ def _stamp_human_adr_ref(octave_content: str, token: str) -> str:
     lines = octave_content.splitlines(keepends=True)
     stamp_line = f'  HUMAN_ADR_REF::"{token}"\n'
 
-    found_idx = -1
-    for idx, line in enumerate(lines):
-        if "HUMAN_ADR_REF::" in line:
-            found_idx = idx
-            break
+    matching_indices = [
+        idx for idx, line in enumerate(lines) if line.lstrip().startswith("HUMAN_ADR_REF::")
+    ]
 
-    if found_idx != -1:
-        lines[found_idx] = stamp_line
+    if len(matching_indices) > 1:
+        for idx in reversed(matching_indices):
+            lines.pop(idx)
+        for idx, line in enumerate(lines):
+            if line.strip() == "META:":
+                lines.insert(idx + 1, stamp_line)
+                return "".join(lines)
+    elif len(matching_indices) == 1:
+        lines[matching_indices[0]] = stamp_line
         return "".join(lines)
+    else:
+        for idx, line in enumerate(lines):
+            if line.strip() == "META:":
+                lines.insert(idx + 1, stamp_line)
+                return "".join(lines)
 
-    for idx, line in enumerate(lines):
-        if line.strip() == "META:":
-            lines.insert(idx + 1, stamp_line)
-            return "".join(lines)
     # No META: header found (malformed record) — return unchanged rather than
     # corrupt the document; Gate-A re-validation downstream will surface it.
     return octave_content

@@ -163,6 +163,55 @@ class TestStampHumanAdrRef:
         # And the reasoning-density guard is unaffected (bytecode intact).
         assert not any("words (max" in e for e in result.errors)
 
+    def test_stamp_preserves_decision_containing_substring(self) -> None:
+        # (a) BYTECODE-PRESERVE (the bug): an AGR whose DECISION value contains the literal HUMAN_ADR_REF::
+        octave_with_substring = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f'  TOKEN::"{_TOKEN}"\n'
+            "  STATUS::PROPOSED\n"
+            "  TIER::OPERATIONAL\n"
+            '  DECISION::"adopt the engine-side HUMAN_ADR_REF:: stamp ∴ deterministic link"\n'
+            '  BECAUSE::"Single leaked credential ⇌ security incident → fail closed."\n'
+            '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
+            "===END===\n"
+        )
+        stamped = _stamp_human_adr_ref(octave_with_substring, _TOKEN)
+        # Verify the DECISION line is completely unchanged
+        assert (
+            '  DECISION::"adopt the engine-side HUMAN_ADR_REF:: stamp ∴ deterministic link"\n'
+            in stamped
+        )
+        # Verify a separate correct HUMAN_ADR_REF META line is present (after META:)
+        assert f'  HUMAN_ADR_REF::"{_TOKEN}"\n' in stamped
+        assert stamped.count("HUMAN_ADR_REF::") == 2
+
+    def test_stamp_collapses_multiple_pre_existing_refs(self) -> None:
+        # (b) MULTI-LINE: an AGR with TWO pre-existing HUMAN_ADR_REF lines
+        octave_with_multi = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f'  TOKEN::"{_TOKEN}"\n'
+            '  HUMAN_ADR_REF::"HO-WRONG-STALE-ONE-20260601"\n'
+            "  STATUS::PROPOSED\n"
+            '  HUMAN_ADR_REF::"HO-WRONG-STALE-TWO-20260601"\n'
+            "  TIER::OPERATIONAL\n"
+            '  DECISION::"Adopt fail-closed redaction on archive write."\n'
+            '  BECAUSE::"Single leaked credential ⇌ security incident → fail closed."\n'
+            '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
+            "===END===\n"
+        )
+        stamped = _stamp_human_adr_ref(octave_with_multi, _TOKEN)
+        # Verify exactly one HUMAN_ADR_REF line remains and has the correct token
+        assert f'  HUMAN_ADR_REF::"{_TOKEN}"\n' in stamped
+        assert "HO-WRONG-STALE-ONE-20260601" not in stamped
+        assert "HO-WRONG-STALE-TWO-20260601" not in stamped
+        assert stamped.count("HUMAN_ADR_REF::") == 1
+
 
 class TestLinkerDualWrite:
     def test_adr_prose_writes_verbatim_doc(self, tmp_path: Path) -> None:
