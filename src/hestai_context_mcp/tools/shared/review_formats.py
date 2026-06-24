@@ -70,7 +70,16 @@ def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     # Valid positions: actual start of line (with optional whitespace) or
     # after a markdown table pipe character.
     prefix_re = re.compile(rf"(?:^|(?<=\|))\s*{re.escape(prefix)}\b", re.MULTILINE | re.IGNORECASE)
-    keyword_re = re.compile(rf"\b{re.escape(keyword)}\b", re.IGNORECASE)
+    # Verdict-synonym tolerance: treat the canonical APPROVED keyword as the
+    # conjugation family APPROVE(D|S)? so a table cell reading "APPROVE" or
+    # "APPROVES" clears the gate exactly as "APPROVED" does (regression:
+    # elevana-studio PR #1257 verdict-summary table). Word boundaries are
+    # preserved (\bAPPROVE(?:D|S)?\b), so "APPROVEMENT" still does NOT match,
+    # and only the APPROVED family is widened — GO/REVIEWED/SELF-REVIEWED
+    # callers pass other keywords and are unaffected. The deliberately-strict
+    # anti-spoof path has_crs_model_approval() is intentionally NOT widened.
+    keyword_pattern = r"APPROVE(?:D|S)?" if keyword == "APPROVED" else re.escape(keyword)
+    keyword_re = re.compile(rf"\b{keyword_pattern}\b", re.IGNORECASE)
     # Strip markdown heading markers (##, ###, etc.) per-line so agents that
     # write '## TMG APPROVED ✅' are accepted alongside the canonical format.
     heading_re = re.compile(r"^\s*#{1,6}\s*")
