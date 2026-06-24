@@ -201,6 +201,101 @@ class TestCompressionContract:
         assert marker not in ctx.prompt
 
 
+class TestBytecodeFewShotAndOperators:
+    """#111 residual: the contract must (a) name the full ratified operator set
+    (→ ⇌ ∴ ⊕) and (b) carry a telegraphic verbose→bytecode worked example.
+
+    GAP-A: the ``∴`` (therefore) operator was missing from the contract's
+    operator list while the Gate-A guard's own remediation text already cites it
+    (type_checker.py) — a contract/guard inconsistency.
+    GAP-B: the issue asked for a worked BEFORE (verbose prose) → AFTER (flat
+    ≤40-word compressed-OCTAVE) one-shot; the contract described the rules but
+    shipped no example. Both poles are test-verified against the real Gate-A
+    guard: the BEFORE DECISION genuinely FAILS the ≤40-word guard (the "REJECTED"
+    label is literally true), and the AFTER DECISION/BECAUSE genuinely PASS.
+    """
+
+    def test_prompt_names_therefore_operator(self, tmp_path: Path) -> None:
+        # GAP-A: ∴ (therefore) joins the ratified operator set (→ ⇌ ∴ ⊕).
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        assert "∴" in ctx.prompt
+
+    def test_prompt_carries_verbose_to_bytecode_fewshot(self, tmp_path: Path) -> None:
+        # GAP-B: a stable, distinctive few-shot marker must be present so the
+        # model sees a worked verbose→bytecode transformation, not just rules.
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        # The example label (the JIT prompt is deterministic; this is a pure
+        # prompt-contains assertion, no AI call).
+        assert "EXAMPLE (verbose prose → flat bytecode)" in ctx.prompt
+        # And both poles of the worked transform are present.
+        assert "BEFORE" in ctx.prompt and "AFTER" in ctx.prompt
+
+    @staticmethod
+    def _pole_field_line(prompt: str, pole: str, field_name: str) -> str | None:
+        """Return the ``field_name::`` line from one few-shot pole's segment.
+
+        The prompt carries both poles; each ``DECISION::``/``BECAUSE::`` value is a
+        single physical line. We slice the prompt to the requested pole's segment
+        (BEFORE = between the BEFORE and AFTER labels; AFTER = from the AFTER label
+        on) so the BEFORE and AFTER demonstration lines are never confused. The
+        returned line is fed to the guard exactly as ``_extract_meta_fields``
+        (``^\\s*KEY::value$``) would parse it.
+        """
+        if pole == "BEFORE":
+            segment = prompt.split("BEFORE", 1)[1].split("AFTER", 1)[0]
+        else:
+            segment = prompt.split("AFTER", 1)[1]
+        return next(
+            (ln for ln in segment.splitlines() if ln.lstrip().startswith(f"{field_name}::")),
+            None,
+        )
+
+    def test_fewshot_after_lines_pass_the_gate_a_guard(self, tmp_path: Path) -> None:
+        # The few-shot we TEACH must itself pass the guard it teaches: extract the
+        # AFTER DECISION::/BECAUSE:: lines from the assembled prompt and run them
+        # through the real Gate-A reasoning-density guard. Pure, no AI call.
+        from hestai_context_mcp.tools.governance.type_checker import (
+            REASONING_FIELDS,
+            _check_reasoning_density,
+        )
+
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+
+        for field_name in REASONING_FIELDS:
+            line = self._pole_field_line(ctx.prompt, "AFTER", field_name)
+            assert line is not None, f"few-shot AFTER must demonstrate a {field_name}:: line"
+            errors: list[str] = []
+            _check_reasoning_density(line, errors)
+            assert errors == [], f"taught AFTER {field_name} example violates Gate-A: {errors}"
+
+    def test_fewshot_before_decision_fails_the_gate_a_guard(self, tmp_path: Path) -> None:
+        # Both poles are now test-verified: the BEFORE DECISION value is genuinely
+        # GUARD-FAILING (>40-word multi-sentence prose), so the "REJECTED" label is
+        # literally true under the Gate-A ≤40-word guard — not merely a style claim.
+        # Pure, no AI call.
+        from hestai_context_mcp.tools.governance.type_checker import (
+            MAX_REASONING_WORDS,
+            _check_reasoning_density,
+        )
+
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+
+        before_line = self._pole_field_line(ctx.prompt, "BEFORE", "DECISION")
+        assert before_line is not None, "few-shot BEFORE must demonstrate a DECISION:: line"
+        errors: list[str] = []
+        _check_reasoning_density(before_line, errors)
+        # The guard must reject the BEFORE pole, and specifically on word count so
+        # the REJECTED label maps to the ≤40-word rule the example teaches.
+        assert errors, "few-shot BEFORE DECISION must FAIL the Gate-A guard (REJECTED pole)"
+        assert any(
+            f"max {MAX_REASONING_WORDS}" in e for e in errors
+        ), f"BEFORE must fail on the ≤{MAX_REASONING_WORDS}-word rule; got: {errors}"
+
+
 class TestMetadataFidelityContract:
     """The prompt must forbid fabricating governance provenance.
 
