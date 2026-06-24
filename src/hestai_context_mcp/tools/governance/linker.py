@@ -205,24 +205,74 @@ def _write_file(target_path: Path, content: str) -> str | None:
         return f"Failed to write {target_path}: {exc}"
 
 
+# ---------------------------------------------------------------------------
+# Two-birds: ADR doc placement + deterministic HUMAN_ADR_REF stamp (#112)
+# ---------------------------------------------------------------------------
+
+
+def _compute_adr_path(working_dir: Path, token: str) -> Path:
+    """Compute the verbatim-ADR doc path for a token: docs/adr/<TOKEN>.md.
+
+    The doc is named by the AGR's OWN ``token`` so the greppable
+    ``HUMAN_ADR_REF::<token>`` in the AGR points straight at it (self-token
+    linkage, #112). ``token`` is ``_TOKEN_FORMAT_RE``-validated upstream (no
+    ``/`` and no ``.``), so the join cannot introduce a path separator; the
+    caller still applies the path-traversal guard as defence-in-depth.
+    """
+    return working_dir / "docs" / "adr" / f"{token}.md"
+
+
+def _stamp_human_adr_ref(octave_content: str, token: str) -> str:
+    """Return ``octave_content`` with a ``HUMAN_ADR_REF::"<token>"`` META line.
+
+    Deterministic, engine-side stamp (#112): inserted as a SINGLE flat META line
+    immediately after the ``META:`` header so it never touches the DECISION /
+    BECAUSE bytecode (the ≤40-word reasoning-density guard is unaffected). The
+    value is the record's OWN token (token-form #11 — cross-repo survivable, no
+    filesystem resolution at Gate A).
+
+    Idempotent: if a ``HUMAN_ADR_REF::`` line is already present the content is
+    returned unchanged (no second line, no duplication).
+    """
+    if "HUMAN_ADR_REF::" in octave_content:
+        return octave_content
+
+    lines = octave_content.splitlines(keepends=True)
+    stamp_line = f'  HUMAN_ADR_REF::"{token}"\n'
+    for idx, line in enumerate(lines):
+        if line.strip() == "META:":
+            lines.insert(idx + 1, stamp_line)
+            return "".join(lines)
+    # No META: header found (malformed record) — return unchanged rather than
+    # corrupt the document; Gate-A re-validation downstream will surface it.
+    return octave_content
+
+
 def _git_add_and_commit(
     working_dir: Path,
     file_path: Path,
     manifest_path: Path,
     commit_message: str,
+    extra_paths: list[Path] | None = None,
 ) -> str | None:
-    """Stage the governance file + MANIFEST and commit.
+    """Stage the governance file (+ any ``extra_paths``) + MANIFEST and commit.
+
+    ``extra_paths`` (#112) carries the two-birds ADR doc so the AGR and its
+    verbatim ADR land in ONE commit. Each extra path is staged BEFORE the commit;
+    a failed ``git add`` on any of them aborts with a structured error (no commit
+    with a missing file).
 
     Returns an error string on failure, None on success.
     """
-    # Stage the governance file
-    try:
-        rel = file_path.relative_to(working_dir)
-    except ValueError:
-        rel = file_path
-    code, _, stderr = _run_git(["add", str(rel)], working_dir)
-    if code != 0:
-        return f"git add failed for {rel}: {stderr}"
+    # Stage the governance file (and any companion files, e.g. the ADR doc).
+    for path in [file_path, *(extra_paths or [])]:
+        try:
+            rel = path.relative_to(working_dir)
+        except ValueError:
+            rel = path
+        code, _, stderr = _run_git(["add", str(rel)], working_dir)
+        if code != 0:
+            return f"git add failed for {rel}: {stderr}"
 
     # Stage MANIFEST if it was written
     if manifest_path.exists():
@@ -305,19 +355,27 @@ def run_linker(
     validation: ValidationResult,
     octave_content: str,
     dry_run: bool,
+    adr_prose: str | None = None,
 ) -> dict[str, Any]:
     """Execute the Git Orchestrator for a validated governance artifact.
 
     Args:
         working_dir: Project root directory.
         validation: Successful ValidationResult from type_checker.
-        octave_content: Raw OCTAVE document text to commit.
+        octave_content: Raw OCTAVE document text to commit. When ``adr_prose`` is
+            supplied this is expected to ALREADY carry the deterministic
+            ``HUMAN_ADR_REF::<token>`` stamp (the caller stamps + re-validates).
         dry_run: If True, skip all git/file operations and return
                  what WOULD happen without touching disk or git.
+        adr_prose: Two-birds (#112). When non-None, the VERBATIM prose is
+            dumb-written to ``docs/adr/<token>.md`` (no AI, no OCTAVE, no marker)
+            and committed ALONGSIDE the AGR in the SAME branch/commit/PR. When
+            None the behaviour is byte-stable AGR-only.
 
     Returns:
-        Dict with keys: token, card_type, target_path, branch,
-        pr_url, error, dry_run.
+        Dict with keys: token, card_type, target_path, branch, pr_url, error,
+        dry_run, staged_uncommitted, and ``adr_target_path`` (the
+        ``docs/adr/<token>.md`` path when ``adr_prose`` is supplied, else None).
     """
     token = validation.token or ""
     card_type = validation.card_type or ""
@@ -329,11 +387,16 @@ def run_linker(
     except ValueError:
         target_path_str = str(target_path) if target_path else None
 
+    # Two-birds ADR doc path (relative form for the structured return).
+    adr_target_path = _compute_adr_path(working_dir, token) if adr_prose is not None else None
+    adr_target_path_str = str(adr_target_path.relative_to(working_dir)) if adr_target_path else None
+
     if dry_run:
         return {
             "token": token,
             "card_type": card_type,
             "target_path": target_path_str,
+            "adr_target_path": adr_target_path_str,
             "branch": branch_name,
             "pr_url": None,
             "error": None,
@@ -355,6 +418,7 @@ def run_linker(
             "token": token,
             "card_type": card_type,
             "target_path": target_path_str,
+            "adr_target_path": adr_target_path_str,
             "branch": None,
             "pr_url": None,
             "error": preflight_err,
@@ -370,6 +434,7 @@ def run_linker(
             "token": token,
             "card_type": card_type,
             "target_path": target_path_str,
+            "adr_target_path": adr_target_path_str,
             "branch": branch_name,
             "pr_url": None,
             "error": err,
@@ -385,6 +450,7 @@ def run_linker(
             "token": token,
             "card_type": card_type,
             "target_path": None,
+            "adr_target_path": adr_target_path_str,
             "branch": branch_name,
             "pr_url": None,
             "error": "target_path is None -- cannot write file",
@@ -392,30 +458,44 @@ def run_linker(
             "dry_run": False,
         }
 
-    # Bug 4: path traversal guard -- verify target_path is inside working_dir
-    try:
-        target_path.resolve().relative_to(working_dir.resolve())
-    except (ValueError, RuntimeError, OSError):
-        # Branch WAS created (surfaced via ``branch``) but the write was rejected
-        # before any ``git add``, so nothing is staged-uncommitted (contract:
-        # False); the branch-exists recovery is conveyed by ``branch`` + ``error``.
-        return {
-            "token": token,
-            "card_type": card_type,
-            "target_path": target_path_str,
-            "branch": branch_name,
-            "pr_url": None,
-            "error": (
-                f"target_path {target_path} is outside working_dir {working_dir} "
-                "-- path traversal rejected"
-            ),
-            "staged_uncommitted": False,
-            "dry_run": False,
-        }
+    # Bug 4: path traversal guard -- verify target_path is inside working_dir.
+    # #112: the SAME guard is applied to the two-birds ADR path so a crafted
+    # token/symlink cannot escape the repo. Both paths are checked here, BEFORE
+    # any write, so a rejection writes/stages nothing.
+    guard_paths = [target_path, *([adr_target_path] if adr_target_path is not None else [])]
+    for guarded in guard_paths:
+        try:
+            guarded.resolve().relative_to(working_dir.resolve())
+        except (ValueError, RuntimeError, OSError):
+            # Branch WAS created (surfaced via ``branch``) but the write was
+            # rejected before any ``git add``, so nothing is staged-uncommitted
+            # (contract: False); recovery is conveyed by ``branch`` + ``error``.
+            return {
+                "token": token,
+                "card_type": card_type,
+                "target_path": target_path_str,
+                "adr_target_path": adr_target_path_str,
+                "branch": branch_name,
+                "pr_url": None,
+                "error": (
+                    f"target_path {guarded} is outside working_dir {working_dir} "
+                    "-- path traversal rejected"
+                ),
+                "staged_uncommitted": False,
+                "dry_run": False,
+            }
 
     err = _write_file(target_path, octave_content)
     if err:
         errors.append(err)
+
+    # 2b. Two-birds (#112): dumb-write the VERBATIM ADR prose alongside the AGR.
+    #     No AI, no OCTAVE, no provenance marker. Guarded above; written only
+    #     when the AGR write succeeded so we never leave an orphan ADR doc.
+    if not errors and adr_prose is not None and adr_target_path is not None:
+        err = _write_file(adr_target_path, adr_prose)
+        if err:
+            errors.append(err)
 
     # 3. Update MANIFEST (best-effort -- failure is non-fatal, Bug 9 fix)
     if not errors:
@@ -437,7 +517,10 @@ def run_linker(
     # staged), is NOT staged-uncommitted.
     commit_failed = False
     if not errors:
-        err = _git_add_and_commit(working_dir, target_path, manifest_path, commit_message)
+        extra_paths = [adr_target_path] if adr_target_path is not None else None
+        err = _git_add_and_commit(
+            working_dir, target_path, manifest_path, commit_message, extra_paths=extra_paths
+        )
         if err:
             errors.append(err)
             commit_failed = True
@@ -473,6 +556,7 @@ def run_linker(
         "token": token,
         "card_type": card_type,
         "target_path": target_path_str,
+        "adr_target_path": adr_target_path_str,
         "branch": branch_name,
         "pr_url": pr_url,
         "error": error_str,

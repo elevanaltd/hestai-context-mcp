@@ -226,6 +226,65 @@ class TestRealValidationSignalAndFailClosed:
         assert len(spy_linker.calls) == 1
 
 
+class TestTwoBirdsStampRevalidationAbort:
+    """#112 hallucination immunity: if the deterministic HUMAN_ADR_REF stamp ever
+
+    makes the AGR FAIL Gate-A re-validation, ``run_intake_to_pr`` MUST abort
+    BEFORE the linker -- no write, no PR, no ADR doc. CRS/CIV verified this at
+    runtime; this pins the production abort branch against regression.
+
+    The test drives the REAL ``run_intake_to_pr`` abort branch (only the seams
+    around it are stubbed): the pipeline returns a clean success, but the
+    post-stamp ``validate_octave_content`` is forced to return an invalid
+    result, and the linker is monkeypatched to RAISE so any call is a hard
+    failure. RED-if-bypassed: were the abort removed, control would reach the
+    raising linker and the test would error instead of asserting the structured
+    abort.
+    """
+
+    async def test_stamp_revalidation_failure_aborts_before_linker(
+        self, tmp_path: Path, stub_pipeline, monkeypatch
+    ) -> None:
+        # Linker MUST NOT be reached: make any invocation an explicit failure.
+        def _boom_linker(**kwargs: Any) -> dict[str, Any]:
+            raise AssertionError(
+                "run_linker was called despite a failed stamp re-validation "
+                "(hallucination-immunity abort bypassed)"
+            )
+
+        monkeypatch.setattr(mod, "run_linker", _boom_linker, raising=True)
+
+        # Force the POST-STAMP Gate-A re-validation to FAIL. stub_pipeline has
+        # already replaced run_intake_pipeline, so this is the ONLY call to
+        # validate_octave_content on this path -- the stamped-record check.
+        def _invalid_revalidation(working_dir: Path, content: str) -> ValidationResult:
+            return ValidationResult(
+                valid=False,
+                errors=["forced stamp re-validation failure (test)"],
+                token=RECORD_TOKEN,
+                card_type="DECISION_RECORD",
+                target_path=None,
+            )
+
+        monkeypatch.setattr(mod, "validate_octave_content", _invalid_revalidation, raising=True)
+
+        stub_pipeline(_pipeline_ok())
+        result = await run_intake_to_pr(tmp_path, _ctx(), dry_run=False, write_adr=True)
+
+        # Structured abort (PROD I4), not a raise, not a silent write.
+        assert result["success"] is False
+        # The error names the stamp re-validation failure.
+        joined = " ".join(result["validation_errors"]).lower()
+        assert "human_adr_ref" in joined and "re-validation" in joined
+        # No ADR doc target, no branch, no PR.
+        assert result["adr_target_path"] is None
+        assert result["branch"] is None
+        assert result["pr_url"] is None
+        # Nothing written to disk on either surface.
+        assert not (tmp_path / "docs" / "adr").exists()
+        assert not (tmp_path / ".hestai" / "decisions").exists()
+
+
 class TestHumanPrimacy:
     def test_linker_argv_has_no_auto_merge(self) -> None:
         # Structural Human-Primacy guard: the reused linker opens a PR and never
