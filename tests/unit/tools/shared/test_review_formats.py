@@ -151,3 +151,113 @@ class TestVerdictSynonymTolerance:
         assert not has_crs_model_approval(["CRS (Gemini) APPROVE: looks good"], "Gemini")
         # Canonical APPROVED still clears the model path.
         assert has_crs_model_approval(["CRS (Gemini) APPROVED: looks good"], "Gemini")
+
+
+@pytest.mark.unit
+class TestRoleAnchoredNegationGuard:
+    """Role-anchored NEGATED / conditional verdicts must NOT clear the gate.
+
+    Trust-model defect (PR #129): the matcher locates the role prefix
+    (line-start or after a ``|``) and then accepts the verdict verb ANYWHERE
+    later on the same line. Idiomatic NON-approvals therefore wrongly cleared
+    the gate -- a blocking reviewer's own words satisfied it. The fix rejects a
+    line when a negation/hedge token sits between the role prefix and the
+    verdict verb, WITHOUT breaking the legitimate model-in-its-own-cell table
+    formats (where only a benign model name / tick / pipes sit between).
+    """
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "CRS will not approve this",
+            "CRS cannot approve until tests pass",
+            "CRS does not approve",
+            "| CRS | Gemini | does not approve |",
+            "CRS: I would approve if the tests passed",
+        ],
+    )
+    def test_negated_or_conditional_crs_verdict_does_not_clear(self, line: str) -> None:
+        """A role-anchored negated/conditional verdict must NOT clear the gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_approval
+
+        assert not has_crs_approval([line])
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "CRS will not approve this",
+            "CRS cannot approve until tests pass",
+            "CRS does not approve",
+            "| CRS | Gemini | does not approve |",
+            "CRS: I would approve if the tests passed",
+        ],
+    )
+    def test_negated_or_conditional_via_pattern_does_not_match(self, line: str) -> None:
+        """matches_approval_pattern rejects the same role-anchored non-approvals."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern(line, "CRS", "APPROVED")
+
+    @pytest.mark.parametrize(
+        "checker_name",
+        [
+            "has_crs_approval",
+            "has_ce_approval",
+            "has_tmg_approval",
+            "has_civ_approval",
+            "has_pe_approval",
+            "has_sr_approval",
+            "has_gr_approval",
+        ],
+    )
+    def test_negated_verdict_rejected_for_all_roles(self, checker_name: str) -> None:
+        """'<ROLE> does not approve' must NOT clear the gate for any role."""
+        import hestai_context_mcp.tools.shared.review_formats as rf
+
+        checker = getattr(rf, checker_name)
+        prefix = "GR" if checker_name == "has_gr_approval" else checker_name.split("_")[1].upper()
+        assert not checker([f"{prefix} does not approve"])
+
+    # --- Positive acceptance set: legitimate formats MUST still clear ---
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "CRS APPROVED: looks good",
+            "CRS APPROVE: looks good",
+            "CRS APPROVES: looks good",
+            "CRS (Gemini) APPROVED",
+            "CRS (Gemini): APPROVED",
+            "| **CRS** (code-review-specialist) | Gemini | ✅ APPROVE | notes |",
+            "| CRS | Gemini | **APPROVED** |",
+        ],
+    )
+    def test_legitimate_crs_formats_still_clear(self, line: str) -> None:
+        """The negation guard must not break any legitimate CRS approval format."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_approval
+
+        assert has_crs_approval([line])
+
+    def test_markdown_heading_approval_still_clears(self) -> None:
+        """'## TMG APPROVED ✅' heading form must still clear after the guard."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert matches_approval_pattern("## TMG APPROVED ✅", "TMG", "APPROVED")
+
+    def test_model_in_own_column_table_preserved(self) -> None:
+        """Model-in-its-own-pipe-cell table format is not a negation and clears."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert matches_approval_pattern("| CRS | Gemini | **APPROVED** |", "CRS", "APPROVED")
+
+    def test_benign_assessment_after_verdict_still_clears(self) -> None:
+        """A hedge word AFTER the verdict (in the assessment) must not block it.
+
+        The guard only inspects the gap BETWEEN the role prefix and the verdict
+        verb; words like 'if'/'would' in the trailing assessment are benign.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert matches_approval_pattern(
+            "CRS APPROVED: would have blocked if tests failed, but they pass", "CRS", "APPROVED"
+        )
