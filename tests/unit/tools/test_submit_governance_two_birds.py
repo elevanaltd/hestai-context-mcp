@@ -109,6 +109,20 @@ class TestWriteAdrIsProseOnly:
         assert result["success"] is False
         assert result["validation_errors"]
 
+    def test_error_path_includes_adr_target_path_none(self, tmp_path: Path) -> None:
+        # F2 (P2) error-path return includes adr_target_path is None
+        result = asyncio.run(
+            submit_governance(
+                working_dir=str(tmp_path),
+                octave_content=_VALID_OCTAVE,
+                write_adr=True,
+                dry_run=True,
+            )
+        )
+        assert result["success"] is False
+        assert "adr_target_path" in result
+        assert result["adr_target_path"] is None
+
 
 class TestWriteAdrForwarding:
     def test_write_adr_true_forwarded_to_intake(self, tmp_path: Path, stub_intake) -> None:

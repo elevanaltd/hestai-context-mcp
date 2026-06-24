@@ -66,6 +66,7 @@ def _empty_result(
     octave_validation: dict[str, Any] | None = None,
     *,
     real_validation_available: bool = True,
+    adr_target_path: str | None = None,
 ) -> dict[str, Any]:
     """Return the I4-conformant failure shape with all fields present.
 
@@ -79,6 +80,7 @@ def _empty_result(
         "token": None,
         "card_type": None,
         "target_path": None,
+        "adr_target_path": adr_target_path,
         "branch": None,
         "pr_url": None,
         "validation_errors": errors,

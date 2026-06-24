@@ -231,14 +231,23 @@ def _stamp_human_adr_ref(octave_content: str, token: str) -> str:
     value is the record's OWN token (token-form #11 — cross-repo survivable, no
     filesystem resolution at Gate A).
 
-    Idempotent: if a ``HUMAN_ADR_REF::`` line is already present the content is
-    returned unchanged (no second line, no duplication).
+    Idempotent: if a ``HUMAN_ADR_REF::`` line is already present, its value is
+    overwritten to the correct token (preserving exactly one line). If absent,
+    it is inserted immediately after the ``META:`` header.
     """
-    if "HUMAN_ADR_REF::" in octave_content:
-        return octave_content
-
     lines = octave_content.splitlines(keepends=True)
     stamp_line = f'  HUMAN_ADR_REF::"{token}"\n'
+
+    found_idx = -1
+    for idx, line in enumerate(lines):
+        if "HUMAN_ADR_REF::" in line:
+            found_idx = idx
+            break
+
+    if found_idx != -1:
+        lines[found_idx] = stamp_line
+        return "".join(lines)
+
     for idx, line in enumerate(lines):
         if line.strip() == "META:":
             lines.insert(idx + 1, stamp_line)

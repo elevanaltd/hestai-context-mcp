@@ -102,6 +102,59 @@ class TestStampHumanAdrRef:
         assert once == twice
         assert twice.count("HUMAN_ADR_REF::") == 1
 
+    def test_stamp_replaces_stale_human_adr_ref(self) -> None:
+        stale_octave = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f'  TOKEN::"{_TOKEN}"\n'
+            '  HUMAN_ADR_REF::"HO-WRONG-STALE-VALUE-20200101"\n'
+            "  STATUS::PROPOSED\n"
+            "  TIER::OPERATIONAL\n"
+            '  DECISION::"Adopt fail-closed redaction on archive write."\n'
+            '  BECAUSE::"Single leaked credential ⇌ security incident → fail closed."\n'
+            '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
+            "===END===\n"
+        )
+        stamped = _stamp_human_adr_ref(stale_octave, _TOKEN)
+        assert f'HUMAN_ADR_REF::"{_TOKEN}"' in stamped
+        assert "HO-WRONG-STALE-VALUE-20200101" not in stamped
+        assert stamped.count("HUMAN_ADR_REF::") == 1
+        assert '  DECISION::"Adopt fail-closed redaction on archive write."' in stamped
+
+    def test_stamp_correct_present_is_unchanged(self) -> None:
+        correct_octave = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            '  VERSION::"1.0"\n'
+            f'  TOKEN::"{_TOKEN}"\n'
+            f'  HUMAN_ADR_REF::"{_TOKEN}"\n'
+            "  STATUS::PROPOSED\n"
+            "  TIER::OPERATIONAL\n"
+            '  DECISION::"Adopt fail-closed redaction on archive write."\n'
+            '  BECAUSE::"Single leaked credential ⇌ security incident → fail closed."\n'
+            '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
+            "===END===\n"
+        )
+        stamped = _stamp_human_adr_ref(correct_octave, _TOKEN)
+        assert stamped == correct_octave
+
+    def test_stamp_none_present_inserted_after_meta(self) -> None:
+        stamped = _stamp_human_adr_ref(_AGR_OCTAVE, _TOKEN)
+        lines = stamped.splitlines()
+        meta_idx = -1
+        ref_idx = -1
+        for idx, line in enumerate(lines):
+            if "META:" in line:
+                meta_idx = idx
+            if "HUMAN_ADR_REF::" in line:
+                ref_idx = idx
+        assert meta_idx != -1
+        assert ref_idx != -1
+        assert ref_idx == meta_idx + 1
+
     def test_stamped_agr_still_passes_gate_a(self, tmp_path: Path) -> None:
         # RED #4: the stamped AGR (token-form HUMAN_ADR_REF) still passes Gate A.
         stamped = _stamp_human_adr_ref(_AGR_OCTAVE, _TOKEN)
