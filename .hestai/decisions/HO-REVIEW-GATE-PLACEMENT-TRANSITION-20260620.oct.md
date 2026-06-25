@@ -3,11 +3,13 @@ META:
   TYPE::DECISION_RECORD
   VERSION::"1.0"
   TOKEN::HO-REVIEW-GATE-PLACEMENT-TRANSITION-20260620
-  STATUS::PROPOSED
+  STATUS::RATIFIED
   TIER::STRATEGIC
   COMPRESSION_TIER::CONSERVATIVE
   LOSS_PROFILE::"[preserve:prior_decision_context_and_superseded_relationship_and_inherited_P0_issues_and_PROD_I6_isolation,drop:narrative_history_of_HestAI_MCP_reorganization]"
   AUTHORED_AT::"2026-06-20T00:00:00Z"
+  RATIFIED_BY::"human:operator<shaunbuswell>"
+  RATIFIED_AT::"2026-06-25T00:00:00Z"
   ISSUE_REF::"repo:hestai-context-mcp#115"
   SUPERSEDES::["review-tool-placement"]
   SCOPE::"hestai-context-mcp"
