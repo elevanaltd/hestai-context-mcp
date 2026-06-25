@@ -210,6 +210,7 @@ class TestOctaveContentStage5:
             "token",
             "card_type",
             "target_path",
+            "adr_target_path",
             "branch",
             "pr_url",
             "validation_errors",

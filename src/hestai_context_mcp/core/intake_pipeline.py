@@ -41,7 +41,7 @@ from hestai_context_mcp.ports.octave_validator import (
     get_octave_validator,
 )
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
-from hestai_context_mcp.tools.governance.linker import run_linker
+from hestai_context_mcp.tools.governance.linker import _stamp_human_adr_ref, run_linker
 from hestai_context_mcp.tools.governance.type_checker import (
     ValidationResult,
     validate_octave_content,
@@ -283,6 +283,7 @@ async def run_intake_to_pr(
     dry_run: bool = False,
     max_output_tokens: int | None = None,
     max_cost_usd: float | None = None,
+    write_adr: bool = False,
 ) -> dict[str, Any]:
     """Stage 3 + Stage 4: validate prose->OCTAVE, then open a PR via the linker.
 
@@ -291,6 +292,15 @@ async def run_intake_to_pr(
     (Stage 4: branch->write->commit->PR). On abort, returns the structured
     failure and NEVER calls the linker — re-asserting hallucination immunity at
     the integration seam.
+
+    Two-birds (#112): when ``write_adr`` is True, after Stage 3 succeeds (the
+    TOKEN is now known) the engine DETERMINISTICALLY stamps
+    ``HUMAN_ADR_REF::<token>`` into the AGR's META block, RE-VALIDATES that the
+    stamped AGR still passes Gate A (token-form #11 — no fs resolution), and
+    passes both the stamped OCTAVE and the VERBATIM ``intake_context.prose_input``
+    to the linker, which dumb-writes ``docs/adr/<token>.md`` alongside the AGR in
+    ONE branch/commit/PR. The stamp is NOT trusted to the AI (it is engine-side,
+    post-validation) so the link is deterministic.
 
     Human Primacy (PROD::I3): ``run_linker`` only opens a PR; it never merges and
     never commits to main. No new git code is introduced here — the blocking
@@ -333,13 +343,50 @@ async def run_intake_to_pr(
         if require_real_validation:
             return _fail_closed_result(pipeline, dry_run)
 
+    # --- Two-birds (#112): deterministic HUMAN_ADR_REF stamp + ADR prose ---
+    # The validated OCTAVE and TOKEN are known here. When write_adr is set we
+    # stamp the AGR with HUMAN_ADR_REF::<token> (engine-side, NOT AI-echoed) and
+    # RE-VALIDATE that the stamped record still passes Gate A before the linker
+    # writes it — so a stamp can never smuggle an invalid record to disk. The
+    # verbatim prose becomes the ADR doc the linker dumb-writes alongside.
+    octave_to_link = pipeline["octave"]
+    adr_prose: str | None = None
+    if write_adr:
+        token = pipeline["validation"].token or ""
+        stamped = _stamp_human_adr_ref(octave_to_link, token)
+        restamped_validation = validate_octave_content(working_dir, stamped)
+        if not restamped_validation.valid:
+            # The stamp broke Gate A (should be impossible for token-form #11):
+            # abort BEFORE the linker — no write, no PR. Hallucination immunity.
+            return {
+                "success": False,
+                "token": token,
+                "card_type": pipeline["validation"].card_type,
+                "target_path": None,
+                "adr_target_path": None,
+                "branch": None,
+                "pr_url": None,
+                "validation_errors": [
+                    "HUMAN_ADR_REF stamp failed Gate-A re-validation: "
+                    + "; ".join(restamped_validation.errors)
+                ],
+                "octave_validation": None,
+                "real_validation_available": real_validation_available,
+                "octave": stamped,
+                "metrics": pipeline["metrics"],
+                "dry_run": dry_run,
+            }
+        octave_to_link = stamped
+        adr_prose = intake_context.prose_input
+
     loop = asyncio.get_running_loop()
     linker_fn = partial(
         run_linker,
         working_dir=working_dir,
         validation=pipeline["validation"],
-        octave_content=pipeline["octave"],
+        octave_content=octave_to_link,
         dry_run=dry_run,
+        adr_prose=adr_prose,
     )
     linker_output = await loop.run_in_executor(None, linker_fn)
 
@@ -349,6 +396,7 @@ async def run_intake_to_pr(
         "token": linker_output.get("token"),
         "card_type": linker_output.get("card_type"),
         "target_path": linker_output.get("target_path"),
+        "adr_target_path": linker_output.get("adr_target_path"),
         "branch": linker_output.get("branch"),
         "pr_url": linker_output.get("pr_url"),
         "validation_errors": [linker_error] if linker_error else [],
@@ -356,7 +404,9 @@ async def run_intake_to_pr(
         "real_validation_available": real_validation_available,
         # Surface the authored OCTAVE so the Stage-5 reviewer can read the exact
         # record that was PR'd (issue #77). Additive; ``None`` on the abort path.
-        "octave": pipeline["octave"],
+        # When write_adr stamped the record, this is the STAMPED OCTAVE actually
+        # written (so the reviewer reads exactly what was PR'd).
+        "octave": octave_to_link,
         "metrics": pipeline["metrics"],
         "dry_run": dry_run,
     }

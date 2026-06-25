@@ -66,6 +66,7 @@ def _empty_result(
     octave_validation: dict[str, Any] | None = None,
     *,
     real_validation_available: bool = True,
+    adr_target_path: str | None = None,
 ) -> dict[str, Any]:
     """Return the I4-conformant failure shape with all fields present.
 
@@ -79,6 +80,7 @@ def _empty_result(
         "token": None,
         "card_type": None,
         "target_path": None,
+        "adr_target_path": adr_target_path,
         "branch": None,
         "pr_url": None,
         "validation_errors": errors,
@@ -186,10 +188,19 @@ async def submit_governance(
     prose_input: str | None = None,
     dry_run: bool = False,
     review: bool = True,
+    write_adr: bool = False,
 ) -> dict[str, Any]:
     """Submit a governance artifact via OCTAVE content OR prose intent.
 
     EXACTLY ONE of ``octave_content`` / ``prose_input`` must be non-None.
+
+    ``write_adr`` (two-birds, #112) is PROSE-ONLY. When True (with
+    ``prose_input``) the natural-language prose IS the ADR source: the linker
+    dumb-writes the VERBATIM prose to ``docs/adr/<token>.md`` and the condensed
+    AGR carries a deterministically-stamped ``HUMAN_ADR_REF::<token>`` — depth +
+    condensed AGR in ONE call, ONE PR. ``write_adr`` with ``octave_content`` (or
+    no ``prose_input``) is a structured error: there is no natural prose to dump,
+    so ``octave_content`` stays AGR-only. Default False = AGR-only, byte-stable.
 
     ``octave_content`` mode (Gate A/B): regex sentinel check + real
     OctaveValidator + path placement + PR creation. Byte-stable vs post-#70 main.
@@ -237,8 +248,22 @@ async def submit_governance(
             ],
         )
 
+    # --- write_adr is PROSE-ONLY (#112) ---
+    # Exactly-one is satisfied here; prose_input is None ⇒ octave_content mode,
+    # which has no natural prose to dump verbatim into an ADR doc. Reject loudly
+    # rather than silently ignore the flag.
+    if write_adr and prose_input is None:
+        return _empty_result(
+            dry_run,
+            [
+                "ADR+AGR (write_adr=True) requires prose_input; octave_content is "
+                "AGR-only. Re-submit the decision as prose_input to author both the "
+                "verbatim ADR doc and the condensed AGR in one call."
+            ],
+        )
+
     if prose_input is not None:
-        return await _submit_prose_input(working_dir, prose_input, dry_run, review)
+        return await _submit_prose_input(working_dir, prose_input, dry_run, review, write_adr)
 
     # The EXACTLY-ONE-OF guard above guarantees octave_content is non-None here.
     assert octave_content is not None
@@ -278,6 +303,7 @@ async def _submit_prose_input(
     prose_input: str,
     dry_run: bool,
     review: bool,
+    write_adr: bool = False,
 ) -> dict[str, Any]:
     """Gate C prose mode: Stage 1 assemble -> Stage 2+3+4 via run_intake_to_pr.
 
@@ -286,6 +312,9 @@ async def _submit_prose_input(
     which rejoins the same validate->link tail as the octave_content path. On a
     successful real PR, Stage 5 reviews the GENERATED OCTAVE threaded out of
     ``run_intake_to_pr`` (issue #77).
+
+    ``write_adr`` (#112) is forwarded to ``run_intake_to_pr`` so the two-birds
+    path dumb-writes the verbatim ADR doc + stamps the AGR's HUMAN_ADR_REF.
     """
     loop = asyncio.get_running_loop()
     try:
@@ -294,7 +323,7 @@ async def _submit_prose_input(
         return _empty_result(dry_run, [str(exc)])
 
     intake_context = await loop.run_in_executor(None, assemble_intake_context, wd, prose_input)
-    result = await run_intake_to_pr(wd, intake_context, dry_run=dry_run)
+    result = await run_intake_to_pr(wd, intake_context, dry_run=dry_run, write_adr=write_adr)
     return await _maybe_review(result, result.get("octave"), dry_run, review, working_dir=str(wd))
 
 
@@ -400,6 +429,7 @@ async def _submit_octave_content(
         "token": linker_output.get("token"),
         "card_type": linker_output.get("card_type"),
         "target_path": linker_output.get("target_path"),
+        "adr_target_path": linker_output.get("adr_target_path"),
         "branch": linker_output.get("branch"),
         "pr_url": linker_output.get("pr_url"),
         "validation_errors": errors,
