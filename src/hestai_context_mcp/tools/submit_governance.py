@@ -429,6 +429,7 @@ async def _submit_octave_content(
         "token": linker_output.get("token"),
         "card_type": linker_output.get("card_type"),
         "target_path": linker_output.get("target_path"),
+        "adr_target_path": linker_output.get("adr_target_path"),
         "branch": linker_output.get("branch"),
         "pr_url": linker_output.get("pr_url"),
         "validation_errors": errors,
