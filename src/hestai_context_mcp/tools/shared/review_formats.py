@@ -29,6 +29,34 @@ _IL_APPROVED_KEYWORD = "SELF-REVIEWED"
 # --- HO uses REVIEWED keyword instead of APPROVED ---
 _HO_APPROVED_KEYWORD = "REVIEWED"
 
+# --- Negation / hedge guard (trust-model defect fix) ---
+# A role-anchored verdict only clears the gate when the span BETWEEN the role
+# prefix and the verdict verb is free of negation/conditional intent. Without
+# this guard the matcher accepted idiomatic NON-approvals -- e.g.
+# "CRS does not approve" or "CRS: I would approve if the tests passed" -- so a
+# blocking reviewer's own words wrongly cleared the gate (fail-open inversion).
+#
+# The guard inspects ONLY the gap between the role prefix and the verdict verb,
+# so benign trailing assessment text ("APPROVED: would have blocked if ...") is
+# unaffected, and the legitimate model-in-its-own-pipe-cell table formats
+# ("| CRS | Gemini | **APPROVED** |") still clear because a model name / tick /
+# pipe is not a negation token.
+#
+# NOTE: a denylist is inherently incomplete -- it cannot catch every phrasing of
+# refusal. It is chosen deliberately for its correctness/complexity trade-off:
+# it removes the verified false-clears while preserving every legitimate format.
+# The deliberately-strict anti-spoof path has_crs_model_approval() does NOT use
+# this matcher and is intentionally unchanged.
+_NEGATION_HEDGE_RE = re.compile(
+    r"\b(?:"
+    r"not|n't|cannot|can't|won't|wouldn't|shouldn't|couldn't|don't|doesn't|didn't|"
+    r"will\s+not|do\s+not|does\s+not|did\s+not|"
+    r"never|unable|unless|until|pending|blocked|reject|fail|"
+    r"if|would|should"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     """Check if text matches a flexible approval pattern.
@@ -70,7 +98,16 @@ def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     # Valid positions: actual start of line (with optional whitespace) or
     # after a markdown table pipe character.
     prefix_re = re.compile(rf"(?:^|(?<=\|))\s*{re.escape(prefix)}\b", re.MULTILINE | re.IGNORECASE)
-    keyword_re = re.compile(rf"\b{re.escape(keyword)}\b", re.IGNORECASE)
+    # Verdict-synonym tolerance: treat the canonical APPROVED keyword as the
+    # conjugation family APPROVE(D|S)? so a table cell reading "APPROVE" or
+    # "APPROVES" clears the gate exactly as "APPROVED" does (regression:
+    # elevana-studio PR #1257 verdict-summary table). Word boundaries are
+    # preserved (\bAPPROVE(?:D|S)?\b), so "APPROVEMENT" still does NOT match,
+    # and only the APPROVED family is widened — GO/REVIEWED/SELF-REVIEWED
+    # callers pass other keywords and are unaffected. The deliberately-strict
+    # anti-spoof path has_crs_model_approval() is intentionally NOT widened.
+    keyword_pattern = r"APPROVE(?:D|S)?" if keyword == "APPROVED" else re.escape(keyword)
+    keyword_re = re.compile(rf"\b{keyword_pattern}\b", re.IGNORECASE)
     # Strip markdown heading markers (##, ###, etc.) per-line so agents that
     # write '## TMG APPROVED ✅' are accepted alongside the canonical format.
     heading_re = re.compile(r"^\s*#{1,6}\s*")
@@ -80,9 +117,16 @@ def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
         prefix_match = prefix_re.search(stripped)
         if not prefix_match:
             continue
-        # Keyword must appear after the prefix on the same line
-        keyword_match = keyword_re.search(stripped, prefix_match.end())
-        if keyword_match:
+        # Keyword must appear after the prefix on the same line. Scan EVERY
+        # occurrence: a line clears only if some verdict verb has a gap (between
+        # the role prefix and that verb) free of negation/hedge intent. This
+        # rejects role-anchored non-approvals ("CRS does not approve") while
+        # preserving model-in-its-own-cell table formats and benign assessment
+        # text that follows the verdict.
+        for keyword_match in keyword_re.finditer(stripped, prefix_match.end()):
+            gap = stripped[prefix_match.end() : keyword_match.start()]
+            if _NEGATION_HEDGE_RE.search(gap):
+                continue
             return True
 
     return False

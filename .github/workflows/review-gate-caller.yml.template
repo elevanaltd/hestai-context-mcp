@@ -20,7 +20,10 @@ jobs:
   check-review:
     # Only invoke for PR events, or PR comments containing review verdicts.
     # Filters out irrelevant comments (discussion, bot noise) that can't change gate outcome.
-    # Keywords match review_formats.py: APPROVED, REVIEWED (covers SELF-REVIEWED), GO.
+    # Keywords match review_formats.py: APPROVE, REVIEWED (covers SELF-REVIEWED), GO.
+    # 'APPROVE' subsumes the APPROVED/APPROVES family (any body containing APPROVED or
+    # APPROVES also contains the substring APPROVE), mirroring the now-tolerant verdict
+    # matcher in review_formats.py so an APPROVE-only verdict table still triggers the gate.
     # Also matches markdown-bold variants (**APPROVED**, **GO**) since review_formats.py
     # strips bold markers before pattern matching.
     # IMPORTANT: Exclude bot comments to prevent self-triggering — the gate's own status
@@ -29,7 +32,7 @@ jobs:
       github.event_name == 'pull_request'
       || (github.event.issue.pull_request
           && github.event.comment.user.type != 'Bot'
-          && (contains(github.event.comment.body, 'APPROVED')
+          && (contains(github.event.comment.body, 'APPROVE')
               || contains(github.event.comment.body, 'REVIEWED')
               || contains(github.event.comment.body, ' GO')
               || contains(github.event.comment.body, ' GO:')
