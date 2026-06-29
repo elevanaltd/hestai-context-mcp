@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 from hestai_context_mcp.tools.governance.linker import _stamp_human_adr_ref, run_linker
 from hestai_context_mcp.tools.governance.type_checker import (
@@ -72,6 +73,29 @@ def _init_isolated_git_repo(repo: Path) -> None:
     subprocess.run(
         ["git", "commit", "-m", "initial"], cwd=str(repo), check=True, capture_output=True
     )
+    _attach_origin_remote(repo)
+
+
+def _attach_origin_remote(repo: Path) -> None:
+    """Give ``repo`` a bare ``origin`` remote on ``main``.
+
+    run_linker now cuts the governance branch from ``origin/main`` inside a
+    dedicated worktree (``git fetch origin`` + ``git worktree add ... origin/main``),
+    so the integration fixture must expose a real ``origin`` with a ``main`` ref.
+    The bare lives beside the repo so it is cleaned up with the pytest tmp tree.
+    """
+    subprocess.run(["git", "branch", "-M", "main"], cwd=str(repo), check=True, capture_output=True)
+    bare = repo.parent / f"{repo.name}-origin.git"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(bare)],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=str(repo), check=True, capture_output=True
+    )
 
 
 def _validation(target: Path) -> ValidationResult:
@@ -82,6 +106,51 @@ def _validation(target: Path) -> ValidationResult:
         card_type="DECISION_RECORD",
         target_path=target,
     )
+
+
+def _show_on_branch(repo: Path, branch: str, rel_path: str) -> str:
+    """Return the content of ``rel_path`` as committed on ``branch`` in ``repo``.
+
+    run_linker commits inside a throwaway worktree that is then removed, so the
+    governance files never appear in the operator's working tree. They live on
+    the ``governance/...`` branch ref (kept locally after the worktree is gone),
+    which this reads via ``git show``.
+    """
+    return subprocess.run(
+        ["git", "show", f"{branch}:{rel_path}"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def _branch_files(repo: Path, branch: str) -> str:
+    """Return the newline-joined tracked paths on ``branch``."""
+    return subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", branch],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def _assert_main_tree_untouched(repo: Path) -> None:
+    """The operator's working tree must still be on ``main`` with no governance file.
+
+    This is the core #108 invariant: run_linker must NEVER move or dirty the
+    invoking working tree.
+    """
+    current = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert current == "main", f"invoking tree was left on {current!r}, expected 'main'"
+    assert not (repo / ".hestai" / "decisions" / f"{_TOKEN}.oct.md").exists()
 
 
 class TestStampHumanAdrRef:
@@ -214,38 +283,55 @@ class TestStampHumanAdrRef:
 
 
 class TestLinkerDualWrite:
+    # The PR boundary (gh) is stubbed so the push to the bare ``origin`` is real
+    # (the commit lands on the branch) without needing a GitHub remote. The
+    # governance files are then read from the committed branch, since the
+    # worktree they were written in is removed before run_linker returns.
+    _PR_OK = (
+        "https://github.com/elevanaltd/hestai-context-mcp/pull/1",
+        None,
+    )
+
     def test_adr_prose_writes_verbatim_doc(self, tmp_path: Path) -> None:
         # RED #2: docs/adr/<TOKEN>.md written byte-exact to the prose.
         _init_isolated_git_repo(tmp_path)
         target = tmp_path / ".hestai" / "decisions" / f"{_TOKEN}.oct.md"
-        run_linker(
-            working_dir=tmp_path,
-            validation=_validation(target),
-            octave_content=_stamp_human_adr_ref(_AGR_OCTAVE, _TOKEN),
-            dry_run=False,
-            adr_prose=_ADR_PROSE,
-        )
-        adr_path = tmp_path / "docs" / "adr" / f"{_TOKEN}.md"
-        assert adr_path.is_file()
-        # VERBATIM: byte-exact, no AI/OCTAVE/marker mutation.
-        assert adr_path.read_text(encoding="utf-8") == _ADR_PROSE
+        with patch(
+            "hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK
+        ):
+            output = run_linker(
+                working_dir=tmp_path,
+                validation=_validation(target),
+                octave_content=_stamp_human_adr_ref(_AGR_OCTAVE, _TOKEN),
+                dry_run=False,
+                adr_prose=_ADR_PROSE,
+            )
+        assert output["branch"], output["error"]
+        # VERBATIM: byte-exact on the branch, no AI/OCTAVE/marker mutation.
+        committed = _show_on_branch(tmp_path, output["branch"], f"docs/adr/{_TOKEN}.md")
+        assert committed == _ADR_PROSE
+        # The invoking working tree is untouched (#108).
+        _assert_main_tree_untouched(tmp_path)
 
     def test_both_files_staged_in_one_commit(self, tmp_path: Path) -> None:
         # RED #3: AGR + ADR land in the SAME commit on one branch.
         _init_isolated_git_repo(tmp_path)
         target = tmp_path / ".hestai" / "decisions" / f"{_TOKEN}.oct.md"
-        output = run_linker(
-            working_dir=tmp_path,
-            validation=_validation(target),
-            octave_content=_stamp_human_adr_ref(_AGR_OCTAVE, _TOKEN),
-            dry_run=False,
-            adr_prose=_ADR_PROSE,
-        )
-        # Branch created; no orphan-state error from the write/commit steps.
-        assert output["branch"]
-        # HEAD commit contains BOTH files.
+        with patch(
+            "hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK
+        ):
+            output = run_linker(
+                working_dir=tmp_path,
+                validation=_validation(target),
+                octave_content=_stamp_human_adr_ref(_AGR_OCTAVE, _TOKEN),
+                dry_run=False,
+                adr_prose=_ADR_PROSE,
+            )
+        # Branch pushed; no orphan-state error from the write/commit steps.
+        assert output["branch"], output["error"]
+        # The branch tip commit contains BOTH files.
         files = subprocess.run(
-            ["git", "show", "--name-only", "--pretty=format:", "HEAD"],
+            ["git", "show", "--name-only", "--pretty=format:", output["branch"]],
             cwd=str(tmp_path),
             check=True,
             capture_output=True,
@@ -253,17 +339,24 @@ class TestLinkerDualWrite:
         ).stdout
         assert f".hestai/decisions/{_TOKEN}.oct.md" in files
         assert f"docs/adr/{_TOKEN}.md" in files
+        _assert_main_tree_untouched(tmp_path)
 
     def test_no_adr_prose_writes_no_doc(self, tmp_path: Path) -> None:
         # RED #1: absent adr_prose -> no docs/adr write (back-compat).
         _init_isolated_git_repo(tmp_path)
         target = tmp_path / ".hestai" / "decisions" / f"{_TOKEN}.oct.md"
-        run_linker(
-            working_dir=tmp_path,
-            validation=_validation(target),
-            octave_content=_AGR_OCTAVE,
-            dry_run=False,
-        )
+        with patch(
+            "hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK
+        ):
+            output = run_linker(
+                working_dir=tmp_path,
+                validation=_validation(target),
+                octave_content=_AGR_OCTAVE,
+                dry_run=False,
+            )
+        assert output["branch"], output["error"]
+        # No docs/adr path on the committed branch, and none in the working tree.
+        assert f"docs/adr/{_TOKEN}.md" not in _branch_files(tmp_path, output["branch"])
         assert not (tmp_path / "docs" / "adr").exists()
 
 

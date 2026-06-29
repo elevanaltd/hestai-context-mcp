@@ -1,12 +1,23 @@
 """Git Orchestrator (Linker) for governance intake.
 
 Accepts a ValidationResult + raw OCTAVE content, then:
-  1. Creates branch: governance/{date}-{token-slug}
-  2. Writes OCTAVE content to the computed target_path
+  1. Creates a DEDICATED git worktree on a fresh ``governance/{date}-{token-slug}``
+     branch based off ``origin/main`` (after a ``git fetch origin``)
+  2. Writes OCTAVE content to the computed target_path INSIDE that worktree
   3. Commits with: chore(governance): add {token} [{card_type}]
   4. Updates MANIFEST (write_manifest)
   5. Pushes the branch to origin (git push -u origin <branch>)
   6. Opens PR via gh pr create
+  7. Removes the worktree (always); rolls back the local branch if nothing was
+     pushed.
+
+The worktree is the load-bearing design choice: ALL git mutation happens inside
+a throwaway worktree, so the invoking working tree's HEAD is NEVER moved. The
+repo the operator is sitting in (``main`` or any feature branch) is left exactly
+as it was found — the tool can never "leave" a checkout on ``governance/...``
+(issue #108: the old in-place ``git checkout -b`` brute-forced the invoking
+tree's branch and stranded it there). This also sidesteps the worktree-discipline
+pre-commit hook entirely, since commits are always made from a real worktree.
 
 dry_run=True: skips all git/file operations, returns what WOULD happen.
 
@@ -19,7 +30,9 @@ that previously copied this logic from submit_review). It is re-exported here as
 
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -95,85 +108,68 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
         return 1, "", str(exc)
 
 
-# Branches the global worktree-discipline pre-commit hook protects. A commit on
-# one of these, from a MAIN working tree (not a worktree), is blocked.
-_PROTECTED_BRANCHES = frozenset({"main", "master"})
+# The base ref every governance branch is cut from. The PR also targets ``main``
+# (``_open_pr`` passes ``--base main``), so ``origin/main`` keeps the branch base
+# and the PR base identical, and guarantees the worktree is cut from the current
+# remote tip rather than a possibly-stale local ``main``.
+_BASE_REF = "origin/main"
 
 
-def _preflight_commit_safety(working_dir: Path) -> str | None:
-    """Return a recovery error iff committing here would be blocked, else None.
+def _create_worktree(working_dir: Path, branch_name: str) -> tuple[Path | None, str | None]:
+    """Create a throwaway git worktree on a fresh ``branch_name`` off ``origin/main``.
 
-    #108.3: the global worktree-discipline pre-commit hook
-    (``~/.githooks/pre-commit``) blocks a commit when ALL of the following hold:
+    ALL git mutation for a governance submission happens inside this dedicated
+    worktree so the invoking working tree's HEAD is NEVER moved (issue #108: the
+    old in-place ``git checkout -b`` stranded the operator's checkout on the
+    ``governance/...`` branch). The worktree is created under a fresh temp dir;
+    the caller is responsible for removing it via ``_remove_worktree`` (always,
+    in a ``finally``).
 
-      1. ``working_dir`` is a MAIN working tree -- NOT a linked worktree. Git
-         reports the same path for ``--git-dir`` and ``--git-common-dir`` in a
-         main tree; a linked worktree's ``--git-dir`` is ``.git/worktrees/<name>``
-         and differs from the common dir.
-      2. the current branch is a protected branch (``main``/``master``).
-      3. an executable ``pre-commit`` hook is actually installed at the repo's
-         effective ``core.hooksPath`` (so a repo with hooks disabled -- e.g. the
-         isolated test fixture -- does NOT trip this guard).
+    A ``git fetch origin`` runs first so the branch is cut from the current
+    remote tip. ``git worktree add -b <branch> <path> origin/main`` then creates
+    the branch and checks it out into the worktree in one step.
 
-    The hook also auto-reverts a ``git checkout -b`` back to the protected branch
-    (a companion ``post-checkout`` hook), so the linker's own branch creation
-    cannot escape the block from a main tree -- hence we MUST fail fast *before*
-    creating a branch rather than relying on the checkout to move us off main.
-
-    When this returns a non-None error the linker aborts before touching git, so
-    no branch is created and nothing is staged (PROD::I4 structured failure with
-    explicit recovery guidance). Returns ``None`` (proceed) whenever the path is
-    not a git repo or any of conditions 1-3 do not hold -- including every linked
-    worktree, which is the supported authoring location.
+    Returns ``(worktree_path, None)`` on success or ``(None, error)`` on failure.
+    On failure no worktree and no temp dir are left behind.
     """
-    # Not a git repo (or git unavailable) -> cannot be a blocked main tree.
-    code, git_dir, _ = _run_git(["rev-parse", "--absolute-git-dir"], working_dir)
-    if code != 0 or not git_dir:
-        return None
-    code, common_dir, _ = _run_git(
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"], working_dir
-    )
-    if code != 0 or not common_dir:
-        return None
-
-    # (1) MAIN tree iff the per-worktree git-dir IS the common dir.
-    if Path(git_dir).resolve() != Path(common_dir).resolve():
-        return None  # linked worktree -> supported, never blocked.
-
-    # (2) Protected branch only. A main tree on a feature branch commits fine.
-    code, branch, _ = _run_git(["branch", "--show-current"], working_dir)
-    if code != 0 or branch not in _PROTECTED_BRANCHES:
-        return None
-
-    # (3) An executable pre-commit hook must actually be installed at the repo's
-    #     effective hooks path; a repo with hooks disabled does not block.
-    code, hooks_dir, _ = _run_git(["rev-parse", "--git-path", "hooks"], working_dir)
-    if code != 0 or not hooks_dir:
-        return None
-    hook_path = (working_dir / hooks_dir / "pre-commit").resolve()
-    if not (hook_path.is_file() and os.access(hook_path, os.X_OK)):
-        return None
-
-    return (
-        f"BLOCKED: cannot author governance from the main working tree on "
-        f"'{branch}' -- the worktree-discipline pre-commit hook blocks commits "
-        f"here. Author from a git worktree instead:\n"
-        f"  git worktree add -b governance/your-record ../<repo>-governance main\n"
-        f"  # then re-run submit_governance with working_dir pointed at that "
-        f"worktree.\n"
-        f"No branch was created and nothing was staged."
-    )
-
-
-def _create_branch(working_dir: Path, branch_name: str) -> str | None:
-    """Create and checkout a new git branch.
-
-    Returns an error string on failure, None on success.
-    """
-    code, _, stderr = _run_git(["checkout", "-b", branch_name], working_dir)
+    code, _, stderr = _run_git(["fetch", "origin"], working_dir)
     if code != 0:
-        return f"Failed to create branch '{branch_name}': {stderr}"
-    return None
+        return None, f"git fetch origin failed: {stderr}"
+
+    # A fresh temp parent; the worktree itself lives in a not-yet-existing subdir
+    # (``git worktree add`` creates it). Cleanup removes the whole parent.
+    parent = Path(tempfile.mkdtemp(prefix="hestai-governance-"))
+    worktree_path = parent / "worktree"
+
+    code, _, stderr = _run_git(
+        ["worktree", "add", "-b", branch_name, str(worktree_path), _BASE_REF],
+        working_dir,
+    )
+    if code != 0:
+        shutil.rmtree(parent, ignore_errors=True)
+        return None, f"Failed to create governance worktree for '{branch_name}': {stderr}"
+
+    return worktree_path, None
+
+
+def _remove_worktree(working_dir: Path, worktree_path: Path) -> None:
+    """Remove the governance worktree and its temp parent dir (best-effort).
+
+    Never raises: a cleanup failure must not mask the linker's own result. The
+    branch ref created with the worktree is intentionally NOT deleted here (the
+    caller decides whether to roll it back based on whether it was pushed).
+    """
+    _run_git(["worktree", "remove", "--force", str(worktree_path)], working_dir)
+    shutil.rmtree(worktree_path.parent, ignore_errors=True)
+
+
+def _delete_branch(working_dir: Path, branch_name: str) -> None:
+    """Delete the local ``branch_name`` ref (best-effort rollback).
+
+    Called only when a submission failed BEFORE the branch reached ``origin`` —
+    so the half-built local branch leaves no trace. Never raises.
+    """
+    _run_git(["branch", "-D", branch_name], working_dir)
 
 
 def _push_branch(working_dir: Path, branch_name: str) -> str | None:
@@ -391,6 +387,14 @@ def run_linker(
         Dict with keys: token, card_type, target_path, branch, pr_url, error,
         dry_run, staged_uncommitted, and ``adr_target_path`` (the
         ``docs/adr/<token>.md`` path when ``adr_prose`` is supplied, else None).
+
+        ``branch`` is the would-be branch name on ``dry_run``; on a live run it
+        is non-None ONLY when the branch actually reached ``origin`` (a push
+        succeeded), and None when a pre-push failure rolled the local branch back
+        (no misleading name for a branch that was never persisted — issue #108).
+        ``staged_uncommitted`` is always False on the live path: every git
+        mutation happens inside a throwaway worktree that is always removed, so
+        nothing is ever left staged in the operator's working tree.
     """
     token = validation.token or ""
     card_type = validation.card_type or ""
@@ -419,54 +423,18 @@ def run_linker(
             "dry_run": True,
         }
 
-    # --- Live path: git operations ---
+    # --- Live path: hermetic worktree git operations ---
     errors: list[str] = []
 
-    # 0. Pre-flight (#108.3): if committing here would be blocked by the
-    #    worktree-discipline hook, fail fast BEFORE creating any branch so no
-    #    orphan branch and no staged state is ever produced. Honours a worktree
-    #    working_dir (which is the supported authoring location) unchanged.
-    preflight_err = _preflight_commit_safety(working_dir)
-    if preflight_err:
-        # Aborted before branch creation: no branch, nothing staged.
-        return {
-            "token": token,
-            "card_type": card_type,
-            "target_path": target_path_str,
-            "adr_target_path": adr_target_path_str,
-            "branch": None,
-            "pr_url": None,
-            "error": preflight_err,
-            "staged_uncommitted": False,
-            "dry_run": False,
-        }
-
-    # 1. Create branch
-    err = _create_branch(working_dir, branch_name)
-    if err:
-        # Branch creation itself failed: no branch, nothing staged.
-        return {
-            "token": token,
-            "card_type": card_type,
-            "target_path": target_path_str,
-            "adr_target_path": adr_target_path_str,
-            "branch": branch_name,
-            "pr_url": None,
-            "error": err,
-            "staged_uncommitted": False,
-            "dry_run": False,
-        }
-
-    # 2. Write OCTAVE content to target path
+    # target_path is required before we touch git.
     if target_path is None:
-        # Branch WAS created (surfaced via ``branch`` for recovery) but no write
-        # or ``git add`` ran, so nothing is staged-uncommitted (contract: False).
+        # Nothing created, nothing staged: no worktree, no branch.
         return {
             "token": token,
             "card_type": card_type,
             "target_path": None,
             "adr_target_path": adr_target_path_str,
-            "branch": branch_name,
+            "branch": None,
             "pr_url": None,
             "error": "target_path is None -- cannot write file",
             "staged_uncommitted": False,
@@ -476,21 +444,21 @@ def run_linker(
     # Bug 4: path traversal guard -- verify target_path is inside working_dir.
     # #112: the SAME guard is applied to the two-birds ADR path so a crafted
     # token/symlink cannot escape the repo. Both paths are checked here, BEFORE
-    # any write, so a rejection writes/stages nothing.
+    # any worktree is created, so a rejection touches nothing. The guard also
+    # yields the repo-relative paths we replay INSIDE the worktree.
     guard_paths = [target_path, *([adr_target_path] if adr_target_path is not None else [])]
+    rels: list[Path] = []
     for guarded in guard_paths:
         try:
-            guarded.resolve().relative_to(working_dir.resolve())
+            rels.append(guarded.resolve().relative_to(working_dir.resolve()))
         except (ValueError, RuntimeError, OSError):
-            # Branch WAS created (surfaced via ``branch``) but the write was
-            # rejected before any ``git add``, so nothing is staged-uncommitted
-            # (contract: False); recovery is conveyed by ``branch`` + ``error``.
+            # Nothing created: no worktree, no branch, nothing staged.
             return {
                 "token": token,
                 "card_type": card_type,
                 "target_path": target_path_str,
                 "adr_target_path": adr_target_path_str,
-                "branch": branch_name,
+                "branch": None,
                 "pr_url": None,
                 "error": (
                     f"target_path {guarded} is outside working_dir {working_dir} "
@@ -500,81 +468,113 @@ def run_linker(
                 "dry_run": False,
             }
 
-    err = _write_file(target_path, octave_content)
+    # 1. Create the dedicated worktree on a fresh branch off origin/main. The
+    #    operator's own working tree (whatever branch it is on) is NEVER touched.
+    worktree_path, err = _create_worktree(working_dir, branch_name)
     if err:
-        errors.append(err)
+        # Worktree creation failed: nothing created, nothing staged.
+        return {
+            "token": token,
+            "card_type": card_type,
+            "target_path": target_path_str,
+            "adr_target_path": adr_target_path_str,
+            "branch": None,
+            "pr_url": None,
+            "error": err,
+            "staged_uncommitted": False,
+            "dry_run": False,
+        }
 
-    # 2b. Two-birds (#112): dumb-write the VERBATIM ADR prose alongside the AGR.
-    #     No AI, no OCTAVE, no provenance marker. Guarded above; written only
-    #     when the AGR write succeeded so we never leave an orphan ADR doc.
-    if not errors and adr_prose is not None and adr_target_path is not None:
-        err = _write_file(adr_target_path, adr_prose)
-        if err:
-            errors.append(err)
+    # On success ``_create_worktree`` returns a non-None path (err is None).
+    assert worktree_path is not None
 
-    # 3. Update MANIFEST (best-effort -- failure is non-fatal, Bug 9 fix)
-    if not errors:
-        try:
-            write_manifest(working_dir)
-        except Exception as exc:  # noqa: BLE001
-            # Log warning instead of appending to errors; MANIFEST failure
-            # must not block the commit/PR flow (Bug 9: non-fatal).
-            logger.warning("MANIFEST update failed (non-fatal): %s", exc)
-
-    # 4. Commit
-    commit_message = f"chore(governance): add {token} [{card_type}]"
-    manifest_path = working_dir / ".hestai" / "MANIFEST.md"
-
-    # Track commit failure explicitly. ``_git_add_and_commit`` stages (git add)
-    # BEFORE committing, so a commit failure leaves changes staged-but-uncommitted
-    # -- the ONLY state where ``staged_uncommitted`` is True. A successful commit,
-    # or a step that never reached the commit (write/traversal failure: nothing
-    # staged), is NOT staged-uncommitted.
-    commit_failed = False
-    if not errors:
-        extra_paths = [adr_target_path] if adr_target_path is not None else None
-        err = _git_add_and_commit(
-            working_dir, target_path, manifest_path, commit_message, extra_paths=extra_paths
-        )
-        if err:
-            errors.append(err)
-            commit_failed = True
-
-    # 5. Push branch to origin (REQUIRED before gh pr create -- issue #73).
-    #    gh aborts PR creation if the branch is not on a remote. A push
-    #    failure is a structured error (PROD I4) and skips PR creation.
-    if not errors:
-        err = _push_branch(working_dir, branch_name)
-        if err:
-            errors.append(err)
-
-    # 6. Open PR
+    pushed_ok = False
     pr_url: str | None = None
-    if not errors:
-        gh_token = _resolve_github_token()
-        pr_url, pr_err = _open_pr(working_dir, branch_name, token, card_type, gh_token)
-        if pr_err:
-            errors.append(pr_err)
+    try:
+        # Replay the repo-relative paths inside the worktree.
+        target_in_wt = worktree_path / rels[0]
+        adr_in_wt = (worktree_path / rels[1]) if adr_target_path is not None else None
+
+        # 2. Write OCTAVE content into the worktree.
+        err = _write_file(target_in_wt, octave_content)
+        if err:
+            errors.append(err)
+
+        # 2b. Two-birds (#112): dumb-write the VERBATIM ADR prose alongside the
+        #     AGR. No AI, no OCTAVE, no provenance marker. Written only when the
+        #     AGR write succeeded so we never leave an orphan ADR doc.
+        if not errors and adr_prose is not None and adr_in_wt is not None:
+            err = _write_file(adr_in_wt, adr_prose)
+            if err:
+                errors.append(err)
+
+        # 3. Update MANIFEST (best-effort -- failure is non-fatal, Bug 9 fix).
+        if not errors:
+            try:
+                write_manifest(worktree_path)
+            except Exception as exc:  # noqa: BLE001
+                # Log warning instead of appending to errors; MANIFEST failure
+                # must not block the commit/PR flow (Bug 9: non-fatal).
+                logger.warning("MANIFEST update failed (non-fatal): %s", exc)
+
+        # 4. Commit (inside the worktree).
+        if not errors:
+            commit_message = f"chore(governance): add {token} [{card_type}]"
+            manifest_path = worktree_path / ".hestai" / "MANIFEST.md"
+            extra_paths = [adr_in_wt] if adr_in_wt is not None else None
+            err = _git_add_and_commit(
+                worktree_path,
+                target_in_wt,
+                manifest_path,
+                commit_message,
+                extra_paths=extra_paths,
+            )
+            if err:
+                errors.append(err)
+
+        # 5. Push branch to origin (REQUIRED before gh pr create -- issue #73).
+        #    gh aborts PR creation if the branch is not on a remote. A push
+        #    failure is a structured error (PROD I4) and skips PR creation.
+        if not errors:
+            err = _push_branch(worktree_path, branch_name)
+            if err:
+                errors.append(err)
+            else:
+                pushed_ok = True
+
+        # 6. Open PR.
+        if not errors:
+            gh_token = _resolve_github_token()
+            pr_url, pr_err = _open_pr(worktree_path, branch_name, token, card_type, gh_token)
+            if pr_err:
+                errors.append(pr_err)
+    finally:
+        # ALWAYS remove the worktree -- the operator's tree was never mutated, so
+        # there is no partial state to surface. If the branch never reached
+        # origin, roll the local branch back too so no half-built branch lingers.
+        _remove_worktree(working_dir, worktree_path)
+        if errors and not pushed_ok:
+            _delete_branch(working_dir, branch_name)
 
     error_str = "; ".join(errors) if errors else None
 
-    # #108.3 orphan/partial-state surfacing (cubic P2 contract): the branch HAS
-    # been created (step 1 succeeded) by this point. ``staged_uncommitted`` is
-    # True IFF the commit itself failed -- i.e. changes were staged (git add) but
-    # not committed. It is False whenever the commit succeeded, INCLUDING when a
-    # later push (step 5) or PR-creation (step 6) failed: those are committed
-    # states with a different recovery, already described by ``error``. The flag
-    # stays literally "staged but not committed," matching its name.
-    staged_uncommitted = commit_failed
+    # Report ``branch`` for recovery ONLY when it actually persists on origin (a
+    # push succeeded). On a pre-push failure the branch was rolled back, so we
+    # report None rather than a misleading name (issue #108: the old in-place
+    # code returned a branch that was never persisted).
+    persisted_branch = branch_name if pushed_ok else None
 
     return {
         "token": token,
         "card_type": card_type,
         "target_path": target_path_str,
         "adr_target_path": adr_target_path_str,
-        "branch": branch_name,
+        "branch": persisted_branch,
         "pr_url": pr_url,
+        # Hermetic model: the worktree is always removed and nothing is ever
+        # staged in the operator's working tree, so this is always False.
+        # Retained for I4 shape stability.
+        "staged_uncommitted": False,
         "error": error_str,
-        "staged_uncommitted": staged_uncommitted,
         "dry_run": False,
     }
