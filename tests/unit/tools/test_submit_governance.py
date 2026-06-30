@@ -71,6 +71,20 @@ def _init_isolated_git_repo(repo: Path) -> None:
         check=True,
         capture_output=True,
     )
+    # run_linker cuts the governance branch from ``origin/main`` inside a
+    # throwaway worktree, so the repo needs a real ``origin`` exposing ``main``.
+    subprocess.run(["git", "branch", "-M", "main"], cwd=str(repo), check=True, capture_output=True)
+    bare = repo.parent / f"{repo.name}-origin.git"
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(bare)],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=str(repo), check=True, capture_output=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -924,13 +938,13 @@ class TestLinkerIntegration:
     def test_linker_creates_branch_commits_writes_file(
         self, tmp_path: Path, decision_record_octave: str
     ) -> None:
-        """Linker (dry_run=False) creates branch, writes file, commits.
+        """Linker (dry_run=False) creates the branch in a worktree, commits, and
+        leaves the invoking working tree untouched.
 
         gh pr create is mocked at the linker module level to avoid real GitHub
-        interaction while allowing real git operations.
+        interaction while allowing real git operations (the push to the bare
+        ``origin`` is real, so the commit lands on the branch).
         """
-        # Real git repo with hooks disabled so the linker's internal
-        # checkout/add/commit are not blocked by a developer's global git hooks.
         _init_isolated_git_repo(tmp_path)
 
         from hestai_context_mcp.tools.governance.linker import run_linker
@@ -939,20 +953,12 @@ class TestLinkerIntegration:
         result = validate_octave_content(tmp_path, decision_record_octave)
         assert result.valid is True
 
-        # Mock the remote boundary (push + _open_pr) in the linker module to
-        # avoid real network/GitHub interaction while exercising real git-local
-        # operations (branch/write/commit). The temp repo has no `origin`
-        # remote, so the push must be stubbed (issue #73 added the push step).
+        # Stub only the PR boundary (gh): the worktree creation, write, commit,
+        # and push to the bare ``origin`` all run for real.
         pr_url = "https://github.com/elevanaltd/hestai-context-mcp/pull/999"
-        with (
-            patch(
-                "hestai_context_mcp.tools.governance.linker._push_branch",
-                return_value=None,
-            ),
-            patch(
-                "hestai_context_mcp.tools.governance.linker._open_pr",
-                return_value=(pr_url, None),
-            ),
+        with patch(
+            "hestai_context_mcp.tools.governance.linker._open_pr",
+            return_value=(pr_url, None),
         ):
             output = run_linker(
                 working_dir=tmp_path,
@@ -961,6 +967,29 @@ class TestLinkerIntegration:
                 dry_run=False,
             )
 
-        assert output["branch"] is not None
-        target = tmp_path / ".hestai" / "decisions" / "HO-CONTEXT-MCP-TEST-DECISION-20260531.oct.md"
-        assert target.exists()
+        # The branch was pushed to origin (non-None branch) and the PR opened.
+        assert output["branch"] is not None, output["error"]
+        assert output["pr_url"] == pr_url
+
+        rel = ".hestai/decisions/HO-CONTEXT-MCP-TEST-DECISION-20260531.oct.md"
+        # The file is committed ON THE BRANCH, not in the operator's working tree.
+        committed = subprocess.run(
+            ["git", "show", f"{output['branch']}:{rel}"],
+            cwd=str(tmp_path),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert committed == decision_record_octave
+
+        # Core #108 invariant: the invoking tree never moved off main and the
+        # governance file was never written into it.
+        current = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(tmp_path),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert current == "main"
+        assert not (tmp_path / rel).exists()
