@@ -525,6 +525,29 @@ class TestRunLinkerLivePath:
         h.delete.assert_called_once()
 
     @pytest.mark.unit
+    def test_unexpected_exception_still_rolls_back_branch(self, tmp_path: Path) -> None:
+        """An unhandled exception before push must STILL roll the branch back.
+
+        The cleanup contract ("if the branch never reached origin, roll it back")
+        must hold even when the failure is an unexpected exception that never
+        populated ``errors`` -- otherwise a half-built local governance branch is
+        left behind despite the worktree being removed. Rollback therefore keys on
+        ``pushed_ok`` alone, NOT on whether ``errors`` was recorded (cubic P2).
+        """
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        with (
+            patch(f"{_LINKER}._create_worktree", return_value=(tmp_path / "wt", None)),
+            patch(f"{_LINKER}._remove_worktree") as remove,
+            patch(f"{_LINKER}._delete_branch") as delete,
+            patch(f"{_LINKER}._write_file", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", False)
+        # Worktree removed AND the unpushed branch rolled back, despite the raise.
+        remove.assert_called_once()
+        delete.assert_called_once()
+
+    @pytest.mark.unit
     def test_pr_failure_keeps_pushed_branch(self, tmp_path: Path) -> None:
         """A PR error after a successful push keeps the (pushed) branch, no rollback.
 

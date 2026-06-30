@@ -552,8 +552,11 @@ def run_linker(
         # ALWAYS remove the worktree -- the operator's tree was never mutated, so
         # there is no partial state to surface. If the branch never reached
         # origin, roll the local branch back too so no half-built branch lingers.
+        # Rollback keys on ``pushed_ok`` ALONE (not on ``errors``): an unexpected
+        # exception before the push never populates ``errors``, yet still leaves
+        # an unpushed branch that must be cleaned up (cubic P2).
         _remove_worktree(working_dir, worktree_path)
-        if errors and not pushed_ok:
+        if not pushed_ok:
             _delete_branch(working_dir, branch_name)
 
     error_str = "; ".join(errors) if errors else None
