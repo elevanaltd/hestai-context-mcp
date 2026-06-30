@@ -296,9 +296,7 @@ class TestLinkerDualWrite:
         # RED #2: docs/adr/<TOKEN>.md written byte-exact to the prose.
         _init_isolated_git_repo(tmp_path)
         target = tmp_path / ".hestai" / "decisions" / f"{_TOKEN}.oct.md"
-        with patch(
-            "hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK
-        ):
+        with patch("hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK):
             output = run_linker(
                 working_dir=tmp_path,
                 validation=_validation(target),
@@ -317,9 +315,7 @@ class TestLinkerDualWrite:
         # RED #3: AGR + ADR land in the SAME commit on one branch.
         _init_isolated_git_repo(tmp_path)
         target = tmp_path / ".hestai" / "decisions" / f"{_TOKEN}.oct.md"
-        with patch(
-            "hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK
-        ):
+        with patch("hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK):
             output = run_linker(
                 working_dir=tmp_path,
                 validation=_validation(target),
@@ -345,9 +341,7 @@ class TestLinkerDualWrite:
         # RED #1: absent adr_prose -> no docs/adr write (back-compat).
         _init_isolated_git_repo(tmp_path)
         target = tmp_path / ".hestai" / "decisions" / f"{_TOKEN}.oct.md"
-        with patch(
-            "hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK
-        ):
+        with patch("hestai_context_mcp.tools.governance.linker._open_pr", return_value=self._PR_OK):
             output = run_linker(
                 working_dir=tmp_path,
                 validation=_validation(target),
