@@ -73,6 +73,8 @@ _DEFAULT_USD_PER_1K_TOKENS = 0.01
 _CHARS_PER_TOKEN = 4
 # Request timeout for the prose->OCTAVE call (seconds).
 _REQUEST_TIMEOUT_SECONDS = 60
+# The OCTAVE document terminator that every AGR must end with.
+_END_TERMINATOR = "===END==="
 
 
 class CompileMetrics(TypedDict):
@@ -156,6 +158,21 @@ def _env_float(name: str, default: float) -> float:
 def _ceil_div(numerator: int, denominator: int) -> int:
     """Ceiling integer division."""
     return (numerator + denominator - 1) // denominator
+
+
+def _clip_at_end_terminator(text: str) -> str:
+    """Clip compiled OCTAVE at the last ===END=== marker (inclusive).
+
+    A model may continue generating past the document terminator (observed in
+    elevana-studio PR #1423: boilerplate appended after ===END===). This guard
+    ensures the compiled output is deterministically truncated at the last
+    ===END===, regardless of model behaviour.  When ===END=== is absent the
+    text is returned unchanged so Stage 3 can reject it for a missing terminator.
+    """
+    pos = text.rfind(_END_TERMINATOR)
+    if pos == -1:
+        return text
+    return text[: pos + len(_END_TERMINATOR)]
 
 
 def _estimate_input_tokens(intake_context: IntakeContext) -> int:
@@ -346,7 +363,7 @@ async def compile_prose_to_octave(
     except AIClientError as exc:
         return _failure(model, f"AIClient error: {exc.__class__.__name__}: {exc}")
 
-    raw = result.content
+    raw = _clip_at_end_terminator(result.content)
     if not raw.strip():
         return _failure(model, "Backend returned empty response; no OCTAVE produced.")
 
