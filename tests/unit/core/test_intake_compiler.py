@@ -484,6 +484,69 @@ class TestMetricsAccounting:
         assert _estimate_input_tokens(ctx) == expected
 
 
+class TestEndTerminatorGuard:
+    """===END=== terminator guard: trailing content after ===END=== must be stripped.
+
+    Real incident (elevana-studio PR #1423): the backend model continued past
+    ===END=== and appended generic marketing boilerplate.  That content flowed
+    verbatim into the compiled output and then into a ratified decision record.
+    The guard deterministically clips at the last ===END=== regardless of model.
+    """
+
+    async def test_trailing_content_after_end_terminator_is_stripped(self, patch_client) -> None:
+        """Content after ===END=== must be removed from the compiled output."""
+        valid_octave = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            "  TOKEN::HO-EXAMPLE-20260716\n"
+            "===END==="
+        )
+        trailing = "\n\nThis decision captures the essence of your governance intent.\n"
+        stub = _StubClient(text=valid_octave + trailing)
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is True
+        assert result["octave"] == valid_octave
+        assert "captures the essence" not in result["octave"]
+
+    async def test_clean_output_without_trailing_content_is_unchanged(self, patch_client) -> None:
+        """A well-formed completion (no trailing content) passes through unchanged."""
+        valid_octave = "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n===END==="
+        stub = _StubClient(text=valid_octave)
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is True
+        assert result["octave"] == valid_octave
+
+    async def test_guard_uses_last_end_terminator(self, patch_client) -> None:
+        """When multiple ===END=== markers appear, clip at the last one."""
+        octave_with_two_terminators = (
+            "===DECISION_RECORD===\n"
+            "META:\n"
+            "  TYPE::DECISION_RECORD\n"
+            "===END===\n"
+            "===APPENDIX===\n"
+            "SOME::value\n"
+            "===END==="
+        )
+        stub = _StubClient(text=octave_with_two_terminators + "\ntrailing garbage")
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is True
+        assert result["octave"] == octave_with_two_terminators
+        assert "trailing garbage" not in result["octave"]
+
+    async def test_output_without_end_terminator_passes_through(self, patch_client) -> None:
+        """A completion lacking ===END=== is returned as-is; Stage 3 rejects it."""
+        no_terminator = "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n"
+        stub = _StubClient(text=no_terminator)
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is True
+        assert result["octave"] == no_terminator
+
+
 class TestTruncationMessageContract:
     async def test_truncation_error_message_is_actionable(self, patch_client, monkeypatch) -> None:
         monkeypatch.setenv("HESTAI_INTAKE_MAX_COST_USD", "1000000")
