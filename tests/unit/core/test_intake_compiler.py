@@ -493,15 +493,13 @@ class TestEndTerminatorGuard:
     The guard deterministically clips at the last ===END=== regardless of model.
     """
 
-    async def test_trailing_content_after_end_terminator_is_stripped(
-        self, patch_client
-    ) -> None:
+    async def test_trailing_content_after_end_terminator_is_stripped(self, patch_client) -> None:
         """Content after ===END=== must be removed from the compiled output."""
         valid_octave = (
             "===DECISION_RECORD===\n"
             "META:\n"
             "  TYPE::DECISION_RECORD\n"
-            '  TOKEN::HO-EXAMPLE-20260716\n'
+            "  TOKEN::HO-EXAMPLE-20260716\n"
             "===END==="
         )
         trailing = "\n\nThis decision captures the essence of your governance intent.\n"
@@ -512,9 +510,7 @@ class TestEndTerminatorGuard:
         assert result["octave"] == valid_octave
         assert "captures the essence" not in result["octave"]
 
-    async def test_clean_output_without_trailing_content_is_unchanged(
-        self, patch_client
-    ) -> None:
+    async def test_clean_output_without_trailing_content_is_unchanged(self, patch_client) -> None:
         """A well-formed completion (no trailing content) passes through unchanged."""
         valid_octave = "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n===END==="
         stub = _StubClient(text=valid_octave)
@@ -541,9 +537,7 @@ class TestEndTerminatorGuard:
         assert result["octave"] == octave_with_two_terminators
         assert "trailing garbage" not in result["octave"]
 
-    async def test_output_without_end_terminator_passes_through(
-        self, patch_client
-    ) -> None:
+    async def test_output_without_end_terminator_passes_through(self, patch_client) -> None:
         """A completion lacking ===END=== is returned as-is; Stage 3 rejects it."""
         no_terminator = "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n"
         stub = _StubClient(text=no_terminator)
