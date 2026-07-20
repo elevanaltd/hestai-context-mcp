@@ -106,7 +106,19 @@ def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     # and only the APPROVED family is widened — GO/REVIEWED/SELF-REVIEWED
     # callers pass other keywords and are unaffected. The deliberately-strict
     # anti-spoof path has_crs_model_approval() is intentionally NOT widened.
-    keyword_pattern = r"APPROVE(?:D|S)?" if keyword == "APPROVED" else re.escape(keyword)
+    #
+    # GO hyphen-compound guard (issue #138): \bGO\b matches the leading token
+    # of "GO-WITH-CONDITIONS" because the hyphen is a non-word character that
+    # satisfies the word boundary on both sides. Negative lookahead/lookbehind
+    # for "-" prevents GO from matching when directly adjacent to a hyphen, so
+    # "GO-WITH-CONDITIONS" and "NO-GO" are correctly rejected as non-approvals.
+    # Bare "GO:", "GO ", "**GO**" etc. are unaffected (no adjacent hyphen).
+    if keyword == "APPROVED":
+        keyword_pattern = r"APPROVE(?:D|S)?"
+    elif keyword == "GO":
+        keyword_pattern = r"(?<!-)GO(?!-)"
+    else:
+        keyword_pattern = re.escape(keyword)
     keyword_re = re.compile(rf"\b{keyword_pattern}\b", re.IGNORECASE)
     # Strip markdown heading markers (##, ###, etc.) per-line so agents that
     # write '## TMG APPROVED ✅' are accepted alongside the canonical format.
@@ -174,8 +186,11 @@ def has_crs_model_approval(texts: list[str], model: str) -> bool:
     # Allowed separators: whitespace, colon, em dash, en dash, hyphen (0 or more).
     # No arbitrary tokens (like "and CRS (Codex)" or "BLOCKED") permitted between.
     # CRS must appear at line-start position (same rule as matches_approval_pattern).
+    # GO hyphen-compound guard (issue #138): negative lookahead prevents GO from
+    # matching as the leading token of "GO-WITH-CONDITIONS" (see matches_approval_pattern
+    # comment for detailed explanation; same root cause applies here).
     pattern = re.compile(
-        rf"(?:^|(?<=\|))\s*CRS\s*\(\s*{re.escape(model)}\s*\)\s*[:—–\-]*\s*(?:APPROVED|GO)\b",
+        rf"(?:^|(?<=\|))\s*CRS\s*\(\s*{re.escape(model)}\s*\)\s*[:—–\-]*\s*(?:APPROVED|(?<!-)GO(?!-))\b",
         re.IGNORECASE | re.MULTILINE,
     )
 

@@ -911,14 +911,14 @@ class TestParserAgreementGoWithConditions:
         meta = parse_review_metadata(comment)
         assert meta is not None
         approval_keywords = {"APPROVED", "SELF-REVIEWED", "REVIEWED", "GO"}
-        assert meta["verdict"] not in approval_keywords, (
-            f"Metadata path incorrectly marks CONDITIONAL as approval: {meta['verdict']}"
-        )
+        assert (
+            meta["verdict"] not in approval_keywords
+        ), f"Metadata path incorrectly marks CONDITIONAL as approval: {meta['verdict']}"
 
         # Visible-regex path: must also not clear the gate
-        assert not has_civ_approval([comment]), (
-            "Visible-regex path incorrectly cleared CIV gate for CONDITIONAL comment"
-        )
+        assert not has_civ_approval(
+            [comment]
+        ), "Visible-regex path incorrectly cleared CIV gate for CONDITIONAL comment"
 
     def test_no_go_comment_regex_and_metadata_both_non_approval(self) -> None:
         """A comment with NO-GO in visible text is not approval by either path."""
@@ -932,12 +932,12 @@ class TestParserAgreementGoWithConditions:
 
         # Metadata path: no structured metadata → no approval (treated as plain text)
         # Visible-regex path: must not match GO
-        assert not matches_approval_pattern(comment, "CRS", "GO"), (
-            "Visible-regex path incorrectly matched GO in 'NO-GO' token"
-        )
-        assert not has_crs_approval([comment]), (
-            "has_crs_approval incorrectly returned True for NO-GO comment"
-        )
+        assert not matches_approval_pattern(
+            comment, "CRS", "GO"
+        ), "Visible-regex path incorrectly matched GO in 'NO-GO' token"
+        assert not has_crs_approval(
+            [comment]
+        ), "has_crs_approval incorrectly returned True for NO-GO comment"
 
     def test_go_with_conditions_in_assessment_does_not_spoof_gate(self) -> None:
         """A CONDITIONAL comment whose assessment text includes 'GO-WITH-CONDITIONS' is not approval.
