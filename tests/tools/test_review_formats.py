@@ -771,3 +771,200 @@ class TestReviewMetadata:
         assert not matches_approval_pattern(visible_text, "CRS", "APPROVED")
         # But the visible BLOCKED must still match
         assert matches_approval_pattern(visible_text, "CRS", "BLOCKED")
+
+
+@pytest.mark.unit
+class TestGoHyphenatedCompoundsNotApproval:
+    """RED tests for issue #138 — GO as part of a hyphenated token must NOT clear the gate.
+
+    Root cause: ``\\bGO\\b`` matches the leading token of ``GO-WITH-CONDITIONS``
+    because the hyphen is a non-word character, satisfying the word boundary on
+    both sides.  Same flaw affects ``NO-GO`` (the ``GO`` suffix is also bounded
+    by the preceding hyphen).
+
+    These tests pin the correct behaviour: conditional and no-go verdicts are
+    NOT approvals, regardless of role.
+    """
+
+    def test_go_with_conditions_does_not_clear_civ_gate(self) -> None:
+        """CIV (Codex) CONDITIONAL: GO-WITH-CONDITIONS must NOT clear the CIV gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_civ_approval
+
+        assert not has_civ_approval(["CIV (Codex) CONDITIONAL: GO-WITH-CONDITIONS"])
+
+    def test_no_go_does_not_clear_civ_gate(self) -> None:
+        """CIV NO-GO: ... must NOT clear the CIV gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_civ_approval
+
+        assert not has_civ_approval(["CIV NO-GO: implementation rejected"])
+
+    def test_go_with_conditions_does_not_clear_crs_gate(self) -> None:
+        """CRS (Codex) GO-WITH-CONDITIONS must NOT clear the CRS gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_approval
+
+        assert not has_crs_approval(["CRS (Codex) GO-WITH-CONDITIONS: address nits"])
+
+    def test_no_go_does_not_clear_crs_gate(self) -> None:
+        """CRS NO-GO: ... must NOT clear the CRS gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_approval
+
+        assert not has_crs_approval(["CRS NO-GO: security issue"])
+
+    def test_go_with_conditions_does_not_clear_tmg_gate(self) -> None:
+        """TMG GO-WITH-CONDITIONS must NOT clear the TMG gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_tmg_approval
+
+        assert not has_tmg_approval(["TMG (Gemini) GO-WITH-CONDITIONS: fix coverage first"])
+
+    def test_no_go_does_not_clear_tmg_gate(self) -> None:
+        """TMG NO-GO: ... must NOT clear the TMG gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_tmg_approval
+
+        assert not has_tmg_approval(["TMG NO-GO: test quality insufficient"])
+
+    def test_matches_approval_pattern_go_with_conditions(self) -> None:
+        """matches_approval_pattern must return False for GO-WITH-CONDITIONS."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern(
+            "CIV (Codex) CONDITIONAL: GO-WITH-CONDITIONS", "CIV", "GO"
+        )
+
+    def test_matches_approval_pattern_no_go(self) -> None:
+        """matches_approval_pattern must return False for NO-GO verdict."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern("CRS NO-GO: blocked", "CRS", "GO")
+
+    def test_crs_model_approval_go_with_conditions(self) -> None:
+        """has_crs_model_approval must return False for GO-WITH-CONDITIONS."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_model_approval
+
+        assert not has_crs_model_approval(["CRS (Codex): GO-WITH-CONDITIONS"], "Codex")
+
+    def test_crs_model_approval_no_go(self) -> None:
+        """has_crs_model_approval must return False for NO-GO."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_model_approval
+
+        assert not has_crs_model_approval(["CRS (Gemini): NO-GO"], "Gemini")
+
+    # --- Regression: legitimate bare GO must still clear the gate ---
+
+    def test_bare_go_still_clears_civ_gate(self) -> None:
+        """A bare standalone GO still clears the CIV gate (no regression)."""
+        from hestai_context_mcp.tools.shared.review_formats import has_civ_approval
+
+        assert has_civ_approval(["CIV (Codex) GO: implementation valid"])
+
+    def test_bare_go_still_clears_crs_gate(self) -> None:
+        """A bare standalone GO still clears the CRS gate (no regression)."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_approval
+
+        assert has_crs_approval(["CRS GO: Ship it"])
+
+    def test_bare_go_heading_format_still_clears_gate(self) -> None:
+        """'## TMG GO ✅' heading format still clears the TMG gate (no regression)."""
+        from hestai_context_mcp.tools.shared.review_formats import has_tmg_approval
+
+        assert has_tmg_approval(["## TMG GO ✅"])
+
+    def test_crs_model_approval_bare_go_still_clears(self) -> None:
+        """has_crs_model_approval with bare GO still clears (no regression)."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_model_approval
+
+        assert has_crs_model_approval(["CRS (Gemini): GO"], "Gemini")
+
+
+@pytest.mark.unit
+class TestParserAgreementGoWithConditions:
+    """Verify parser/validator path agreement for conditional and no-go verdicts.
+
+    Closes the #138 divergence: the visible-regex path (matches_approval_pattern,
+    used by both scripts/validate_review.py and the submit_review tool) must agree
+    with the metadata verdict path for GO-WITH-CONDITIONS and NO-GO comments.
+
+    A CONDITIONAL/NO-GO comment formatted via format_review_comment() should:
+    - Have metadata.verdict != an approval keyword → would_clear_gate=False (metadata path)
+    - NOT be matched by matches_approval_pattern() → False (visible-text path)
+    Both paths must reach the SAME conclusion (False) for these comments.
+    """
+
+    def test_conditional_comment_regex_and_metadata_both_non_approval(self) -> None:
+        """A CONDITIONAL verdict comment is not approval by either path.
+
+        The metadata verdict is 'CONDITIONAL' (not in approval keywords), and
+        the visible regex must also not match GO/APPROVED.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_civ_approval,
+            parse_review_metadata,
+        )
+
+        comment = format_review_comment(
+            role="CIV",
+            verdict="CONDITIONAL",
+            assessment="GO-WITH-CONDITIONS: address nit on line 42",
+        )
+
+        # Metadata path: verdict is CONDITIONAL, not an approval
+        meta = parse_review_metadata(comment)
+        assert meta is not None
+        approval_keywords = {"APPROVED", "SELF-REVIEWED", "REVIEWED", "GO"}
+        assert meta["verdict"] not in approval_keywords, (
+            f"Metadata path incorrectly marks CONDITIONAL as approval: {meta['verdict']}"
+        )
+
+        # Visible-regex path: must also not clear the gate
+        assert not has_civ_approval([comment]), (
+            "Visible-regex path incorrectly cleared CIV gate for CONDITIONAL comment"
+        )
+
+    def test_no_go_comment_regex_and_metadata_both_non_approval(self) -> None:
+        """A comment with NO-GO in visible text is not approval by either path."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            has_crs_approval,
+            matches_approval_pattern,
+        )
+
+        # This represents a reviewer writing a NO-GO verdict in plain text
+        comment = "CRS NO-GO: security vulnerability in auth handler"
+
+        # Metadata path: no structured metadata → no approval (treated as plain text)
+        # Visible-regex path: must not match GO
+        assert not matches_approval_pattern(comment, "CRS", "GO"), (
+            "Visible-regex path incorrectly matched GO in 'NO-GO' token"
+        )
+        assert not has_crs_approval([comment]), (
+            "has_crs_approval incorrectly returned True for NO-GO comment"
+        )
+
+    def test_go_with_conditions_in_assessment_does_not_spoof_gate(self) -> None:
+        """A CONDITIONAL comment whose assessment text includes 'GO-WITH-CONDITIONS' is not approval.
+
+        This is the exact pattern from issue #138: a reviewer writes a CONDITIONAL
+        verdict and uses 'GO-WITH-CONDITIONS' as the human-readable assessment,
+        which the broken regex treated as a GO approval.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_civ_approval,
+            parse_review_metadata,
+        )
+
+        comment = format_review_comment(
+            role="CIV",
+            verdict="CONDITIONAL",
+            assessment="GO-WITH-CONDITIONS",
+            model_annotation="Codex",
+        )
+
+        # Both paths must agree: this is NOT an approval
+        meta = parse_review_metadata(comment)
+        assert meta is not None
+        assert meta["verdict"] == "CONDITIONAL"
+
+        assert not has_civ_approval([comment]), (
+            "Visible-regex path false-greened the T3 gate for 'CIV (Codex) CONDITIONAL: "
+            "GO-WITH-CONDITIONS' comment (issue #138 root cause)"
+        )
