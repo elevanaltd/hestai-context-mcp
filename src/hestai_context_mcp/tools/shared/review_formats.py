@@ -10,6 +10,7 @@ Extracted from validate_review.py to prevent format drift (I2 tension).
 
 import json
 import re
+import unicodedata as _ud
 
 # --- Review tier constants ---
 TIER_0_EXEMPT = "TIER_0_EXEMPT"
@@ -57,6 +58,55 @@ _NEGATION_HEDGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# --- Match-only text normalisation (never mutates stored/emitted text) ---
+#
+# Two classes of invisible/ambiguous characters bypass the approval guards and
+# must be normalised before any pattern match.  Both transformations are
+# match-only: they are never applied to stored data, emitted verdicts, or the
+# comment text returned by format_review_comment().
+#
+# 1. Dash/hyphen folding — fold to ASCII '-':
+#    All Unicode characters in category Pd (Dash_Punctuation) plus two extras
+#    that are NOT Pd but behave as visual hyphens:
+#      U+2212 (− MINUS SIGN, Sm)  — often typed as a hyphen in markup
+#      U+2043 (⁃ HYPHEN BULLET, Po) — used as bullet/separator in some editors
+#    Using category Pd covers the full Unicode dash set (U+2010..U+2015,
+#    U+2212 excluded, U+FE63, U+FF0D, etc.) without a hand-maintained list,
+#    so future dash glyphs are handled without a code change.
+#
+# 2. Format-character stripping — remove completely:
+#    Characters in Unicode category Cf (Format) are invisible and have no
+#    legitimate place in a verdict token.  Stripping them (rather than folding)
+#    is correct because they carry no glyph: U+00AD (soft hyphen), U+200B
+#    (ZWSP), U+200C (ZWNJ), U+200D (ZWJ), U+FEFF (BOM/ZWNBSP), etc.
+#    A reviewer writing "NO<ZWSP>-GO" to evade detection gets the same result
+#    as a formatter inserting invisible chars: the token is collapsed to "NO-GO"
+#    and the compound guard rejects it.
+_DASH_EXTRAS = {"−", "⁃"}  # MINUS SIGN (Sm), HYPHEN BULLET (Po)
+
+
+def _normalize_text(text: str) -> str:
+    """Fold Unicode dash variants to '-' and strip format chars (match-only).
+
+    Applied at the entry point of every approval-matching function.
+    Never called on stored data or emitted comment text.
+    """
+    result = []
+    for ch in text:
+        cat = _ud.category(ch)
+        if cat == "Pd" or ch in _DASH_EXTRAS:
+            result.append("-")
+        elif cat == "Cf":
+            pass  # strip invisible format chars entirely
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
+# Keep the old name as an alias so any external callers (tests, scripts) that
+# imported _normalize_dashes directly are not broken.
+_normalize_dashes = _normalize_text
+
 
 def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     """Check if text matches a flexible approval pattern.
@@ -90,6 +140,10 @@ def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     Returns:
         True if the pattern is found, False otherwise.
     """
+    # Normalise text before matching: fold Unicode dash/hyphen variants to ASCII
+    # '-' and strip invisible format characters (category Cf).  Match-only: this
+    # transformation is never reflected in any stored or emitted text.
+    text = _normalize_text(text)
     # Strip markdown bold/italic markers so **APPROVED** matches as APPROVED
     cleaned = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
 
@@ -106,7 +160,34 @@ def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     # and only the APPROVED family is widened — GO/REVIEWED/SELF-REVIEWED
     # callers pass other keywords and are unaffected. The deliberately-strict
     # anti-spoof path has_crs_model_approval() is intentionally NOT widened.
-    keyword_pattern = r"APPROVE(?:D|S)?" if keyword == "APPROVED" else re.escape(keyword)
+    #
+    # GO hyphen-compound guard (issue #138): \bGO\b matches the leading token
+    # of "GO-WITH-CONDITIONS" because the hyphen is a non-word character that
+    # satisfies the word boundary on both sides.
+    #
+    # Two-char lookbehind (?<!\w-): the char immediately before the hyphen must
+    # NOT be a Unicode word character (\w covers [a-zA-Z0-9_] plus Unicode
+    # letters/digits, e.g. Cyrillic О).  This correctly distinguishes:
+    #   - "NO-GO"         → 'O' is \w → rejected ✓
+    #   - "NО-GO" (Cyrillic О U+041E) → also \w → rejected ✓
+    #   - ")-GO"          → ')' is not \w → cleared ✓
+    #   - "GO-WITH-..."   → trailing (?!-) rejects ✓
+    #   - "GO:", " GO", "**GO**" → no adjacent hyphen → cleared ✓
+    #
+    # Unicode dash/format chars are already normalised to '-' or stripped by
+    # _normalize_text() before this guard runs, so "GO–WITH" (en-dash) becomes
+    # "GO-WITH" and is caught by the trailing (?!-) lookahead.
+    #
+    # NOTE: the model-anchored path has_crs_model_approval() uses only the
+    # trailing guard GO(?!-) — the leading guard is not needed there because
+    # the separator class [:—–-]* consumes the chars before the keyword, so
+    # NO-GO cannot reach the keyword position. DO NOT "unify" these two paths.
+    if keyword == "APPROVED":
+        keyword_pattern = r"APPROVE(?:D|S)?"
+    elif keyword == "GO":
+        keyword_pattern = r"(?<!\w-)GO(?!-)"
+    else:
+        keyword_pattern = re.escape(keyword)
     keyword_re = re.compile(rf"\b{keyword_pattern}\b", re.IGNORECASE)
     # Strip markdown heading markers (##, ###, etc.) per-line so agents that
     # write '## TMG APPROVED ✅' are accepted alongside the canonical format.
@@ -174,12 +255,32 @@ def has_crs_model_approval(texts: list[str], model: str) -> bool:
     # Allowed separators: whitespace, colon, em dash, en dash, hyphen (0 or more).
     # No arbitrary tokens (like "and CRS (Codex)" or "BLOCKED") permitted between.
     # CRS must appear at line-start position (same rule as matches_approval_pattern).
+    #
+    # GO hyphen-compound guard (issue #138): trailing-only lookahead GO(?!-) is
+    # sufficient here — unlike the general matches_approval_pattern path which needs
+    # BOTH lookbehind AND lookahead to block NO-GO (because \bGO\b alone matches the
+    # trailing GO in "NO-GO"), this anchored path is safe with trailing-only because:
+    #   - The separator class [:—–\-]* is consumed before GO, so "NO-GO" can never
+    #     reach the keyword position (the 'N' in 'NO-' is not in the separator class).
+    #   - A legitimate hyphen separator as in "CRS (Gemini)-GO" is consumed by the
+    #     separator class, leaving GO with no preceding hyphen — the leading lookbehind
+    #     (?<!-) would incorrectly reject this format (cubic P2 regression).
+    # DO NOT "unify" this to (?<!\w-)GO(?!-) — that re-introduces the P2 regression.
+    #
+    # Fix 2 (rework#3): normalise the model label BEFORE re.escape() so that a
+    # model label containing a Unicode dash variant (e.g. "Gemi–ni") is symmetric
+    # with the normalised text being searched.  Without this, text and pattern
+    # would use different representations of the same dash and never match.
+    normalized_model = _normalize_text(model)
     pattern = re.compile(
-        rf"(?:^|(?<=\|))\s*CRS\s*\(\s*{re.escape(model)}\s*\)\s*[:—–\-]*\s*(?:APPROVED|GO)\b",
+        rf"(?:^|(?<=\|))\s*CRS\s*\(\s*{re.escape(normalized_model)}\s*\)\s*[:—–\-]*\s*(?:APPROVED|GO(?!-))\b",
         re.IGNORECASE | re.MULTILINE,
     )
 
     for text in texts:
+        # Normalise text (fold Unicode dash variants, strip format chars) before
+        # matching — match-only, never mutates stored or emitted text.
+        text = _normalize_text(text)
         # Strip markdown bold/italic markers
         cleaned = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
         for line in cleaned.splitlines():
