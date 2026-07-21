@@ -57,6 +57,25 @@ _NEGATION_HEDGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# --- Unicode dash normalisation (match-only, never mutates stored/emitted text) ---
+# Several Unicode dash and hyphen codepoints are visually indistinguishable from
+# ASCII '-' (U+002D) but bypass the ASCII-only hyphen guards in the GO compound
+# detector and the separator class.  Normalising them to '-' before any pattern
+# match lets the existing guards handle them uniformly.
+# Codepoints folded: U+2010 (‐), U+2011 (‑ non-breaking), U+2012 (‒ figure),
+# U+2013 (– en-dash), U+2014 (— em-dash), U+2015 (― horizontal bar), U+2212 (− minus).
+_UNICODE_DASH_RE = re.compile(r"[‐‑‒–—―−]")
+
+
+def _normalize_dashes(text: str) -> str:
+    """Fold Unicode dash/hyphen variants to ASCII '-' for match-only normalisation.
+
+    This is a pure read-time transformation: it is applied only to text being
+    inspected by the approval matchers.  It never mutates stored data, emitted
+    verdicts, or the comment text returned by format_review_comment().
+    """
+    return _UNICODE_DASH_RE.sub("-", text)
+
 
 def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     """Check if text matches a flexible approval pattern.
@@ -90,6 +109,11 @@ def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     Returns:
         True if the pattern is found, False otherwise.
     """
+    # Normalise Unicode dash variants to ASCII '-' before any matching so that
+    # visually-identical dashes (en-dash, em-dash, non-breaking hyphen, etc.) do
+    # not bypass the GO compound guard or the separator patterns.  Match-only:
+    # this transformation is never reflected in any stored or emitted text.
+    text = _normalize_dashes(text)
     # Strip markdown bold/italic markers so **APPROVED** matches as APPROVED
     cleaned = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
 
@@ -109,14 +133,27 @@ def matches_approval_pattern(text: str, prefix: str, keyword: str) -> bool:
     #
     # GO hyphen-compound guard (issue #138): \bGO\b matches the leading token
     # of "GO-WITH-CONDITIONS" because the hyphen is a non-word character that
-    # satisfies the word boundary on both sides. Negative lookahead/lookbehind
-    # for "-" prevents GO from matching when directly adjacent to a hyphen, so
-    # "GO-WITH-CONDITIONS" and "NO-GO" are correctly rejected as non-approvals.
-    # Bare "GO:", "GO ", "**GO**" etc. are unaffected (no adjacent hyphen).
+    # satisfies the word boundary on both sides.
+    #
+    # Two-char lookbehind (?<![a-zA-Z0-9]-): the char immediately before the
+    # hyphen must NOT be alphanumeric.  This correctly distinguishes:
+    #   - "NO-GO"         → 'O' before '-' is alphanumeric → rejected ✓
+    #   - ")-GO"          → ')' before '-' is not alphanumeric → cleared ✓
+    #   - "GO-WITH-..."   → trailing (?!-) rejects ✓
+    #   - "GO:", " GO", "**GO**" → no adjacent hyphen at all → cleared ✓
+    #
+    # A single-char lookbehind (?<!-) was tried first but incorrectly rejected
+    # "ROLE (Model)-GO" where the separator hyphen is directly before GO; the
+    # two-char form avoids that regression (cubic P2 / rework#2 Fix A).
+    #
+    # NOTE: the model-anchored path has_crs_model_approval() uses only the
+    # trailing guard GO(?!-) — the leading guard is not needed there because
+    # the separator class [:—–-]* consumes the chars before the keyword, so
+    # NO-GO cannot reach the keyword position. DO NOT "unify" these two paths.
     if keyword == "APPROVED":
         keyword_pattern = r"APPROVE(?:D|S)?"
     elif keyword == "GO":
-        keyword_pattern = r"(?<!-)GO(?!-)"
+        keyword_pattern = r"(?<![a-zA-Z0-9]-)GO(?!-)"
     else:
         keyword_pattern = re.escape(keyword)
     keyword_re = re.compile(rf"\b{keyword_pattern}\b", re.IGNORECASE)
@@ -203,6 +240,10 @@ def has_crs_model_approval(texts: list[str], model: str) -> bool:
     )
 
     for text in texts:
+        # Normalise Unicode dash variants to ASCII '-' (match-only, same as
+        # matches_approval_pattern) so that en-dash/em-dash compounds like
+        # "GO–WITH-CONDITIONS" are rejected by the trailing GO(?!-) guard.
+        text = _normalize_dashes(text)
         # Strip markdown bold/italic markers
         cleaned = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
         for line in cleaned.splitlines():
