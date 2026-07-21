@@ -186,11 +186,19 @@ def has_crs_model_approval(texts: list[str], model: str) -> bool:
     # Allowed separators: whitespace, colon, em dash, en dash, hyphen (0 or more).
     # No arbitrary tokens (like "and CRS (Codex)" or "BLOCKED") permitted between.
     # CRS must appear at line-start position (same rule as matches_approval_pattern).
-    # GO hyphen-compound guard (issue #138): negative lookahead prevents GO from
-    # matching as the leading token of "GO-WITH-CONDITIONS" (see matches_approval_pattern
-    # comment for detailed explanation; same root cause applies here).
+    #
+    # GO hyphen-compound guard (issue #138): trailing-only lookahead GO(?!-) is
+    # sufficient here — unlike the general matches_approval_pattern path which needs
+    # BOTH lookbehind AND lookahead to block NO-GO (because \bGO\b alone matches the
+    # trailing GO in "NO-GO"), this anchored path is safe with trailing-only because:
+    #   - The separator class [:—–-]* is consumed before GO, so "NO-GO" can never
+    #     reach the keyword position (the 'N' in 'NO-' is not in the separator class).
+    #   - A legitimate hyphen separator as in "CRS (Gemini)-GO" is consumed by the
+    #     separator class, leaving GO with no preceding hyphen — the leading lookbehind
+    #     (?<!-) would incorrectly reject this format (cubic P2 regression).
+    # DO NOT "unify" this to (?<!-)GO(?!-) — that re-introduces the P2 regression.
     pattern = re.compile(
-        rf"(?:^|(?<=\|))\s*CRS\s*\(\s*{re.escape(model)}\s*\)\s*[:—–\-]*\s*(?:APPROVED|(?<!-)GO(?!-))\b",
+        rf"(?:^|(?<=\|))\s*CRS\s*\(\s*{re.escape(model)}\s*\)\s*[:—–\-]*\s*(?:APPROVED|GO(?!-))\b",
         re.IGNORECASE | re.MULTILINE,
     )
 
