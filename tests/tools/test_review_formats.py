@@ -1016,3 +1016,133 @@ class TestParserAgreementGoWithConditions:
             "Visible-regex path false-greened the T3 gate for 'CIV (Codex) CONDITIONAL: "
             "GO-WITH-CONDITIONS' comment (issue #138 root cause)"
         )
+
+
+@pytest.mark.unit
+class TestGoParenthesisHyphenSeparatorGeneralPath:
+    """RED tests for REWORK#2 Fix A — 'ROLE (Model)-GO' must clear the general path.
+
+    The general matcher's (?<!-)GO(?!-) lookbehind inspects only the single char
+    immediately before GO, which is the hyphen separator.  For 'CE (Gemini)-GO'
+    that char is '-', so the lookbehind fires and incorrectly rejects the approval.
+
+    The correct guard is (?<![a-zA-Z0-9]-)GO(?!-): two-char lookbehind requiring
+    the char BEFORE the hyphen to be alphanumeric.  For 'NO-GO' that char is 'O'
+    (alphanumeric) → rejected.  For ')-GO' that char is ')' → cleared.
+    """
+
+    def test_ce_model_hyphen_separator_go_clears_general_path(self) -> None:
+        """CE (Gemini)-GO must clear the CE gate via the general path."""
+        from hestai_context_mcp.tools.shared.review_formats import has_ce_approval
+
+        assert has_ce_approval(["CE (Gemini)-GO"])
+
+    def test_tmg_model_hyphen_separator_go_clears_general_path(self) -> None:
+        """TMG (Gemini)-GO must clear the TMG gate via the general path."""
+        from hestai_context_mcp.tools.shared.review_formats import has_tmg_approval
+
+        assert has_tmg_approval(["TMG (Gemini)-GO"])
+
+    def test_matches_approval_pattern_paren_hyphen_go(self) -> None:
+        """matches_approval_pattern accepts ')-GO' separator form."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert matches_approval_pattern("CIV (Codex)-GO", "CIV", "GO")
+
+    # --- Guards: NO-GO and GO-WITH-CONDITIONS must remain rejected ---
+
+    def test_no_go_still_rejected_general_path(self) -> None:
+        """NO-GO must NOT clear via the general path after Fix A."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern("CRS NO-GO: blocked", "CRS", "GO")
+
+    def test_go_with_conditions_still_rejected_general_path(self) -> None:
+        """GO-WITH-CONDITIONS must NOT clear via the general path after Fix A."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern("CIV GO-WITH-CONDITIONS", "CIV", "GO")
+
+    # --- Regressions: bare formats must still clear ---
+
+    def test_bare_go_colon_still_clears(self) -> None:
+        """Bare 'CE GO:' still clears after Fix A."""
+        from hestai_context_mcp.tools.shared.review_formats import has_ce_approval
+
+        assert has_ce_approval(["CE GO: all good"])
+
+    def test_bold_go_still_clears(self) -> None:
+        """'CE **GO**' markdown bold still clears after Fix A."""
+        from hestai_context_mcp.tools.shared.review_formats import has_ce_approval
+
+        assert has_ce_approval(["CE **GO**"])
+
+
+@pytest.mark.unit
+class TestUnicodeDashBypassBothPaths:
+    """RED tests for REWORK#2 Fix B — Unicode dash variants must be treated as ASCII '-'.
+
+    U+2013 (en-dash '–'), U+2014 (em-dash '—'), U+2011 (non-breaking hyphen '‑'),
+    U+2012 (figure dash '‒'), U+2015 (horizontal bar '―'), U+2212 (minus '−')
+    all bypass the ASCII-hyphen guards, so 'GO–WITH-CONDITIONS' and 'NO–GO' currently
+    false-green.  Fix: normalize these codepoints to '-' before matching (match-only,
+    never mutates stored/emitted text).
+    """
+
+    # --- General path: Unicode-dash compounds must be rejected ---
+
+    def test_go_en_dash_with_conditions_rejected(self) -> None:
+        """GO–WITH-CONDITIONS (U+2013 en-dash) must NOT clear the gate."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern("CIV GO–WITH-CONDITIONS", "CIV", "GO")
+
+    def test_no_en_dash_go_rejected(self) -> None:
+        """NO–GO (U+2013 en-dash) must NOT clear the gate."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern("CIV NO–GO", "CIV", "GO")
+
+    def test_go_em_dash_with_conditions_rejected(self) -> None:
+        """GO—WITH-CONDITIONS (U+2014 em-dash) must NOT clear the gate."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern("CIV GO—WITH-CONDITIONS", "CIV", "GO")
+
+    def test_no_em_dash_go_rejected(self) -> None:
+        """NO—GO (U+2014 em-dash) must NOT clear the gate."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern("CIV NO—GO", "CIV", "GO")
+
+    def test_go_nonbreaking_hyphen_with_conditions_rejected(self) -> None:
+        """GO‑WITH-CONDITIONS (U+2011 non-breaking hyphen) must NOT clear the gate."""
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        assert not matches_approval_pattern("CIV GO‑WITH-CONDITIONS", "CIV", "GO")
+
+    # --- Model path: Unicode-dash compound must be rejected ---
+
+    def test_model_path_go_en_dash_with_conditions_rejected(self) -> None:
+        """CRS (Gemini): GO–WITH-CONDITIONS (U+2013) must NOT clear the model path."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_model_approval
+
+        assert not has_crs_model_approval(["CRS (Gemini): GO–WITH-CONDITIONS"], "Gemini")
+
+    # --- Unicode-dash as SEPARATOR must still clear ---
+
+    def test_model_path_en_dash_separator_go_clears(self) -> None:
+        """CRS (Gemini)–GO (U+2013 en-dash as separator) must clear the model path.
+
+        The separator class [:—–-]* already accepts em-dash and en-dash literals;
+        after normalization to '-' the guard GO(?!-) sees a bare GO and clears.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_model_approval
+
+        assert has_crs_model_approval(["CRS (Gemini)–GO"], "Gemini")
+
+    def test_general_path_en_dash_separator_go_clears(self) -> None:
+        """CE (Gemini)–GO (U+2013 en-dash as separator) must clear the general path."""
+        from hestai_context_mcp.tools.shared.review_formats import has_ce_approval
+
+        assert has_ce_approval(["CE (Gemini)–GO"])
