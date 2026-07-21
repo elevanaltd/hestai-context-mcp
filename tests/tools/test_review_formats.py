@@ -1168,7 +1168,7 @@ class TestRework3HardeningFixes:
     # --- Fix 1: Unicode-letter compound guard ---
 
     def test_cyrillic_no_go_rejected_general_path(self) -> None:
-        """NО-GO with Cyrillic О (U+041E) must NOT clear — Unicode \w catches it."""
+        r"""NО-GO with Cyrillic О (U+041E) must NOT clear — Unicode \w catches it."""
         from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
 
         # U+041E is Cyrillic capital О, visually identical to Latin O
