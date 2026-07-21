@@ -874,6 +874,54 @@ class TestGoHyphenatedCompoundsNotApproval:
 
         assert has_crs_model_approval(["CRS (Gemini): GO"], "Gemini")
 
+    # --- P2 regression: hyphen separator before GO must still clear the model-anchored path ---
+
+    def test_crs_model_approval_hyphen_separator_go_clears(self) -> None:
+        """CRS (Gemini)-GO must clear the model-anchored gate (hyphen is a valid separator).
+
+        The separator class [:—–-]* in has_crs_model_approval deliberately allows a
+        bare hyphen as a separator, so 'CRS (Gemini)-GO' is a legitimate approval
+        format. The leading lookbehind (?<!-) in the original fix incorrectly rejected
+        it because the char directly before GO is the separator hyphen (cubic P2).
+        """
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_model_approval
+
+        assert has_crs_model_approval(["CRS (Gemini)-GO"], "Gemini")
+
+    def test_crs_model_approval_hyphen_separator_go_with_conditions_still_rejected(
+        self,
+    ) -> None:
+        """CRS (Gemini)-GO-WITH-CONDITIONS must NOT clear (trailing guard still active)."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_model_approval
+
+        assert not has_crs_model_approval(["CRS (Gemini)-GO-WITH-CONDITIONS"], "Gemini")
+
+    def test_crs_model_approval_no_go_via_hyphen_separator_still_rejected(self) -> None:
+        """CRS (Gemini): NO-GO must NOT clear (leading N blocks the keyword match)."""
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_model_approval
+
+        assert not has_crs_model_approval(["CRS (Gemini): NO-GO"], "Gemini")
+
+    # --- P3 coverage: CE, PE, SR roles through the shared matches_approval_pattern path ---
+
+    def test_go_with_conditions_does_not_clear_ce_gate(self) -> None:
+        """CE GO-WITH-CONDITIONS must NOT clear the CE gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_ce_approval
+
+        assert not has_ce_approval(["CE (Gemini) GO-WITH-CONDITIONS: address nits"])
+
+    def test_go_with_conditions_does_not_clear_pe_gate(self) -> None:
+        """PE GO-WITH-CONDITIONS must NOT clear the PE gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_pe_approval
+
+        assert not has_pe_approval(["PE (Claude) GO-WITH-CONDITIONS: revisit ADR"])
+
+    def test_go_with_conditions_does_not_clear_sr_gate(self) -> None:
+        """SR GO-WITH-CONDITIONS must NOT clear the SR gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_sr_approval
+
+        assert not has_sr_approval(["SR GO-WITH-CONDITIONS: update standards doc"])
+
 
 @pytest.mark.unit
 class TestParserAgreementGoWithConditions:
