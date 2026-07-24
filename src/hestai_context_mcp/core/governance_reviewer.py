@@ -29,7 +29,7 @@ module (PROD::I3; asserted by ``tests/unit/test_source_invariants.py``).
 
 Cost caps (mirroring intake_compiler; operator-ratified, env-overridable):
     * ``HESTAI_REVIEW_MAX_OUTPUT_TOKENS`` — per-call output ceiling
-      (default 2000). Passed as ``CompletionRequest.max_tokens``.
+      (default 10000). Passed as ``CompletionRequest.max_tokens``.
     * ``HESTAI_REVIEW_MAX_COST_USD`` — abort *before* the call if the projected
       cost (input + max-output tokens, priced via
       ``HESTAI_REVIEW_USD_PER_1K_TOKENS``) exceeds this cap (default 0.50).
@@ -77,9 +77,11 @@ Verdict = Literal["APPROVED", "CONCERNS", "BLOCKED"]
 _DEFAULT_TIER = "analysis"
 
 # Defaults for the operator-ratified cost caps. All env-overridable. The output
-# ceiling is smaller than intake_compiler's: a review verdict is short prose +
-# a concern list, not a full AGR body.
-_DEFAULT_MAX_OUTPUT_TOKENS = 2000
+# ceiling must leave headroom for a reasoning-capable analysis-tier model: such
+# models spend output budget on hidden reasoning BEFORE emitting the short verdict
+# lines, so too small a cap truncates the call (finish_reason='length') before a
+# verdict lands. 10000 gives that headroom; the visible verdict is still short.
+_DEFAULT_MAX_OUTPUT_TOKENS = 10000
 _DEFAULT_MAX_COST_USD = 0.50
 # Default blended price used only for the *pre-call* cost projection. The
 # guard's purpose is to abort runaway requests, not to bill; real billing is
@@ -114,12 +116,19 @@ class ReviewResult(TypedDict):
         verdict:    ``"APPROVED"`` | ``"CONCERNS"`` | ``"BLOCKED"``.
         assessment: One-paragraph semantic assessment (never schema).
         concerns:   Zero or more concrete concern strings.
+        reviewer_available:
+            ``True`` when the model rendered a GENUINE semantic verdict;
+            ``False`` when the result is an OPERATIONAL failure (no client,
+            cost-cap abort, auth/transport/protocol/truncation, empty response)
+            — i.e. the reviewer could not run. The Stage-5 consumer uses this to
+            ABSTAIN (post nothing) rather than block the gate on infrastructure.
         metrics:    ``{tokens, cost, model}``.
     """
 
     verdict: Verdict
     assessment: str
     concerns: list[str]
+    reviewer_available: bool
     metrics: ReviewMetrics
 
 
@@ -247,11 +256,15 @@ def _blocked(
     cost: float = 0.0,
     cost_is_estimate: bool = True,
 ) -> ReviewResult:
-    """Build a fail-soft BLOCKED result. NEVER fabricates an APPROVED verdict."""
+    """Build a fail-soft OPERATIONAL-failure result. NEVER fabricates an APPROVED
+    verdict, and NEVER blocks the gate: ``reviewer_available=False`` tells the
+    Stage-5 consumer the reviewer could not run, so it abstains (posts nothing)
+    rather than leaving a blocking SR on the PR."""
     return {
         "verdict": "BLOCKED",
         "assessment": assessment,
         "concerns": concerns,
+        "reviewer_available": False,
         "metrics": {
             "tokens": tokens,
             "cost": cost,
@@ -299,12 +312,15 @@ def _parse_review(
     }
 
     if verdict_match is None:
-        # No recognisable verdict -> do not approve; route to a human.
+        # No recognisable verdict -> do not approve; route to a human. The model
+        # DID respond (reviewer ran), so this is a genuine — if malformed —
+        # review, not an operational failure: it still participates in the gate.
         concerns = concerns or ["Reviewer response did not contain a parseable verdict."]
         return {
             "verdict": "CONCERNS",
             "assessment": assessment,
             "concerns": concerns,
+            "reviewer_available": True,
             "metrics": metrics,
         }
 
@@ -313,6 +329,7 @@ def _parse_review(
         "verdict": verdict,
         "assessment": assessment,
         "concerns": concerns,
+        "reviewer_available": True,
         "metrics": metrics,
     }
 
@@ -348,7 +365,7 @@ async def review_governance(
         tier: Model tier (default ``"analysis"``). Forwarded to the tier-aware
             client factory and to model-name resolution.
         max_output_tokens: Per-call output ceiling. Defaults to
-            ``HESTAI_REVIEW_MAX_OUTPUT_TOKENS`` then 2000.
+            ``HESTAI_REVIEW_MAX_OUTPUT_TOKENS`` then 10000.
         max_cost_usd: Abort threshold for projected cost. Defaults to
             ``HESTAI_REVIEW_MAX_COST_USD`` then 0.50.
         working_dir: Optional caller project root (issue #106) forwarded to

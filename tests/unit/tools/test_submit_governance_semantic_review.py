@@ -56,12 +56,15 @@ _VALID_OCTAVE = (
 _PR_URL = "https://github.com/elevanaltd/hestai-context-mcp/pull/123"
 
 
-def _review_result(verdict: str, *, concerns: list[str] | None = None) -> dict[str, Any]:
+def _review_result(
+    verdict: str, *, concerns: list[str] | None = None, reviewer_available: bool = True
+) -> dict[str, Any]:
     """Build a ReviewResult-shaped dict for the stubbed reviewer."""
     return {
         "verdict": verdict,
         "assessment": f"semantic assessment ({verdict})",
         "concerns": concerns or [],
+        "reviewer_available": reviewer_available,
         "metrics": {"tokens": 100, "cost": 0.01, "model": "analysis-tier-model"},
     }
 
@@ -115,11 +118,15 @@ def capture_review(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, Any] = {"review": None, "submit": None}
 
     def _install(
-        verdict: str, *, concerns: list[str] | None = None, post_status: str = "ok"
+        verdict: str,
+        *,
+        concerns: list[str] | None = None,
+        post_status: str = "ok",
+        reviewer_available: bool = True,
     ) -> None:
         async def _fake_review(octave_content: str, **kwargs: Any) -> dict[str, Any]:
             captured["review"] = {"octave_content": octave_content, "kwargs": kwargs}
-            return _review_result(verdict, concerns=concerns)
+            return _review_result(verdict, concerns=concerns, reviewer_available=reviewer_available)
 
         def _fake_submit(**kwargs: Any) -> dict[str, Any]:
             captured["submit"] = kwargs
@@ -372,6 +379,48 @@ class TestStage5FailSoft:
         assert result["success"] is True
         assert result["semantic_review"]["posted"] is False
         assert result["semantic_review"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# Operational failure: the reviewer ABSTAINS (never blocks the gate)
+# ---------------------------------------------------------------------------
+
+
+class TestStage5OperationalFailureAbstains:
+    """A reviewer-infrastructure failure (truncation / 404 / auth / transport /
+    no-client / cost-cap / empty) yields ``reviewer_available=False``. Such a
+    result must NOT post a blocking SR verdict to the gate — a reviewer that
+    could not run is not evidence the record is bad. The reviewer ABSTAINS: no
+    ``submit_review`` call, the PR stays open + successful, and the reason is
+    recorded in the ``semantic_review`` block (fail-soft, non-destructive).
+    """
+
+    def test_reviewer_unavailable_does_not_post_sr(self, tmp_path, stub_octave_pr, capture_review):
+        # verdict text is BLOCKED but the reviewer never rendered it (operational).
+        capture_review("BLOCKED", reviewer_available=False)
+        result = asyncio.run(
+            submit_governance(working_dir=str(tmp_path), octave_content=_VALID_OCTAVE)
+        )
+        # PR is untouched and successful.
+        assert result["success"] is True
+        assert result["pr_url"] == _PR_URL
+        # Crucially: NO SR verdict was posted to the gate.
+        assert capture_review.captured["submit"] is None
+        # The abstention is recorded, not hidden.
+        sr = result["semantic_review"]
+        assert sr["posted"] is False
+        assert sr.get("skipped") is True
+        assert sr.get("reason")
+
+    def test_genuine_blocked_still_posts(self, tmp_path, stub_octave_pr, capture_review):
+        # A GENUINE semantic BLOCKED (reviewer_available=True) still participates.
+        capture_review("BLOCKED", reviewer_available=True)
+        result = asyncio.run(
+            submit_governance(working_dir=str(tmp_path), octave_content=_VALID_OCTAVE)
+        )
+        assert capture_review.captured["submit"] is not None
+        assert capture_review.captured["submit"]["verdict"] == "BLOCKED"
+        assert result["semantic_review"]["posted"] is True
 
 
 # ---------------------------------------------------------------------------

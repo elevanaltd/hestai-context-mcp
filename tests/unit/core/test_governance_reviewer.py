@@ -411,8 +411,76 @@ class TestCostCap:
         result = await review_governance(_SAMPLE_AGR)
         assert result["verdict"] == "APPROVED"
         assert stub.request is not None
-        # Fell back to the default 2000-token output ceiling.
-        assert stub.request.max_tokens == 2000
+        # Fell back to the default 10000-token output ceiling (raised from 2000
+        # so a reasoning-capable analysis-tier model has headroom to emit a
+        # verdict before hitting the output cap; truncation regression).
+        assert stub.request.max_tokens == 10000
+
+
+class TestReviewerAvailability:
+    """The result must distinguish a GENUINE semantic verdict (the model rendered
+    a judgment) from an OPERATIONAL failure (no verdict produced: no client,
+    cost-cap abort, auth/transport/protocol/truncation, empty response).
+
+    ``reviewer_available`` carries that discriminator so the Stage-5 consumer can
+    ABSTAIN (post nothing) on an operational failure rather than block the gate —
+    a reviewer that could not run is not evidence the record is bad.
+    """
+
+    async def test_genuine_approved_marks_reviewer_available(self, patch_client) -> None:
+        stub = _StubClient(text=_APPROVED_RESPONSE)
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["reviewer_available"] is True
+
+    async def test_genuine_blocked_marks_reviewer_available(self, patch_client) -> None:
+        # A real semantic BLOCKED still participates in the gate (available=True).
+        stub = _StubClient(text=_BLOCKED_RESPONSE)
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["reviewer_available"] is True
+
+    async def test_truncation_marks_reviewer_unavailable(self, patch_client) -> None:
+        stub = _StubClient(raises=AIClientTruncationError("truncated", consumed_tokens=5636))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["reviewer_available"] is False
+
+    async def test_transport_error_marks_reviewer_unavailable(self, patch_client) -> None:
+        stub = _StubClient(raises=AIClientTransportError("boom"))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["reviewer_available"] is False
+
+    async def test_protocol_error_marks_reviewer_unavailable(self, patch_client) -> None:
+        stub = _StubClient(raises=AIClientProtocolError("HTTP 404"))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["reviewer_available"] is False
+
+    async def test_auth_error_marks_reviewer_unavailable(self, patch_client) -> None:
+        stub = _StubClient(raises=AIClientAuthError("401"))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["reviewer_available"] is False
+
+    async def test_no_client_marks_reviewer_unavailable(self, patch_client) -> None:
+        patch_client(None)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["reviewer_available"] is False
+
+    async def test_cost_cap_abort_marks_reviewer_unavailable(self, patch_client) -> None:
+        stub = _StubClient(text=_APPROVED_RESPONSE)
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR, max_cost_usd=0.0)
+        assert result["reviewer_available"] is False
+
+    async def test_empty_response_marks_reviewer_unavailable(self, patch_client) -> None:
+        stub = _StubClient(text="   ")
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["reviewer_available"] is False
 
 
 class TestResultShape:

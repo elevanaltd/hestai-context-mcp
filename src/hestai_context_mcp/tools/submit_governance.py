@@ -155,6 +155,22 @@ async def _run_semantic_review(
         "concerns": concerns,
     }
 
+    # ABSTAIN on an operational reviewer failure. ``reviewer_available=False``
+    # means the reviewer could not render a semantic verdict (no client, cost-cap
+    # abort, auth/transport/protocol/truncation, empty response). A reviewer that
+    # could not run is NOT evidence the record is bad, and even a non-APPROVED SR
+    # verdict fails to clear the gate — so posting ANYTHING here would wrongly
+    # block the PR. We post nothing and record the reason (fail-soft,
+    # non-destructive). A GENUINE semantic verdict (available=True), including a
+    # real BLOCKED/CONCERNS, still posts and participates in the gate.
+    if not review.get("reviewer_available", True):
+        return {
+            **base,
+            "posted": False,
+            "skipped": True,
+            "reason": review.get("assessment", "") or "reviewer unavailable",
+        }
+
     match = _PR_URL_RE.search(pr_url or "")
     if match is None:
         return {**base, "posted": False, "error": f"could not parse PR URL: {pr_url!r}"}
