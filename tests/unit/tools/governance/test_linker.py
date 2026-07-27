@@ -292,12 +292,12 @@ class TestGitAddAndCommit:
 class TestPushBranch:
     @pytest.mark.unit
     def test_success_returns_none_and_pushes_upstream(self, tmp_path: Path) -> None:
-        """A 0-exit push returns None and uses `push -u origin <branch>`."""
+        """A 0-exit push returns None and uses `push --no-verify -u origin <branch>`."""
         with patch(f"{_LINKER}._run_git", return_value=(0, "", "")) as run:
             err = _push_branch(tmp_path, "governance/x")
         assert err is None
         argv = run.call_args.args[0]
-        assert argv == ["push", "-u", "origin", "governance/x"]
+        assert argv == ["push", "--no-verify", "-u", "origin", "governance/x"]
 
     @pytest.mark.unit
     def test_failure_returns_error_string(self, tmp_path: Path) -> None:

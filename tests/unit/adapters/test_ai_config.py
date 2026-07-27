@@ -122,10 +122,10 @@ class TestResolveProvider:
 
 
 class TestResolveModel:
-    def test_default_is_gemini_flash_lite(self, clean_env):
+    def test_default_is_claude_haiku(self, clean_env):
         from hestai_context_mcp.adapters.ai_config import resolve_model
 
-        assert resolve_model() == "google/gemini-2.0-flash-lite"
+        assert resolve_model() == "anthropic/claude-haiku-4.5"
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch, clean_env):
         from hestai_context_mcp.adapters.ai_config import resolve_model

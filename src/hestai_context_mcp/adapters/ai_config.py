@@ -7,7 +7,7 @@ Resolution order (highest precedence first):
 2. **Provider** — ``HESTAI_AI_PROVIDER`` env var, else
    :data:`DEFAULT_PROVIDER` (``"openrouter"``).
 3. **Model** — ``HESTAI_AI_MODEL`` env var, else
-   :data:`DEFAULT_MODEL` (``"google/gemini-2.0-flash-lite"``).
+   :data:`DEFAULT_MODEL` (``"anthropic/claude-haiku-4.5"``).
 
 **Keyring service-name migration** (HO-confirmed):
     * Legacy name: ``"hestai-mcp"`` (from the deprecated
@@ -55,9 +55,13 @@ __all__ = [
 LEGACY_KEYRING_SERVICE: str = "hestai-mcp"
 KEYRING_SERVICE: str = "hestai-context-mcp"
 
-# Provider / model defaults (match legacy hestai-mcp defaults).
+# Provider / model defaults. ``DEFAULT_MODEL`` is the last-resort fallback used
+# only when NO ``HESTAI_AI_MODEL[_TIER]`` env var is configured; it MUST be a
+# currently-valid provider slug so an unconfigured deployment degrades to a live
+# model rather than a 404 (the retired ``google/gemini-2.0-flash-lite`` default
+# did the latter). ``anthropic/claude-haiku-4.5`` is a cheap, always-available floor.
 DEFAULT_PROVIDER: str = "openrouter"
-DEFAULT_MODEL: str = "google/gemini-2.0-flash-lite"
+DEFAULT_MODEL: str = "anthropic/claude-haiku-4.5"
 
 # Issue #106 — per-repo model opt-in flag (HO-INTAKE-MODEL-RESOLUTION-CENTRALIZED).
 # Model selection is centralized-by-default (the process env wins, so every
