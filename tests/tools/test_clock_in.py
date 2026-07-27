@@ -150,12 +150,23 @@ class TestClockInReturnShape:
         )
         assert result["context"]["project_context"] == ctx_content
 
+    @patch("hestai_context_mcp.core.synthesis.build_default_ai_client", return_value=None)
     @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
-    def test_ai_synthesis_always_present_as_structured_dict(self, mock_branch, tmp_path):
+    def test_ai_synthesis_always_present_as_structured_dict(
+        self, mock_branch, mock_ai_client, tmp_path
+    ):
         """ai_synthesis is ALWAYS in the response (PROD::I4 structured shape).
 
         Issue #4: ai_synthesis must never be absent. With no provider wired,
         the fallback dict must still be returned with {source, synthesis}.
+
+        Issue #66 (hermeticity): "no provider wired" is ENFORCED by patching the
+        composition-root seam to return None, not left to the ambient
+        environment. Previously this test passed only incidentally — the
+        hardcoded DEFAULT_MODEL slug had been retired by the provider, so the
+        call 404'd into the fallback. On any machine with a working credential
+        the suite would instead make a REAL network call and return source="ai".
+        Patching the seam makes the assertion deterministic and offline.
         """
         result = clock_in(
             role="test-role",
