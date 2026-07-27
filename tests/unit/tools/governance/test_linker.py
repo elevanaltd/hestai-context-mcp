@@ -292,12 +292,27 @@ class TestGitAddAndCommit:
 class TestPushBranch:
     @pytest.mark.unit
     def test_success_returns_none_and_pushes_upstream(self, tmp_path: Path) -> None:
-        """A 0-exit push returns None and uses `push -u origin <branch>`."""
+        """A 0-exit push returns None and uses `push --no-verify -u origin <branch>`."""
         with patch(f"{_LINKER}._run_git", return_value=(0, "", "")) as run:
             err = _push_branch(tmp_path, "governance/x")
         assert err is None
         argv = run.call_args.args[0]
-        assert argv == ["push", "-u", "origin", "governance/x"]
+        assert argv == ["push", "--no-verify", "-u", "origin", "governance/x"]
+
+    @pytest.mark.unit
+    def test_push_bypasses_local_pre_push_hooks(self, tmp_path: Path) -> None:
+        """The governance push MUST pass --no-verify.
+
+        The linker pushes from an EPHEMERAL temp worktree whose venv is not the
+        operator's. A local pre-push hook that runs project quality gates (lint /
+        typecheck / tests) fails in that throwaway environment and aborts the
+        push, so the AGR authors + validates but no PR is ever opened. Governance
+        branches are doc-only (an .oct.md + MANIFEST.md); their real gate is CI +
+        human PR review, not a client-side hook.
+        """
+        with patch(f"{_LINKER}._run_git", return_value=(0, "", "")) as run:
+            _push_branch(tmp_path, "governance/x")
+        assert "--no-verify" in run.call_args.args[0]
 
     @pytest.mark.unit
     def test_failure_returns_error_string(self, tmp_path: Path) -> None:

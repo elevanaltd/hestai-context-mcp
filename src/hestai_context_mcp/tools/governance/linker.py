@@ -6,7 +6,7 @@ Accepts a ValidationResult + raw OCTAVE content, then:
   2. Writes OCTAVE content to the computed target_path INSIDE that worktree
   3. Commits with: chore(governance): add {token} [{card_type}]
   4. Updates MANIFEST (write_manifest)
-  5. Pushes the branch to origin (git push -u origin <branch>)
+  5. Pushes the branch to origin (git push --no-verify -u origin <branch>)
   6. Opens PR via gh pr create
   7. Removes the worktree (always); rolls back the local branch if nothing was
      pushed.
@@ -175,14 +175,23 @@ def _delete_branch(working_dir: Path, branch_name: str) -> None:
 def _push_branch(working_dir: Path, branch_name: str) -> str | None:
     """Push the new branch to origin, setting upstream.
 
-    Runs ``git push -u origin <branch>``. This MUST happen before
+    Runs ``git push --no-verify -u origin <branch>``. This MUST happen before
     ``gh pr create`` -- otherwise gh aborts with "you must first push the
     current branch to a remote" (issue #73).
+
+    ``--no-verify`` bypasses LOCAL pre-push hooks. The push originates from an
+    EPHEMERAL temp worktree with a throwaway venv, not the operator's
+    environment, so an operator hook that runs project quality gates
+    (lint/typecheck/tests) fails there and aborts the push — the AGR authors and
+    validates, but no PR is ever opened. Governance branches are doc-only (an
+    ``.oct.md`` plus ``MANIFEST.md``); their real gate is CI + human PR review,
+    which are unaffected by this flag. Server-side branch protection is likewise
+    unaffected (``--no-verify`` is client-side only).
 
     Returns an error string on failure, None on success. A push failure is
     surfaced as a structured error (PROD I4) and never swallowed.
     """
-    code, _, stderr = _run_git(["push", "-u", "origin", branch_name], working_dir)
+    code, _, stderr = _run_git(["push", "--no-verify", "-u", "origin", branch_name], working_dir)
     if code != 0:
         return f"Failed to push branch '{branch_name}' to origin: {stderr}"
     return None
