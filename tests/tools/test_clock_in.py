@@ -10,6 +10,30 @@ import pytest
 from hestai_context_mcp.tools.clock_in import clock_in
 
 
+@pytest.fixture(autouse=True)
+def no_real_ai_provider(monkeypatch):
+    """Hermeticity guard (issue #66): no test here may reach a real AI provider.
+
+    ``clock_in`` resolves ai_synthesis through
+    ``core.synthesis.build_default_ai_client``. Left unpatched, these tests are
+    ambient-dependent: on a machine with a working credential they make REAL
+    network calls, and the fallback-shape assertions fail with source="ai".
+    They previously passed only incidentally, because the hardcoded
+    DEFAULT_MODEL slug had been retired by the provider and 404'd into the
+    fallback path — masking the fragility until the default was repaired.
+
+    Pinning the composition-root seam to ``None`` for the whole module makes
+    every test offline and deterministic. Tests that exercise the AI-success
+    path patch ``synthesize_ai_context`` (ABOVE this seam), so they are
+    unaffected.
+    """
+    from hestai_context_mcp.core import synthesis as synthesis_mod
+
+    monkeypatch.setattr(
+        synthesis_mod, "build_default_ai_client", lambda *_a, **_kw: None, raising=True
+    )
+
+
 class TestClockInReturnShape:
     """Verify the clock_in return matches the interface contract."""
 
@@ -150,23 +174,15 @@ class TestClockInReturnShape:
         )
         assert result["context"]["project_context"] == ctx_content
 
-    @patch("hestai_context_mcp.core.synthesis.build_default_ai_client", return_value=None)
     @patch("hestai_context_mcp.tools.clock_in.get_current_branch", return_value="main")
-    def test_ai_synthesis_always_present_as_structured_dict(
-        self, mock_branch, mock_ai_client, tmp_path
-    ):
+    def test_ai_synthesis_always_present_as_structured_dict(self, mock_branch, tmp_path):
         """ai_synthesis is ALWAYS in the response (PROD::I4 structured shape).
 
         Issue #4: ai_synthesis must never be absent. With no provider wired,
         the fallback dict must still be returned with {source, synthesis}.
 
-        Issue #66 (hermeticity): "no provider wired" is ENFORCED by patching the
-        composition-root seam to return None, not left to the ambient
-        environment. Previously this test passed only incidentally — the
-        hardcoded DEFAULT_MODEL slug had been retired by the provider, so the
-        call 404'd into the fallback. On any machine with a working credential
-        the suite would instead make a REAL network call and return source="ai".
-        Patching the seam makes the assertion deterministic and offline.
+        "No provider wired" is ENFORCED by the module-level
+        ``no_real_ai_provider`` fixture, not left to the ambient environment.
         """
         result = clock_in(
             role="test-role",

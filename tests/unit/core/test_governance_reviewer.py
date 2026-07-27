@@ -465,6 +465,15 @@ class TestReviewerAvailability:
         result = await review_governance(_SAMPLE_AGR)
         assert result["reviewer_available"] is False
 
+    async def test_generic_ai_client_error_marks_reviewer_unavailable(self, patch_client) -> None:
+        # The base-class catch-all: a future/unclassified AIClientError subclass
+        # must still be treated as an operational failure, never as a verdict.
+        stub = _StubClient(raises=AIClientError("unclassified backend failure"))
+        patch_client(stub)
+        result = await review_governance(_SAMPLE_AGR)
+        assert result["verdict"] == "BLOCKED"
+        assert result["reviewer_available"] is False
+
     async def test_no_client_marks_reviewer_unavailable(self, patch_client) -> None:
         patch_client(None)
         result = await review_governance(_SAMPLE_AGR)

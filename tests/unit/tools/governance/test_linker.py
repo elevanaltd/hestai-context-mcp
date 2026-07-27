@@ -300,21 +300,6 @@ class TestPushBranch:
         assert argv == ["push", "--no-verify", "-u", "origin", "governance/x"]
 
     @pytest.mark.unit
-    def test_push_bypasses_local_pre_push_hooks(self, tmp_path: Path) -> None:
-        """The governance push MUST pass --no-verify.
-
-        The linker pushes from an EPHEMERAL temp worktree whose venv is not the
-        operator's. A local pre-push hook that runs project quality gates (lint /
-        typecheck / tests) fails in that throwaway environment and aborts the
-        push, so the AGR authors + validates but no PR is ever opened. Governance
-        branches are doc-only (an .oct.md + MANIFEST.md); their real gate is CI +
-        human PR review, not a client-side hook.
-        """
-        with patch(f"{_LINKER}._run_git", return_value=(0, "", "")) as run:
-            _push_branch(tmp_path, "governance/x")
-        assert "--no-verify" in run.call_args.args[0]
-
-    @pytest.mark.unit
     def test_failure_returns_error_string(self, tmp_path: Path) -> None:
         """A non-zero push surfaces as a structured error string (PROD I4)."""
         with patch(f"{_LINKER}._run_git", return_value=(1, "", "permission denied")):

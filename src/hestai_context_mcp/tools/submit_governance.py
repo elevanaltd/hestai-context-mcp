@@ -164,11 +164,22 @@ async def _run_semantic_review(
     # non-destructive). A GENUINE semantic verdict (available=True), including a
     # real BLOCKED/CONCERNS, still posts and participates in the gate.
     if not review.get("reviewer_available", True):
+        reason = review.get("assessment", "") or "reviewer unavailable"
+        # Abstention is LOUD, never silent: the review gate still shows the
+        # record's required SR verdict as missing (so the PR does not clear the
+        # gate on its own), and this WARNING records WHY no verdict was rendered
+        # for the operator/audit trail.
+        logger.warning(
+            "Stage-5 semantic review ABSTAINED on %s (no verdict posted; "
+            "gate still requires the SR verdict): %s",
+            pr_url,
+            reason,
+        )
         return {
             **base,
             "posted": False,
             "skipped": True,
-            "reason": review.get("assessment", "") or "reviewer unavailable",
+            "reason": reason,
         }
 
     match = _PR_URL_RE.search(pr_url or "")
