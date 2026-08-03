@@ -30,6 +30,48 @@ _IL_APPROVED_KEYWORD = "SELF-REVIEWED"
 # --- HO uses REVIEWED keyword instead of APPROVED ---
 _HO_APPROVED_KEYWORD = "REVIEWED"
 
+# --- Recognised header tokens for the duplicate-header guard ---
+# The set of tokens format_review_comment() itself ever emits as the verb in
+# "<ROLE> <TOKEN>:" -- the raw verdicts plus the two role-specific keyword
+# substitutions (IL -> SELF-REVIEWED, HO -> REVIEWED).
+_RECOGNIZED_HEADER_TOKENS: frozenset[str] = VALID_VERDICTS | {
+    _IL_APPROVED_KEYWORD,
+    _HO_APPROVED_KEYWORD,
+}
+
+# Matches "<ROLE> <TOKEN>:" at position 0, no parenthetical, exact role and a
+# recognised token only -- deliberately strict so a near-miss (wrong role,
+# unrecognized token, or the header not at position 0) is never trusted.
+_EXISTING_HEADER_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _has_existing_header(assessment: str, role: str) -> bool:
+    """Check whether ``assessment`` already opens with a valid header for ``role``.
+
+    Used by format_review_comment() to avoid double-prepending a header onto
+    assessment text a caller already formatted themselves (defect: unconditional
+    prepend produced "CE APPROVED: CE APPROVED: ...", "TMG APPROVED: TMG
+    APPROVED: ...", etc.).
+
+    Strict by design: only an EXACT "<role> <token>:" at the very start of the
+    first line, for the SAME role, with a token from ``_RECOGNIZED_HEADER_TOKENS``,
+    counts as already-valid. Anything else (different role, unrecognized token,
+    or the header appearing on a later line) is treated as ordinary assessment
+    text and still gets the canonical header prepended.
+    """
+    pattern = _EXISTING_HEADER_RE_CACHE.get(role)
+    if pattern is None:
+        # Longest-first alternation so e.g. "SELF-REVIEWED" isn't shadowed by a
+        # shorter token sharing a prefix.
+        tokens = sorted(_RECOGNIZED_HEADER_TOKENS, key=len, reverse=True)
+        token_alt = "|".join(re.escape(t) for t in tokens)
+        pattern = re.compile(rf"^{re.escape(role)} (?:{token_alt}):")
+        _EXISTING_HEADER_RE_CACHE[role] = pattern
+
+    first_line = assessment.split("\n", 1)[0]
+    return pattern.match(first_line) is not None
+
+
 # --- Negation / hedge guard (trust-model defect fix) ---
 # A role-anchored verdict only clears the gate when the span BETWEEN the role
 # prefix and the verdict verb is free of negation/conditional intent. Without
@@ -495,10 +537,18 @@ def format_review_comment(
     else:
         keyword = verdict
 
-    # Build the prefix with optional model annotation
-    prefix = f"{role} ({model_annotation})" if model_annotation else role
-
-    human_line = f"{prefix} {keyword}: {assessment}"
+    # Duplicate-header guard: if the assessment already opens with a valid
+    # "<ROLE> <TOKEN>:" header for this SAME role, trust it verbatim instead
+    # of prepending a second header (defect: unconditional prepend produced
+    # "CE APPROVED: CE APPROVED: ...", "TMG APPROVED: TMG APPROVED: ...").
+    # Near-misses (wrong role, unrecognized token, header not at position 0)
+    # are NOT trusted and still get the canonical header below.
+    if _has_existing_header(assessment, role):
+        human_line = assessment
+    else:
+        # Build the prefix with optional model annotation
+        prefix = f"{role} ({model_annotation})" if model_annotation else role
+        human_line = f"{prefix} {keyword}: {assessment}"
 
     # Build metadata dict
     metadata: dict[str, str | None] = {
