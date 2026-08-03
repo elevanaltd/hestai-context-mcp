@@ -45,6 +45,40 @@ _RECOGNIZED_HEADER_TOKENS: frozenset[str] = VALID_VERDICTS | {
 _EXISTING_HEADER_RE_CACHE: dict[str, re.Pattern[str]] = {}
 
 
+def _sanitize_model_label(model_annotation: str) -> str:
+    """Strip characters that would corrupt the anchored "<ROLE> (<model>)" shape.
+
+    Parentheses inside a free-form model/annotation label (e.g. a decorated
+    display name such as ``"Gemini 3.1 Pro (High)"``) would otherwise nest
+    inside the header's own wrapping parens, producing
+    ``"CRS (Gemini 3.1 Pro (High))"`` -- visually ambiguous and unsafe for any
+    exact-match parenthetical lookup. Only the parenthesis punctuation is
+    stripped; the human-readable content is preserved (minimal intervention --
+    the documented ``"CRS (Gemini): APPROVED"`` parenthetical format is kept,
+    just constrained to never nest).
+    """
+    return re.sub(r"[()]", "", model_annotation).strip()
+
+
+def _normalize_provider(model_annotation: str) -> str:
+    """Derive a clean, short provider token from a free-form model label.
+
+    Takes the leading contiguous run of non-whitespace, non-parenthesis
+    characters, lower-cased, so a decorated label like
+    ``"Gemini 3.1 Pro (High)"`` yields ``"gemini"`` -- matching the existing
+    single-word convention (``"Gemini"`` -> ``"gemini"``, unchanged) and
+    keeping the metadata ``provider`` field usable for exact-match
+    provider-level lookups (e.g. ``scripts/validate_review.py``'s
+    ``_meta_has(..., provider=...)``) regardless of how decorated the visible
+    annotation is. The full annotation still appears, sanitized, in the
+    human-readable header -- only the metadata token is shortened.
+    """
+    stripped = model_annotation.strip()
+    match = re.match(r"[^\s()]+", stripped)
+    token = match.group(0) if match else stripped
+    return token.lower()
+
+
 def _has_existing_header(assessment: str, role: str) -> bool:
     """Check whether ``assessment`` already opens with a valid header for ``role``.
 
@@ -546,14 +580,16 @@ def format_review_comment(
     if _has_existing_header(assessment, role):
         human_line = assessment
     else:
-        # Build the prefix with optional model annotation
-        prefix = f"{role} ({model_annotation})" if model_annotation else role
+        # Build the prefix with optional model annotation. The annotation is
+        # sanitized (parens stripped) so a decorated label can never nest
+        # inside the header's own wrapping parens.
+        prefix = f"{role} ({_sanitize_model_label(model_annotation)})" if model_annotation else role
         human_line = f"{prefix} {keyword}: {assessment}"
 
     # Build metadata dict
     metadata: dict[str, str | None] = {
         "role": role,
-        "provider": model_annotation.lower() if model_annotation else None,
+        "provider": _normalize_provider(model_annotation) if model_annotation else None,
         "verdict": keyword,
         "sha": commit_sha[:7] if commit_sha else None,
     }
