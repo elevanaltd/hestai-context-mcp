@@ -569,10 +569,7 @@ class TestDuplicateHeaderPrevention:
             assessment="CE FROBNICATED: this is not a recognised verdict token",
         )
         human_line = comment.split("\n", 1)[0]
-        assert (
-            human_line
-            == "CE APPROVED: CE FROBNICATED: this is not a recognised verdict token"
-        )
+        assert human_line == "CE APPROVED: CE FROBNICATED: this is not a recognised verdict token"
 
     def test_near_miss_header_not_at_position_zero_still_gets_canonical_header(self) -> None:
         """A valid-looking header that isn't at the very start is not trusted."""

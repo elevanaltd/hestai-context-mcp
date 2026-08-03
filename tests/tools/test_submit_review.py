@@ -536,9 +536,7 @@ class TestRejectedVerdict:
             matches_approval_pattern,
         )
 
-        historical_comment = (
-            "CE BLOCKED: CE REJECTED: fundamental design flaw in the retry logic"
-        )
+        historical_comment = "CE BLOCKED: CE REJECTED: fundamental design flaw in the retry logic"
         assert matches_approval_pattern(historical_comment, "CE", "BLOCKED") is True
         assert has_ce_approval([historical_comment]) is False
 
