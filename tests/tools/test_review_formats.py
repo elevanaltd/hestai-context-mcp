@@ -496,6 +496,111 @@ class TestFormatReviewComment:
         assert "Delegated to IL, verified output" in comment
 
 
+# ---------------------------------------------------------------------------
+# Duplicate-header prevention tests (defect B)
+# ---------------------------------------------------------------------------
+# format_review_comment() used to prepend "<ROLE> <VERDICT>: " unconditionally,
+# even when the assessment text already opened with a valid header for the
+# SAME role -- producing observed duplicates like "CE APPROVED: CE APPROVED:
+# https://...", "TMG APPROVED: TMG APPROVED: ...",
+# "CIV CONDITIONAL: CIV CONDITIONAL: ...". has_ce_approval() etc. still match
+# the duplicated form (cosmetic, not a gating defect) but it is the visible
+# proof of the underlying unconditional-prepend mechanism.
+@pytest.mark.unit
+class TestDuplicateHeaderPrevention:
+    """A pre-existing valid '<ROLE> <VERDICT>:' header must not be doubled."""
+
+    def test_assessment_already_headered_is_not_duplicated(self) -> None:
+        """CE APPROVED: <assessment already starting with 'CE APPROVED:'>."""
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE APPROVED: https://example.com/evidence",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "CE APPROVED: https://example.com/evidence"
+        assert human_line.count("CE APPROVED:") == 1
+
+    def test_tmg_already_headered_is_not_duplicated(self) -> None:
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="TMG",
+            verdict="APPROVED",
+            assessment="TMG APPROVED: coverage looks solid",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "TMG APPROVED: coverage looks solid"
+        assert human_line.count("TMG APPROVED:") == 1
+
+    def test_civ_conditional_already_headered_is_not_duplicated(self) -> None:
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CIV",
+            verdict="CONDITIONAL",
+            assessment="CIV CONDITIONAL: pending perf test",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "CIV CONDITIONAL: pending perf test"
+        assert human_line.count("CIV CONDITIONAL:") == 1
+
+    def test_near_miss_different_role_still_gets_canonical_header(self) -> None:
+        """A header for a DIFFERENT role in the assessment is not trusted."""
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="APPROVED",
+            assessment="CRS APPROVED: this text starts with the wrong role",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "CE APPROVED: CRS APPROVED: this text starts with the wrong role"
+
+    def test_near_miss_unrecognized_token_still_gets_canonical_header(self) -> None:
+        """A role prefix followed by a bogus (non-verdict) token is not trusted."""
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE FROBNICATED: this is not a recognised verdict token",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert (
+            human_line
+            == "CE APPROVED: CE FROBNICATED: this is not a recognised verdict token"
+        )
+
+    def test_near_miss_header_not_at_position_zero_still_gets_canonical_header(self) -> None:
+        """A valid-looking header that isn't at the very start is not trusted."""
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="APPROVED",
+            assessment="See below.\nCE APPROVED: buried on line 2",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "CE APPROVED: See below."
+
+    def test_gate_matching_unaffected_by_deduplication(self) -> None:
+        """The de-duplicated comment must still clear the gate exactly as before."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_ce_approval,
+        )
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE APPROVED: https://example.com/evidence",
+        )
+        assert has_ce_approval([comment]) is True
+
+
 @pytest.mark.unit
 class TestReviewMetadata:
     """Test structured machine-readable metadata in review comments."""
