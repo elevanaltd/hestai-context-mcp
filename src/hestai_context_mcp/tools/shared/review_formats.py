@@ -22,7 +22,7 @@ TIER_4_STRATEGIC = "TIER_4_STRATEGIC"
 
 # --- Valid roles and verdicts ---
 VALID_ROLES: frozenset[str] = frozenset({"CRS", "CE", "SR", "IL", "HO", "TMG", "CIV", "PE"})
-VALID_VERDICTS: frozenset[str] = frozenset({"APPROVED", "BLOCKED", "CONDITIONAL"})
+VALID_VERDICTS: frozenset[str] = frozenset({"APPROVED", "BLOCKED", "CONDITIONAL", "REJECTED"})
 
 # --- IL uses SELF-REVIEWED keyword instead of APPROVED ---
 _IL_APPROVED_KEYWORD = "SELF-REVIEWED"
@@ -464,15 +464,17 @@ def format_review_comment(
 
     For IL role with APPROVED verdict, the keyword is mapped to SELF-REVIEWED.
     For HO role with APPROVED verdict, the keyword is mapped to REVIEWED.
-    For BLOCKED/CONDITIONAL verdicts, the comment uses the verdict directly
-    (these don't clear the gate but are valid review comments).
+    For BLOCKED/CONDITIONAL/REJECTED verdicts, the comment uses the verdict
+    directly (these don't clear the gate but are valid review comments).
+    REJECTED is passed through verbatim -- it is never rewritten to BLOCKED
+    or any other verdict.
 
     Appends a machine-readable metadata HTML comment on a second line for
     structured audit trail parsing.
 
     Args:
         role: Reviewer role (TMG, CRS, CE, CIV, PE, IL, HO).
-        verdict: Review verdict (APPROVED, BLOCKED, CONDITIONAL).
+        verdict: Review verdict (APPROVED, BLOCKED, CONDITIONAL, REJECTED).
         assessment: Review assessment content.
         model_annotation: Optional model name (e.g., 'Gemini') for annotation.
         commit_sha: Optional PR head SHA the reviewer verified.

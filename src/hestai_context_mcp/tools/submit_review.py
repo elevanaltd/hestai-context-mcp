@@ -2,8 +2,8 @@
 
 Posts structured review verdicts that clear CI review-gate checks.
 Supports dry-run validation without posting. 8 reviewer roles
-(CE, CIV, CRS, HO, IL, PE, SR, TMG), 3 verdicts (APPROVED, BLOCKED,
-CONDITIONAL), commit SHA pinning for audit trail.
+(CE, CIV, CRS, HO, IL, PE, SR, TMG), 4 verdicts (APPROVED, BLOCKED,
+CONDITIONAL, REJECTED), commit SHA pinning for audit trail.
 
 Harvested from hestai-mcp legacy with proven logic preserved.
 Fail-closed: validates format before posting.
@@ -71,8 +71,8 @@ def _validate_inputs(
 def _check_would_clear_gate(comment: str, role: str, verdict: str) -> bool:
     """Check if the formatted comment would clear the review gate.
 
-    Only APPROVED verdicts can clear gates. BLOCKED and CONDITIONAL
-    are valid review comments but do not clear the gate.
+    Only APPROVED verdicts can clear gates. BLOCKED, CONDITIONAL, and
+    REJECTED are valid review comments but do not clear the gate.
     """
     if verdict != "APPROVED":
         return False
@@ -298,7 +298,7 @@ def submit_review(
         repo: Repository in owner/name format (e.g., 'elevanaltd/HestAI-MCP').
         pr_number: PR number to comment on.
         role: Reviewer role (CE, CIV, CRS, HO, IL, PE, SR, TMG).
-        verdict: Review verdict (APPROVED, BLOCKED, CONDITIONAL).
+        verdict: Review verdict (APPROVED, BLOCKED, CONDITIONAL, REJECTED).
         assessment: Review assessment content.
         model_annotation: Optional model name (e.g., 'Gemini') for annotation.
         commit_sha: Optional PR head SHA the reviewer verified.
