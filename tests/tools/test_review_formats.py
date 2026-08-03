@@ -878,6 +878,113 @@ class TestReviewMetadata:
         assert matches_approval_pattern(visible_text, "CRS", "BLOCKED")
 
 
+# ---------------------------------------------------------------------------
+# Model-annotation shape tests (defect C)
+# ---------------------------------------------------------------------------
+# format_review_comment() wraps a caller-supplied free-form model_annotation
+# in a single parenthetical: "{role} ({model_annotation}) {keyword}: ...".
+# When model_annotation itself contains parentheses (e.g. a decorated label
+# like "Gemini 3.1 Pro (High)"), the result nests parens -- "CRS (Gemini 3.1
+# Pro (High)) APPROVED: ...". This does not break the generic has_crs_approval()
+# path (role+keyword scan, no parenthetical parsing), but it silently corrupts:
+#   1. the metadata "provider" field, which stored the WHOLE decorated label
+#      lower-cased instead of a clean provider token, making provider-level
+#      lookups (validate_review.py's `_meta_has(..., provider=...)`) unusable.
+#   2. the visual/structural shape of the anchored parenthetical -- nested
+#      parens are never produced by any other caller and are not part of the
+#      documented format.
+#
+# NOT in scope here: has_crs_model_approval() (the strict anti-spoof path) is
+# explicitly NOT modified -- see its own docstring/comments in
+# review_formats.py. It is exercised below only to show the write-side fix
+# (a sanitized, non-nesting label) keeps the anchored path usable when a
+# caller queries with the SAME sanitized string -- not to change its matching
+# semantics.
+@pytest.mark.unit
+class TestModelAnnotationShape:
+    """A decorated model_annotation must not corrupt the header or metadata."""
+
+    def test_decorated_annotation_does_not_nest_parens(self) -> None:
+        """A model_annotation containing parens must not produce nested parens."""
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CRS",
+            verdict="APPROVED",
+            assessment="ok",
+            model_annotation="Gemini 3.1 Pro (High)",
+        )
+        human_line = comment.split("\n", 1)[0]
+        # No nested parenthetical: at most one '(' and one ')' in the header.
+        assert human_line.count("(") <= 1
+        assert human_line.count(")") <= 1
+
+    def test_decorated_annotation_metadata_provider_is_clean_token(self) -> None:
+        """metadata['provider'] must be a clean short token, not the full decorated label."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            parse_review_metadata,
+        )
+
+        comment = format_review_comment(
+            role="CRS",
+            verdict="APPROVED",
+            assessment="ok",
+            model_annotation="Gemini 3.1 Pro (High)",
+        )
+        meta = parse_review_metadata(comment)
+        assert meta is not None
+        assert meta["provider"] == "gemini"
+
+    def test_simple_annotation_provider_unchanged(self) -> None:
+        """Existing single-word annotations must keep producing the same provider token."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            parse_review_metadata,
+        )
+
+        comment = format_review_comment(
+            role="CRS", verdict="APPROVED", assessment="ok", model_annotation="Gemini"
+        )
+        meta = parse_review_metadata(comment)
+        assert meta is not None
+        assert meta["provider"] == "gemini"
+
+    def test_generic_approval_path_unaffected_by_decorated_annotation(self) -> None:
+        """has_crs_approval() (role+keyword scan) still clears regardless of decoration."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_crs_approval,
+        )
+
+        comment = format_review_comment(
+            role="CRS",
+            verdict="APPROVED",
+            assessment="ok",
+            model_annotation="Gemini 3.1 Pro (High)",
+        )
+        assert has_crs_approval([comment]) is True
+
+    def test_model_anchored_path_matches_when_queried_with_sanitized_label(self) -> None:
+        """has_crs_model_approval() is NOT modified (anti-spoof path stays strict);
+        proves the write-side sanitization keeps it usable end-to-end when the
+        caller queries with the SAME sanitized (non-nesting) label the tool
+        actually wrote.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_crs_model_approval,
+        )
+
+        comment = format_review_comment(
+            role="CRS",
+            verdict="APPROVED",
+            assessment="ok",
+            model_annotation="Gemini 3.1 Pro (High)",
+        )
+        assert has_crs_model_approval([comment], "Gemini 3.1 Pro High") is True
+
+
 @pytest.mark.unit
 class TestGoHyphenatedCompoundsNotApproval:
     """RED tests for issue #138 — GO as part of a hyphenated token must NOT clear the gate.
