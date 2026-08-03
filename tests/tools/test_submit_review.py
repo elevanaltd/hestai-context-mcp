@@ -570,6 +570,151 @@ class TestByteExactHeader:
 
 
 # ---------------------------------------------------------------------------
+# Header/verdict conflict validation (rework #2: structural fix)
+# ---------------------------------------------------------------------------
+# Rework #1 closed BLOCKED and REJECTED fail-opens with a prose-negation
+# denylist widening, but CONDITIONAL stayed open -- it isn't a negation word
+# and never will be, so no denylist entry could ever cover it. That coupling
+# (verdict vocabulary <-> denylist upkeep) is the actual defect. The
+# structural fix rejects the submit_review() call outright -- through the
+# standard validation error envelope, at _validate_inputs() -- whenever the
+# assessment's own header disagrees with the submitted verdict, for ANY
+# verdict. No formatted_comment, no gate-clearing artifact, is ever produced.
+@pytest.mark.unit
+class TestHeaderVerdictConflictValidation:
+    """submit_review() rejects (not silently resolves) a header/verdict conflict."""
+
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "REJECTED", "CONDITIONAL"])
+    def test_non_approving_verdict_with_approved_header_is_rejected(self, verdict: str):
+        """Table-driven contradiction case across ALL non-approving verdicts.
+
+        This is the RED case for CONDITIONAL: prior to the structural fix,
+        submit_review(role='CE', verdict='CONDITIONAL',
+        assessment="CE APPROVED: looks fine to me") returned status='ok'
+        with a formatted_comment that satisfied has_ce_approval() --
+        i.e. cleared the gate on a non-approving verdict. Must now be
+        REJECTED as a validation error instead, for all three non-approving
+        verdicts uniformly.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict=verdict,
+            assessment="CE APPROVED: looks fine to me",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+        error = result["validation"]["error"]
+        assert "CE APPROVED" in error
+        assert verdict in error
+        # No gate-clearing (or any) comment artifact is produced on the error path.
+        assert "formatted_comment" not in result["validation"]
+
+    def test_conditional_contradiction_produces_no_gate_clearing_body(self):
+        """Direct proof for the CONDITIONAL case the coordinator flagged:
+        no body is ever produced, so has_ce_approval() has nothing to
+        wrongly clear on.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="CONDITIONAL",
+            assessment="CE APPROVED: looks fine to me",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result.get("comment_url") is None
+
+    def test_approved_verdict_with_blocked_header_is_also_rejected(self):
+        """Disagreement in the harmless direction is rejected too -- the tool
+        never silently prepends over, or silently trusts, the caller's own
+        conflicting header text.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE BLOCKED: actually there are issues",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_agreement_case_is_accepted(self):
+        """Control: a header that AGREES with the verdict is unaffected."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE APPROVED: https://example.com/evidence",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is True
+
+    def test_no_header_case_is_accepted(self):
+        """Control: ordinary assessment text with no header is unaffected."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="BLOCKED",
+            assessment="There are real issues here.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_il_substituted_keyword_agreement_is_accepted(self):
+        """Control: IL/APPROVED against a body already agreeing via the
+        substituted SELF-REVIEWED keyword is unaffected.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="APPROVED",
+            assessment="IL SELF-REVIEWED: fixed typo",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_il_approved_header_conflicts_with_self_reviewed_substitution(self):
+        """IL/APPROVED resolves to SELF-REVIEWED; a body opening
+        'IL APPROVED:' disagrees with that resolved keyword and is rejected,
+        not silently treated as agreement.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="APPROVED",
+            assessment="IL APPROVED: fixed typo",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+
+# ---------------------------------------------------------------------------
 # GitHub posting tests (mocked)
 # ---------------------------------------------------------------------------
 @pytest.mark.unit

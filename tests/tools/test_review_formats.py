@@ -599,91 +599,95 @@ class TestDuplicateHeaderPrevention:
 
 
 # ---------------------------------------------------------------------------
-# Verdict/header agreement tests (rework: closes a fail-open regression)
+# Verdict/header agreement tests (rework #2: structural fix, verdict-agnostic)
 # ---------------------------------------------------------------------------
-# The first version of the duplicate-header guard (_has_existing_header)
-# trusted the assessment verbatim whenever its leading header matched the
-# SAME role plus ANY recognised verdict token -- without checking that the
-# token AGREED with the verdict actually being submitted. That is fail-open:
+# Rework #1 (denylist-based) closed BLOCKED and REJECTED but left CONDITIONAL
+# open -- CONDITIONAL was never a member of _NEGATION_HEDGE_RE and never will
+# be (it isn't a negation word). That is because rework #1's approach coupled
+# two things that should not be coupled: the verdict vocabulary and a
+# prose-negation denylist. Every new verdict needed its own denylist entry or
+# the hole silently reopened.
 #
-#   format_review_comment('CE', 'BLOCKED', 'CE APPROVED: looks fine to me')
-#   -> 'CE APPROVED: looks fine to me\n<!-- ...,"verdict":"BLOCKED",... -->'
-#   has_ce_approval([that body]) -> True   # gate CLEARS on a BLOCKED verdict
-#
-# On main (pre-defect-B-fix), the unconditional prepend put "BLOCKED" into
-# the span between the role prefix and the verdict verb, where
-# _NEGATION_HEDGE_RE (this module, ~line 51) caught it and has_ce_approval
-# correctly returned False. The first guard version silently dropped that
-# protection. The fix: only trust an existing header when its token EQUALS
-# the keyword this call resolved to (post IL/HO substitution) -- agreement
-# is required in both directions, not just "some recognised token".
+# The structural fix: when the assessment's first line opens with a
+# "<ROLE> <TOKEN>:" header for this SAME role and TOKEN disagrees with the
+# resolved verdict keyword, format_review_comment() REJECTS the call
+# (raises ValueError) instead of silently prepending over it or trusting the
+# reviewer's own header text. This is verdict-vocabulary-agnostic: it holds
+# for BLOCKED, REJECTED, CONDITIONAL, and any verdict added later, with no
+# denylist upkeep. submit_review._validate_inputs() pre-checks the same
+# condition via detect_header_verdict_conflict() so the MCP tool surfaces
+# this as a normal validation error (see TestHeaderVerdictConflictValidation
+# in test_submit_review.py), not an exception.
 @pytest.mark.unit
 class TestVerdictHeaderAgreement:
     """An existing header is trusted only when it agrees with the submitted verdict."""
 
-    def test_blocked_verdict_with_approved_header_does_not_clear_gate(self) -> None:
-        """Regression: verdict=BLOCKED, assessment opens 'CE APPROVED: ...'.
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "REJECTED", "CONDITIONAL"])
+    def test_non_approving_verdict_with_approved_header_is_rejected(self, verdict: str) -> None:
+        """Table-driven contradiction case across ALL non-approving verdicts.
 
-        Must NOT be emitted as a bare approval, and must NOT satisfy
-        has_ce_approval() -- this is the exact fail-open reported against the
-        first version of the duplicate-header guard.
+        Regression: verdict in {BLOCKED, REJECTED, CONDITIONAL}, assessment
+        opens 'CE APPROVED: ...'. Must be REJECTED outright (ValueError) --
+        never emitted as a bare approval, and therefore never able to satisfy
+        has_ce_approval() at all (no body is even produced). CONDITIONAL is
+        the case that stayed open after rework #1; this table catches any
+        future verdict added to VALID_VERDICTS without matching agreement
+        behaviour too.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        with pytest.raises(ValueError, match=r"CE APPROVED:.*" + verdict):
+            format_review_comment(
+                role="CE",
+                verdict=verdict,
+                assessment="CE APPROVED: looks fine to me",
+            )
+
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "REJECTED", "CONDITIONAL"])
+    def test_rejected_call_never_produces_a_gate_clearing_body(self, verdict: str) -> None:
+        """No body is ever produced for the contradiction case -- proven
+        against the actual matcher, not just the exception type.
         """
         from hestai_context_mcp.tools.shared.review_formats import (
             format_review_comment,
             has_ce_approval,
         )
 
-        comment = format_review_comment(
-            role="CE",
-            verdict="BLOCKED",
-            assessment="CE APPROVED: looks fine to me",
-        )
-        assert has_ce_approval([comment]) is False
+        try:
+            comment = format_review_comment(
+                role="CE",
+                verdict=verdict,
+                assessment="CE APPROVED: looks fine to me",
+            )
+        except ValueError:
+            comment = None
+        assert comment is None
+        # Belt-and-braces: even if some future refactor accidentally returned
+        # a body instead of raising, it must not clear the gate.
+        if comment is not None:  # pragma: no cover - defensive, see assert above
+            assert has_ce_approval([comment]) is False
 
-    def test_rejected_verdict_with_approved_header_does_not_clear_gate(self) -> None:
-        """Same fail-open direction, verdict=REJECTED."""
-        from hestai_context_mcp.tools.shared.review_formats import (
-            format_review_comment,
-            has_ce_approval,
-        )
+    def test_approved_verdict_with_blocked_header_is_also_rejected(self) -> None:
+        """Disagreement in the harmless direction is rejected too.
 
-        comment = format_review_comment(
-            role="CE",
-            verdict="REJECTED",
-            assessment="CE APPROVED: looks fine to me",
-        )
-        assert has_ce_approval([comment]) is False
-
-    def test_approved_verdict_with_blocked_header_is_not_silently_trusted(self) -> None:
-        """Disagreement in the harmless direction is also not trusted verbatim.
-
-        verdict=APPROVED with an assessment opening 'CE BLOCKED: ...' must NOT
-        pass the caller's BLOCKED text through unqualified as if it were the
-        canonical header -- the canonical "CE APPROVED:" prefix must still be
-        applied. Agreement is the rule in both directions.
+        verdict=APPROVED with an assessment opening 'CE BLOCKED: ...' must
+        NOT be resolved by silently prepending the canonical header over the
+        caller's own BLOCKED text, and must not silently trust the caller's
+        BLOCKED text either. Agreement is the rule in both directions.
         """
-        from hestai_context_mcp.tools.shared.review_formats import (
-            format_review_comment,
-            has_ce_approval,
-        )
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
 
-        comment = format_review_comment(
-            role="CE",
-            verdict="APPROVED",
-            assessment="CE BLOCKED: actually there are issues",
-        )
-        human_line = comment.split("\n", 1)[0]
-        # The canonical header is prepended (not trusted verbatim) -- the
-        # caller's own "CE BLOCKED:" text is preserved as ordinary assessment
-        # content, not treated as the message's header.
-        assert human_line == "CE APPROVED: CE BLOCKED: actually there are issues"
-        # And it still clears the gate as a genuine APPROVED comment (the
-        # canonical header is present at the true start of the line).
-        assert has_ce_approval([comment]) is True
+        with pytest.raises(ValueError, match=r"CE BLOCKED:.*APPROVED"):
+            format_review_comment(
+                role="CE",
+                verdict="APPROVED",
+                assessment="CE BLOCKED: actually there are issues",
+            )
 
     def test_agreement_case_still_deduplicates(self) -> None:
         """The behaviour defect B actually needs to fix: verdict=APPROVED,
-        assessment already opens with 'CE APPROVED:' -- still deduplicated.
+        assessment already opens with 'CE APPROVED:' -- still deduplicated,
+        no exception.
         """
         from hestai_context_mcp.tools.shared.review_formats import format_review_comment
 
@@ -710,24 +714,84 @@ class TestVerdictHeaderAgreement:
         human_line = comment.split("\n", 1)[0]
         assert human_line == "IL SELF-REVIEWED: fixed typo in error message"
 
+    def test_ho_reviewed_header_agreement_is_trusted(self) -> None:
+        """HO/APPROVED resolves to keyword REVIEWED; a body already opening
+        'HO REVIEWED:' agrees and must still be trusted.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="HO",
+            verdict="APPROVED",
+            assessment="HO REVIEWED: delegated to IL, verified output",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "HO REVIEWED: delegated to IL, verified output"
+
     def test_il_approved_header_does_not_agree_with_self_reviewed_keyword(self) -> None:
         """IL/APPROVED resolves to keyword SELF-REVIEWED, NOT 'APPROVED'.
 
         A body opening 'IL APPROVED:' does NOT agree with the resolved
         keyword -- format_review_comment never itself emits 'IL APPROVED:'
-        (it always substitutes SELF-REVIEWED), so this is a near-miss, not an
-        agreement, and must still get the canonical 'IL SELF-REVIEWED:'
-        header prepended.
+        (it always substitutes SELF-REVIEWED). "APPROVED" is nonetheless a
+        recognised header token, so this is a genuine disagreement (not a
+        near-miss to silently paper over) and must be rejected exactly like
+        any other role/verdict contradiction.
         """
         from hestai_context_mcp.tools.shared.review_formats import format_review_comment
 
-        comment = format_review_comment(
-            role="IL",
-            verdict="APPROVED",
-            assessment="IL APPROVED: fixed typo in error message",
+        with pytest.raises(ValueError, match=r"IL APPROVED:.*SELF-REVIEWED"):
+            format_review_comment(
+                role="IL",
+                verdict="APPROVED",
+                assessment="IL APPROVED: fixed typo in error message",
+            )
+
+
+# ---------------------------------------------------------------------------
+# detect_header_verdict_conflict() unit tests (the shared pre-format check)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestDetectHeaderVerdictConflict:
+    """Direct tests of the reusable conflict-detection function."""
+
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "REJECTED", "CONDITIONAL"])
+    def test_conflict_detected_for_all_non_approving_verdicts(self, verdict: str) -> None:
+        from hestai_context_mcp.tools.shared.review_formats import (
+            detect_header_verdict_conflict,
         )
-        human_line = comment.split("\n", 1)[0]
-        assert human_line == "IL SELF-REVIEWED: IL APPROVED: fixed typo in error message"
+
+        conflict = detect_header_verdict_conflict(
+            "CE APPROVED: looks fine to me", "CE", verdict
+        )
+        assert conflict == "APPROVED"
+
+    def test_no_conflict_when_no_header(self) -> None:
+        from hestai_context_mcp.tools.shared.review_formats import (
+            detect_header_verdict_conflict,
+        )
+
+        assert detect_header_verdict_conflict("Looks fine to me", "CE", "BLOCKED") is None
+
+    def test_no_conflict_when_header_agrees(self) -> None:
+        from hestai_context_mcp.tools.shared.review_formats import (
+            detect_header_verdict_conflict,
+        )
+
+        assert (
+            detect_header_verdict_conflict("CE APPROVED: evidence here", "CE", "APPROVED")
+            is None
+        )
+
+    def test_no_conflict_for_wrong_role_near_miss(self) -> None:
+        """A header for a different role is not a conflict for this role."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            detect_header_verdict_conflict,
+        )
+
+        assert (
+            detect_header_verdict_conflict("CRS APPROVED: wrong role", "CE", "BLOCKED") is None
+        )
 
 
 @pytest.mark.unit
