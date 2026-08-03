@@ -4,7 +4,7 @@ Written against the ADR-0353 interface contract:
 - Input: repo, pr_number, role, verdict, assessment, model_annotation?, commit_sha?, dry_run?
 - Output: { status, comment_url, validation, dry_run }
 - 8 roles: CE, CIV, CRS, HO, IL, PE, SR, TMG
-- 3 verdicts: APPROVED, BLOCKED, CONDITIONAL
+- 4 verdicts: APPROVED, BLOCKED, CONDITIONAL, REJECTED
 - Supports dry_run validation without HTTP calls
 - Supports commit_sha pinning for audit trail
 
@@ -121,9 +121,17 @@ class TestInputValidation:
         )
         assert result["status"] == "ok"
 
-    @pytest.mark.parametrize("verdict", ["APPROVED", "BLOCKED", "CONDITIONAL"])
+    @pytest.mark.parametrize("verdict", ["APPROVED", "BLOCKED", "CONDITIONAL", "REJECTED"])
     def test_all_valid_verdicts_accepted(self, verdict: str):
-        """All 3 valid verdicts must be accepted."""
+        """All 4 valid verdicts must be accepted.
+
+        REJECTED regression (elevanaltd/elevana-studio PR #1694): the tool used
+        to reject REJECTED outright, forcing callers to pass verdict='BLOCKED'
+        while leaving their own 'CE REJECTED: ...' header in the assessment
+        text -- producing double-headered comments like
+        'CE BLOCKED: CE REJECTED: ...'. REJECTED must now be accepted as a
+        first-class, non-clearing verdict (see TestRejectedVerdict below).
+        """
         from hestai_context_mcp.tools.submit_review import submit_review
 
         result = submit_review(
@@ -429,6 +437,138 @@ class TestGateCompliance:
             dry_run=True,
         )
         assert result["validation"]["would_clear_gate"] is True
+
+
+# ---------------------------------------------------------------------------
+# REJECTED verdict tests (defect A: verdict vocabulary gap)
+# ---------------------------------------------------------------------------
+# Diagnosis correction: the original bug report described this as "REJECTED
+# silently rewritten to BLOCKED". That mechanism does NOT exist in this code
+# -- there is no rewrite anywhere. The actual mechanism is that
+# _validate_inputs() rejected the verdict='REJECTED' call outright (REJECTED
+# was absent from VALID_VERDICTS), so callers worked around the hard failure
+# by passing verdict='BLOCKED' while leaving their own "CE REJECTED: ..."
+# text at the head of the assessment -- producing the observed double-headed
+# "CE BLOCKED: CE REJECTED: ..." comments on elevana-studio PR #1694.
+@pytest.mark.unit
+class TestRejectedVerdict:
+    """REJECTED must be a first-class, non-gate-clearing verdict."""
+
+    def test_rejected_verdict_is_accepted_not_rewritten(self):
+        """A REJECTED verdict must be accepted verbatim, not rejected or rewritten.
+
+        Pins requirement: 'never silently rewrite a reviewer's verdict'. The
+        formatted comment must contain the literal token REJECTED -- not
+        BLOCKED, and not a duplicated/rewritten verdict.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="REJECTED",
+            assessment="Fundamental design flaw.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        comment = result["validation"]["formatted_comment"]
+        assert "CE REJECTED: Fundamental design flaw." in comment
+        assert "BLOCKED" not in comment
+
+    @pytest.mark.parametrize("role", ["CE", "CIV", "CRS", "PE", "SR", "TMG", "IL", "HO"])
+    def test_rejected_never_clears_gate(self, role: str):
+        """REJECTED must never clear the review gate, for any role.
+
+        Same non-clearing class as BLOCKED -- a REJECTED verdict is a valid
+        review comment but must not satisfy the gate's approval check.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role=role,
+            verdict="REJECTED",
+            assessment="Not acceptable.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is False
+
+    def test_rejected_comment_does_not_satisfy_approval_matcher(self):
+        """A REJECTED comment must not match any role's approval pattern.
+
+        Proves non-clearing with a test, not just an assertion on the tool's
+        own self-check: runs the formatted comment through the same matcher
+        the CI gate uses.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_ce_approval,
+        )
+
+        comment = format_review_comment(role="CE", verdict="REJECTED", assessment="No.")
+        assert has_ce_approval([comment]) is False
+
+    def test_invalid_verdict_error_lists_rejected_as_accepted(self):
+        """The invalid-verdict error message must name REJECTED as accepted."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="NOT_A_REAL_VERDICT",
+            assessment="Test assessment",
+        )
+        assert result["status"] == "error"
+        assert "REJECTED" in result["validation"]["error"]
+
+    def test_historical_double_headed_ce_blocked_rejected_comment_still_parses(self):
+        """Backwards compatibility: pre-fix 'CE BLOCKED: CE REJECTED: ...'
+        comments already posted on elevana-studio PR #1694 must remain
+        legible/parseable by the gate -- i.e. still recognized as a BLOCKED
+        (non-clearing) comment, not silently reinterpreted as an approval.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            has_ce_approval,
+            matches_approval_pattern,
+        )
+
+        historical_comment = (
+            "CE BLOCKED: CE REJECTED: fundamental design flaw in the retry logic"
+        )
+        assert matches_approval_pattern(historical_comment, "CE", "BLOCKED") is True
+        assert has_ce_approval([historical_comment]) is False
+
+
+# ---------------------------------------------------------------------------
+# Byte-exact header tests (requirement 6)
+# ---------------------------------------------------------------------------
+# "Worth pinning as a test, since this is a gate whose own tooling can't
+# currently emit a gate-readable verdict." -- pins the exact header shape for
+# the pass-through path (no pre-existing header in the assessment): no
+# parenthetical, no duplication.
+@pytest.mark.unit
+class TestByteExactHeader:
+    """The formatted comment must begin with an exact, unadorned header."""
+
+    def test_approved_header_is_byte_exact(self):
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(role="CE", verdict="APPROVED", assessment="Looks good.")
+        assert comment.startswith("CE APPROVED: Looks good.")
+        assert comment.split("\n", 1)[0] == "CE APPROVED: Looks good."
+
+    def test_rejected_header_is_byte_exact(self):
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CE", verdict="REJECTED", assessment="Fundamental design flaw."
+        )
+        assert comment.startswith("CE REJECTED: Fundamental design flaw.")
+        assert comment.split("\n", 1)[0] == "CE REJECTED: Fundamental design flaw."
 
 
 # ---------------------------------------------------------------------------
