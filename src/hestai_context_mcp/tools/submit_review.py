@@ -22,6 +22,7 @@ from hestai_context_mcp.tools.shared.github_auth import (
 from hestai_context_mcp.tools.shared.review_formats import (
     VALID_ROLES,
     VALID_VERDICTS,
+    detect_header_verdict_conflict,
     format_review_comment,
     has_ce_approval,
     has_civ_approval,
@@ -64,6 +65,24 @@ def _validate_inputs(
 
     if not repo or "/" not in repo:
         return f"Invalid repo format: '{repo}'. Must be in owner/name format"
+
+    # Header/verdict agreement (structural fix, verdict-vocabulary-agnostic):
+    # if the assessment's own first line already opens with a recognised
+    # "<role> <token>:" header for THIS role and that token disagrees with
+    # the submitted verdict, the reviewer has stated two different verdicts
+    # -- one structured, one in their own prose. The tool must not silently
+    # pick one (by prepending over it, or by trusting the prose over the
+    # structured verdict), so it refuses the call outright. Requires role
+    # and verdict to already be validated above (detect_header_verdict_
+    # conflict assumes a known-valid (role, verdict) pair).
+    conflicting_token = detect_header_verdict_conflict(assessment, role, verdict)
+    if conflicting_token is not None:
+        return (
+            f"Assessment already opens with a '{role} {conflicting_token}:' header, "
+            f"but the submitted verdict is '{verdict}'. The header and the verdict "
+            "must agree -- edit the assessment text or change the verdict so they "
+            "match."
+        )
 
     return None
 

@@ -30,14 +30,82 @@ _IL_APPROVED_KEYWORD = "SELF-REVIEWED"
 # --- HO uses REVIEWED keyword instead of APPROVED ---
 _HO_APPROVED_KEYWORD = "REVIEWED"
 
+# --- Recognised header tokens for the header/verdict agreement check ---
+# The set of tokens format_review_comment() itself ever emits as the verb in
+# "<ROLE> <TOKEN>:" -- the raw verdicts plus the two role-specific keyword
+# substitutions (IL -> SELF-REVIEWED, HO -> REVIEWED).
+_RECOGNIZED_HEADER_TOKENS: frozenset[str] = VALID_VERDICTS | {
+    _IL_APPROVED_KEYWORD,
+    _HO_APPROVED_KEYWORD,
+}
+
 # Matches "<ROLE> <TOKEN>:" at position 0, no parenthetical, exact role and
-# EXACTLY the keyword this call resolved to -- deliberately strict so a
-# near-miss (wrong role, a DIFFERENT verdict token even if recognised, or the
-# header not at position 0) is never trusted. Keyed on (role, keyword) so
-# agreement is checked against the specific verdict being submitted, not
-# merely "some recognised token" (see _has_existing_header docstring for the
-# fail-open this closes).
-_EXISTING_HEADER_RE_CACHE: dict[tuple[str, str], re.Pattern[str]] = {}
+# ANY recognised token (captured) -- used to detect BOTH agreement and
+# disagreement against the verdict actually being submitted. Keyed on role.
+_ANY_TOKEN_HEADER_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def resolve_verdict_keyword(role: str, verdict: str) -> str:
+    """Resolve the exact header token format_review_comment() uses for
+    ``(role, verdict)`` -- applying the IL -> SELF-REVIEWED / HO -> REVIEWED
+    substitution. Shared by format_review_comment() and by callers (e.g.
+    submit_review._validate_inputs) that need to pre-check header/verdict
+    agreement before ever calling format_review_comment().
+    """
+    if role == "IL" and verdict == "APPROVED":
+        return _IL_APPROVED_KEYWORD
+    if role == "HO" and verdict == "APPROVED":
+        return _HO_APPROVED_KEYWORD
+    return verdict
+
+
+def _match_existing_header_token(assessment: str, role: str) -> str | None:
+    """Return the recognised verdict token the assessment's first line opens
+    with for ``role`` (e.g. "APPROVED"), or None if there is no such header.
+
+    Strict by design: only an EXACT "<role> <recognised-token>:" at the very
+    start of the first line, for the SAME role, counts as a header at all.
+    A different role, an unrecognized token, or a header appearing on a
+    later line are all treated as "no header" (ordinary assessment text).
+    """
+    pattern = _ANY_TOKEN_HEADER_RE_CACHE.get(role)
+    if pattern is None:
+        # Longest-first alternation so e.g. "SELF-REVIEWED" isn't shadowed by
+        # a shorter token sharing a prefix.
+        tokens = sorted(_RECOGNIZED_HEADER_TOKENS, key=len, reverse=True)
+        token_alt = "|".join(re.escape(t) for t in tokens)
+        pattern = re.compile(rf"^{re.escape(role)} ({token_alt}):")
+        _ANY_TOKEN_HEADER_RE_CACHE[role] = pattern
+
+    first_line = assessment.split("\n", 1)[0]
+    match = pattern.match(first_line)
+    return match.group(1) if match else None
+
+
+def detect_header_verdict_conflict(assessment: str, role: str, verdict: str) -> str | None:
+    """Check whether ``assessment`` opens with a header for ``role`` whose
+    token CONFLICTS with ``verdict``.
+
+    Returns the conflicting existing token (e.g. "APPROVED") if the
+    assessment's first line matches "<role> <recognised-token>:" at position
+    0 and that token is NOT the keyword ``(role, verdict)`` resolves to.
+    Returns None when there is no header at all, or when the header AGREES
+    (the legitimate dedup case -- see format_review_comment()).
+
+    This is the STRUCTURAL fix for a class of fail-open bugs: a reviewer's
+    own header text and the structured verdict they submitted are two
+    independent statements of intent, and if they name different verdicts
+    the tool must not silently pick one. Unlike a prose-negation denylist
+    (which needs a new entry for every verdict token and leaks for any not
+    yet added -- see the CONDITIONAL fail-open this replaces), agreement
+    checking is verdict-vocabulary-agnostic: it holds for every member of
+    VALID_VERDICTS, present and future, with no matching-side upkeep.
+    """
+    keyword = resolve_verdict_keyword(role, verdict)
+    existing_token = _match_existing_header_token(assessment, role)
+    if existing_token is None or existing_token == keyword:
+        return None
+    return existing_token
 
 
 def _sanitize_model_label(model_annotation: str) -> str:
@@ -74,43 +142,6 @@ def _normalize_provider(model_annotation: str) -> str:
     return token.lower()
 
 
-def _has_existing_header(assessment: str, role: str, keyword: str) -> bool:
-    """Check whether ``assessment`` already opens with a header that AGREES
-    with the verdict actually being submitted.
-
-    Used by format_review_comment() to avoid double-prepending a header onto
-    assessment text a caller already formatted themselves (defect: unconditional
-    prepend produced "CE APPROVED: CE APPROVED: ...", "TMG APPROVED: TMG
-    APPROVED: ...", etc.).
-
-    ``keyword`` is the exact token this call resolved to (the raw verdict, or
-    SELF-REVIEWED/REVIEWED after the IL/HO substitution) -- NOT merely "any
-    recognised verdict token". Trusting on a match against ANY recognised
-    token (regardless of which one) is fail-open: a submitted verdict of
-    BLOCKED or REJECTED whose assessment happens to open with
-    "<role> APPROVED:" would otherwise be emitted as a bare, unqualified
-    approval, and main's accidental protection (the unconditional prepend put
-    the real verdict where ``_NEGATION_HEDGE_RE`` could see it) would be lost.
-    Agreement is required in BOTH directions: an APPROVED verdict whose
-    assessment opens with "<role> BLOCKED:" is likewise NOT silently trusted.
-
-    Strict by design: only an EXACT "<role> <keyword>:" at the very start of
-    the first line, for the SAME role and the SAME keyword, counts as
-    already-valid. Anything else (different role, a different verdict token
-    even if otherwise recognised, or the header appearing on a later line) is
-    treated as ordinary assessment text and still gets the canonical header
-    prepended -- which restores the negation-guard protection main had.
-    """
-    cache_key = (role, keyword)
-    pattern = _EXISTING_HEADER_RE_CACHE.get(cache_key)
-    if pattern is None:
-        pattern = re.compile(rf"^{re.escape(role)} {re.escape(keyword)}:")
-        _EXISTING_HEADER_RE_CACHE[cache_key] = pattern
-
-    first_line = assessment.split("\n", 1)[0]
-    return pattern.match(first_line) is not None
-
-
 # --- Negation / hedge guard (trust-model defect fix) ---
 # A role-anchored verdict only clears the gate when the span BETWEEN the role
 # prefix and the verdict verb is free of negation/conditional intent. Without
@@ -130,20 +161,22 @@ def _has_existing_header(assessment: str, role: str, keyword: str) -> bool:
 # The deliberately-strict anti-spoof path has_crs_model_approval() does NOT use
 # this matcher and is intentionally unchanged.
 #
-# ADDITIVE WIDENING (REJECTED verdict): "reject" widened to "reject(?:ed|s)?"
-# -- the bare word-boundary form \breject\b did NOT match "REJECTED" (no
-# boundary after "reject" inside "rejected"), so a canonical
-# "<ROLE> REJECTED: ..." header whose assessment happened to contain
-# "APPROVED" text (e.g. via the duplicate-header guard's fallback path)
-# could clear the gate. This mirrors the existing APPROVE(?:D|S)? conjugation
-# pattern already used for the keyword regex elsewhere in this module.
-# Additive-only: strictly EXPANDS the denylist (more text is treated as
-# non-approval), never narrows what a genuine approval matches.
+# REVERTED (2026-08-03): an earlier revision of this fix widened "reject" to
+# "reject(?:ed|s)?" here to make the REJECTED verdict's canonical fallback
+# header ("CE REJECTED: ...") register as a negation. That widening narrowed
+# this shared, cross-repo-consumed matcher: 'TMG rejected the first attempt;
+# TMG APPROVED now' cleared on main but stopped clearing on that revision --
+# a new false-negative on a production gate. It is UNNEEDED now:
+# detect_header_verdict_conflict() (see format_review_comment()) rejects any
+# header/verdict disagreement -- including REJECTED-vs-APPROVED -- BEFORE a
+# conflicting comment is ever formatted, so this denylist never needs to see
+# a REJECTED header fighting an APPROVED one. The structural fix subsumes
+# the denylist widening; kept at its original scope here (MIP).
 _NEGATION_HEDGE_RE = re.compile(
     r"\b(?:"
     r"not|n't|cannot|can't|won't|wouldn't|shouldn't|couldn't|don't|doesn't|didn't|"
     r"will\s+not|do\s+not|does\s+not|did\s+not|"
-    r"never|unable|unless|until|pending|blocked|reject(?:ed|s)?|fail|"
+    r"never|unable|unless|until|pending|blocked|reject|fail|"
     r"if|would|should"
     r")\b",
     re.IGNORECASE,
@@ -572,27 +605,48 @@ def format_review_comment(
 
     Returns:
         Formatted review comment string with metadata on line 2.
+
+    Raises:
+        ValueError: If ``assessment`` already opens with a "<role> <token>:"
+            header whose token conflicts with the resolved verdict keyword
+            (e.g. verdict='BLOCKED' but assessment starts 'CE APPROVED: ...').
+            The reviewer has stated two different verdicts and this function
+            will not silently pick one -- see detect_header_verdict_conflict().
+            Callers with a structured input path (e.g. submit_review) should
+            pre-check with detect_header_verdict_conflict() to surface this
+            as a normal validation error rather than an exception.
     """
     # Validate commit_sha: must be 7-40 hex characters, silently drop invalid
     if commit_sha is not None:
         clean_sha = commit_sha.strip()
         commit_sha = clean_sha if re.fullmatch(r"[0-9a-fA-F]{7,40}", clean_sha) else None
 
-    # Map IL APPROVED to SELF-REVIEWED, HO APPROVED to REVIEWED
-    if role == "IL" and verdict == "APPROVED":
-        keyword = _IL_APPROVED_KEYWORD
-    elif role == "HO" and verdict == "APPROVED":
-        keyword = _HO_APPROVED_KEYWORD
-    else:
-        keyword = verdict
+    keyword = resolve_verdict_keyword(role, verdict)
 
-    # Duplicate-header guard: if the assessment already opens with a valid
-    # "<ROLE> <TOKEN>:" header for this SAME role, trust it verbatim instead
-    # of prepending a second header (defect: unconditional prepend produced
-    # "CE APPROVED: CE APPROVED: ...", "TMG APPROVED: TMG APPROVED: ...").
-    # Near-misses (wrong role, unrecognized token, header not at position 0)
-    # are NOT trusted and still get the canonical header below.
-    if _has_existing_header(assessment, role, keyword):
+    # Header/verdict agreement guard (structural fix -- verdict-vocabulary-
+    # agnostic, replaces an earlier prose-negation-denylist approach that
+    # leaked for any verdict without a matching denylist entry, e.g.
+    # CONDITIONAL). If the assessment already opens with a recognised header
+    # for this role:
+    #   - agreement (token == keyword)   -> trust it verbatim (dedup; defect:
+    #     unconditional prepend used to produce "CE APPROVED: CE APPROVED:
+    #     ...", "TMG APPROVED: TMG APPROVED: ...").
+    #   - disagreement (token != keyword) -> REJECT. Never silently prepend
+    #     a second, different verdict over the reviewer's own header, and
+    #     never silently trust the reviewer's header over the submitted
+    #     verdict -- both are the tool picking a winner between two stated
+    #     verdicts, which it must not do.
+    #   - no header at all               -> prepend the canonical header.
+    existing_token = _match_existing_header_token(assessment, role)
+    if existing_token is not None and existing_token != keyword:
+        raise ValueError(
+            f"Assessment already opens with a '{role} {existing_token}:' header, "
+            f"but the submitted verdict is '{verdict}' (resolves to "
+            f"'{role} {keyword}:'). The header and the verdict must agree -- "
+            "edit the assessment text or change the verdict so they match."
+        )
+
+    if existing_token == keyword:
         human_line = assessment
     else:
         # Build the prefix with optional model annotation. The annotation is

@@ -761,9 +761,7 @@ class TestDetectHeaderVerdictConflict:
             detect_header_verdict_conflict,
         )
 
-        conflict = detect_header_verdict_conflict(
-            "CE APPROVED: looks fine to me", "CE", verdict
-        )
+        conflict = detect_header_verdict_conflict("CE APPROVED: looks fine to me", "CE", verdict)
         assert conflict == "APPROVED"
 
     def test_no_conflict_when_no_header(self) -> None:
@@ -779,8 +777,7 @@ class TestDetectHeaderVerdictConflict:
         )
 
         assert (
-            detect_header_verdict_conflict("CE APPROVED: evidence here", "CE", "APPROVED")
-            is None
+            detect_header_verdict_conflict("CE APPROVED: evidence here", "CE", "APPROVED") is None
         )
 
     def test_no_conflict_for_wrong_role_near_miss(self) -> None:
@@ -789,9 +786,7 @@ class TestDetectHeaderVerdictConflict:
             detect_header_verdict_conflict,
         )
 
-        assert (
-            detect_header_verdict_conflict("CRS APPROVED: wrong role", "CE", "BLOCKED") is None
-        )
+        assert detect_header_verdict_conflict("CRS APPROVED: wrong role", "CE", "BLOCKED") is None
 
 
 @pytest.mark.unit
