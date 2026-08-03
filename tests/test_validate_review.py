@@ -447,6 +447,162 @@ class TestPRCommentValidation:
         assert "TMG" in message or "CE" in message or "CIV" in message
 
 
+# ---------------------------------------------------------------------------
+# Requirement 7: template self-match guard.
+# ---------------------------------------------------------------------------
+# The gate's OWN "Review requirements not met" status comment embeds the
+# literal guidance template "CE APPROVED: [assessment] (or CE GO:)" (and the
+# TMG/CRS/CIV equivalents) inside a fenced code block -- see
+# review-gate.yml around the `${role} APPROVED: [assessment] (or ${role} GO:)`
+# line, mirroring the text validate_review.py itself prints at
+# "   - '{role} APPROVED: [assessment]' (or {role} GO:)" (~line 1370).
+#
+# matches_approval_pattern() matches per-LINE (review_formats.py, `for line in
+# cleaned.splitlines()`), so line-anchoring alone does NOT protect this
+# template text from re-triggering four phantom approvals: the template line
+# "CE APPROVED: [assessment] (or CE GO:)" starts with a valid role prefix at
+# line-start, followed by the APPROVED keyword with no negation/hedge token in
+# the gap -- pattern-wise it WOULD match, proven below.
+#
+# The real protection is TWO independent lines of defense in
+# check_pr_comments()'s _is_bot_comment() filter (validate_review.py
+# ~lines 840-900):
+#   1. bot-author exclusion: the status comment is always posted by a
+#      [bot]-suffixed account (github-actions[bot] via GITHUB_TOKEN), and
+#      _is_bot_comment() excludes any `login.endswith("[bot]")`.
+#   2. a LEGACY MARKER check, independent of author: any comment body
+#      containing the literal string "<!-- review-gate-status -->" is also
+#      excluded, regardless of who posted it.
+# Both are proven independently below so a single point of failure (e.g. the
+# bot-author check alone) is not silently assumed to be the whole story.
+@pytest.mark.security
+class TestTemplateSelfMatchGuard:
+    """The gate's own status-comment template must never self-clear the gate."""
+
+    # Reconstructed from review-gate.yml's guidance block: one line per
+    # required role, exactly the shape validate_review.py prints and the
+    # workflow embeds in its "Required" fenced code block.
+    _TEMPLATE_BODY = (
+        "## Review Gate Status: ❌\n\n"
+        "**Review requirements not met**\n\n"
+        "**Required**: CE + CIV + CRS + TMG approval:\n"
+        "```\n"
+        "CE APPROVED: [assessment] (or CE GO:)\n"
+        "CIV APPROVED: [assessment] (or CIV GO:)\n"
+        "CRS APPROVED: [assessment] (or CRS GO:)\n"
+        "TMG APPROVED: [assessment] (or TMG GO:)\n"
+        "```\n"
+    )
+
+    def test_template_text_matches_pattern_in_isolation(self):
+        """Format-wise, the template lines DO satisfy the approval regex.
+
+        Proves line-anchoring alone is NOT the protection: matches_approval_
+        pattern() matches per-line, and the template's own guidance lines are
+        indistinguishable, pattern-wise, from a real approval.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import matches_approval_pattern
+
+        for role in ("CE", "CIV", "CRS", "TMG"):
+            assert matches_approval_pattern(self._TEMPLATE_BODY, role, "APPROVED") is True
+
+    def test_bot_authored_template_comment_does_not_clear_gate(self, ci_environment, monkeypatch):
+        """Defense 1: a [bot]-suffixed author's template comment is excluded."""
+
+        def mock_run(cmd, *args, **kwargs):
+            return MagicMock(
+                stdout=json.dumps(
+                    {
+                        "body": "",
+                        "comments": [
+                            {
+                                "body": self._TEMPLATE_BODY,
+                                "author": {"login": "github-actions[bot]"},
+                            }
+                        ],
+                    }
+                ),
+                returncode=0,
+                check=lambda: None,
+            )
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        approved, _message, missing = validate_review.check_pr_comments(
+            required_roles={"CE", "CIV", "CRS", "TMG"}, tier="TIER_3_CRITICAL"
+        )
+        assert approved is False
+        assert set(missing) == {"CE", "CIV", "CRS", "TMG"}
+
+    def test_marker_tagged_template_comment_does_not_clear_gate_even_from_non_bot_author(
+        self, ci_environment, monkeypatch
+    ):
+        """Defense 2 (independent of author): the legacy marker string alone
+        is sufficient to exclude a comment, even if the author is NOT flagged
+        as a bot (e.g. a spoofed/renamed account, or an author whose login
+        doesn't match the `[bot]` convention).
+        """
+
+        def mock_run(cmd, *args, **kwargs):
+            return MagicMock(
+                stdout=json.dumps(
+                    {
+                        "body": "",
+                        "comments": [
+                            {
+                                "body": "<!-- review-gate-status -->\n" + self._TEMPLATE_BODY,
+                                "author": {"login": "definitely-not-a-bot-account"},
+                            }
+                        ],
+                    }
+                ),
+                returncode=0,
+                check=lambda: None,
+            )
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        approved, _message, missing = validate_review.check_pr_comments(
+            required_roles={"CE", "CIV", "CRS", "TMG"}, tier="TIER_3_CRITICAL"
+        )
+        assert approved is False
+        assert set(missing) == {"CE", "CIV", "CRS", "TMG"}
+
+    def test_removing_both_defenses_would_self_clear(self, ci_environment, monkeypatch):
+        """Control case: WITHOUT bot-author or marker exclusion, the same
+        template text posted by a non-bot author with no marker DOES clear
+        the gate -- demonstrating these two checks are load-bearing, not
+        incidental. If this test ever fails, _is_bot_comment() has grown a
+        third, different exclusion path and this pin needs updating.
+        """
+
+        def mock_run(cmd, *args, **kwargs):
+            return MagicMock(
+                stdout=json.dumps(
+                    {
+                        "body": "",
+                        "comments": [
+                            {
+                                "body": self._TEMPLATE_BODY,
+                                "author": {"login": "a-regular-human-reviewer"},
+                            }
+                        ],
+                    }
+                ),
+                returncode=0,
+                check=lambda: None,
+            )
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        approved, _message, _missing = validate_review.check_pr_comments(
+            required_roles={"CE", "CIV", "CRS", "TMG"}, tier="TIER_3_CRITICAL"
+        )
+        # Not gated by bot-exclusion or marker -- the template text alone
+        # satisfies the regex for all four roles.
+        assert approved is True
+
+
 @pytest.mark.behavior
 class TestPRBodyScanning:
     """Validate that PR body is scanned for approval patterns in addition to comments."""
