@@ -598,6 +598,138 @@ class TestDuplicateHeaderPrevention:
         assert has_ce_approval([comment]) is True
 
 
+# ---------------------------------------------------------------------------
+# Verdict/header agreement tests (rework: closes a fail-open regression)
+# ---------------------------------------------------------------------------
+# The first version of the duplicate-header guard (_has_existing_header)
+# trusted the assessment verbatim whenever its leading header matched the
+# SAME role plus ANY recognised verdict token -- without checking that the
+# token AGREED with the verdict actually being submitted. That is fail-open:
+#
+#   format_review_comment('CE', 'BLOCKED', 'CE APPROVED: looks fine to me')
+#   -> 'CE APPROVED: looks fine to me\n<!-- ...,"verdict":"BLOCKED",... -->'
+#   has_ce_approval([that body]) -> True   # gate CLEARS on a BLOCKED verdict
+#
+# On main (pre-defect-B-fix), the unconditional prepend put "BLOCKED" into
+# the span between the role prefix and the verdict verb, where
+# _NEGATION_HEDGE_RE (this module, ~line 51) caught it and has_ce_approval
+# correctly returned False. The first guard version silently dropped that
+# protection. The fix: only trust an existing header when its token EQUALS
+# the keyword this call resolved to (post IL/HO substitution) -- agreement
+# is required in both directions, not just "some recognised token".
+@pytest.mark.unit
+class TestVerdictHeaderAgreement:
+    """An existing header is trusted only when it agrees with the submitted verdict."""
+
+    def test_blocked_verdict_with_approved_header_does_not_clear_gate(self) -> None:
+        """Regression: verdict=BLOCKED, assessment opens 'CE APPROVED: ...'.
+
+        Must NOT be emitted as a bare approval, and must NOT satisfy
+        has_ce_approval() -- this is the exact fail-open reported against the
+        first version of the duplicate-header guard.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_ce_approval,
+        )
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="BLOCKED",
+            assessment="CE APPROVED: looks fine to me",
+        )
+        assert has_ce_approval([comment]) is False
+
+    def test_rejected_verdict_with_approved_header_does_not_clear_gate(self) -> None:
+        """Same fail-open direction, verdict=REJECTED."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_ce_approval,
+        )
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="REJECTED",
+            assessment="CE APPROVED: looks fine to me",
+        )
+        assert has_ce_approval([comment]) is False
+
+    def test_approved_verdict_with_blocked_header_is_not_silently_trusted(self) -> None:
+        """Disagreement in the harmless direction is also not trusted verbatim.
+
+        verdict=APPROVED with an assessment opening 'CE BLOCKED: ...' must NOT
+        pass the caller's BLOCKED text through unqualified as if it were the
+        canonical header -- the canonical "CE APPROVED:" prefix must still be
+        applied. Agreement is the rule in both directions.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_ce_approval,
+        )
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE BLOCKED: actually there are issues",
+        )
+        human_line = comment.split("\n", 1)[0]
+        # The canonical header is prepended (not trusted verbatim) -- the
+        # caller's own "CE BLOCKED:" text is preserved as ordinary assessment
+        # content, not treated as the message's header.
+        assert human_line == "CE APPROVED: CE BLOCKED: actually there are issues"
+        # And it still clears the gate as a genuine APPROVED comment (the
+        # canonical header is present at the true start of the line).
+        assert has_ce_approval([comment]) is True
+
+    def test_agreement_case_still_deduplicates(self) -> None:
+        """The behaviour defect B actually needs to fix: verdict=APPROVED,
+        assessment already opens with 'CE APPROVED:' -- still deduplicated.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE APPROVED: https://example.com/evidence",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "CE APPROVED: https://example.com/evidence"
+
+    def test_il_self_reviewed_header_agreement_is_trusted(self) -> None:
+        """IL/APPROVED resolves to keyword SELF-REVIEWED; a body already
+        opening 'IL SELF-REVIEWED:' agrees and must still be trusted
+        (dedup preserved for the substituted-keyword roles).
+        """
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="IL",
+            verdict="APPROVED",
+            assessment="IL SELF-REVIEWED: fixed typo in error message",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "IL SELF-REVIEWED: fixed typo in error message"
+
+    def test_il_approved_header_does_not_agree_with_self_reviewed_keyword(self) -> None:
+        """IL/APPROVED resolves to keyword SELF-REVIEWED, NOT 'APPROVED'.
+
+        A body opening 'IL APPROVED:' does NOT agree with the resolved
+        keyword -- format_review_comment never itself emits 'IL APPROVED:'
+        (it always substitutes SELF-REVIEWED), so this is a near-miss, not an
+        agreement, and must still get the canonical 'IL SELF-REVIEWED:'
+        header prepended.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="IL",
+            verdict="APPROVED",
+            assessment="IL APPROVED: fixed typo in error message",
+        )
+        human_line = comment.split("\n", 1)[0]
+        assert human_line == "IL SELF-REVIEWED: IL APPROVED: fixed typo in error message"
+
+
 @pytest.mark.unit
 class TestReviewMetadata:
     """Test structured machine-readable metadata in review comments."""
