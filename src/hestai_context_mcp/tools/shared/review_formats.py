@@ -67,6 +67,19 @@ def _match_existing_header_token(assessment: str, role: str) -> str | None:
     start of the first line, for the SAME role, counts as a header at all.
     A different role, an unrecognized token, or a header appearing on a
     later line are all treated as "no header" (ordinary assessment text).
+
+    Case-insensitive (cubic review, rework #3): matched case-insensitively
+    and the captured token is normalised to upper-case before comparison, so
+    a lowercase agreeing header (e.g. "ce approved: fine" for verdict=
+    APPROVED) is recognised as agreement and deduplicated instead of getting
+    a second, canonical-case header prepended -- this is a dedup-correctness
+    fix for defect B, NOT a safety mechanism. Safety (a non-approving
+    verdict never emitting gate-clearing text) is enforced separately and
+    unconditionally by submit_review()'s symmetric _matches_role_gate()
+    check on the finished artifact -- see that function's docstring. This
+    function and detect_header_verdict_conflict() must never be treated as
+    the safety boundary; they exist for dedup and for a precise, actionable
+    conflict error only.
     """
     pattern = _ANY_TOKEN_HEADER_RE_CACHE.get(role)
     if pattern is None:
@@ -74,12 +87,12 @@ def _match_existing_header_token(assessment: str, role: str) -> str | None:
         # a shorter token sharing a prefix.
         tokens = sorted(_RECOGNIZED_HEADER_TOKENS, key=len, reverse=True)
         token_alt = "|".join(re.escape(t) for t in tokens)
-        pattern = re.compile(rf"^{re.escape(role)} ({token_alt}):")
+        pattern = re.compile(rf"^{re.escape(role)} ({token_alt}):", re.IGNORECASE)
         _ANY_TOKEN_HEADER_RE_CACHE[role] = pattern
 
     first_line = assessment.split("\n", 1)[0]
     match = pattern.match(first_line)
-    return match.group(1) if match else None
+    return match.group(1).upper() if match else None
 
 
 def detect_header_verdict_conflict(assessment: str, role: str, verdict: str) -> str | None:
@@ -92,14 +105,25 @@ def detect_header_verdict_conflict(assessment: str, role: str, verdict: str) -> 
     Returns None when there is no header at all, or when the header AGREES
     (the legitimate dedup case -- see format_review_comment()).
 
-    This is the STRUCTURAL fix for a class of fail-open bugs: a reviewer's
-    own header text and the structured verdict they submitted are two
-    independent statements of intent, and if they name different verdicts
-    the tool must not silently pick one. Unlike a prose-negation denylist
-    (which needs a new entry for every verdict token and leaks for any not
-    yet added -- see the CONDITIONAL fail-open this replaces), agreement
-    checking is verdict-vocabulary-agnostic: it holds for every member of
-    VALID_VERDICTS, present and future, with no matching-side upkeep.
+    This gives a precise, actionable error for the common case where a
+    reviewer's own header text and the structured verdict they submitted
+    name two different, contradictory verdicts -- the tool must not
+    silently pick one. It is verdict-vocabulary-agnostic: it holds for
+    every member of VALID_VERDICTS, present and future, with no
+    matching-side upkeep.
+
+    NOT THE SAFETY BOUNDARY (rework #3): this function only inspects the
+    assessment's LEADING header. It does not see -- and was shown (cubic
+    review) to miss -- gate-clearing text using a token absent from
+    _RECOGNIZED_HEADER_TOKENS (e.g. a bare "GO" or "APPROVES" header, both
+    of which the real gate matcher accepts), approval text on a LATER line,
+    or approval prose with no header shape at all. The actual invariant --
+    a non-approving verdict must never emit a comment that satisfies the
+    role's real gate matcher -- is enforced separately and unconditionally
+    in submit_review() via the symmetric _matches_role_gate() check run on
+    the FINISHED formatted comment. Do not let this function's coverage
+    expand to try to become that boundary, and do not remove the symmetric
+    check on the assumption this function already covers it.
     """
     keyword = resolve_verdict_keyword(role, verdict)
     existing_token = _match_existing_header_token(assessment, role)

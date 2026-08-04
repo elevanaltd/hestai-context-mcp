@@ -87,15 +87,26 @@ def _validate_inputs(
     return None
 
 
-def _check_would_clear_gate(comment: str, role: str, verdict: str) -> bool:
-    """Check if the formatted comment would clear the review gate.
+def _matches_role_gate(comment: str, role: str) -> bool:
+    """Run the role's REAL gate matcher over ``comment``, independent of verdict.
 
-    Only APPROVED verdicts can clear gates. BLOCKED, CONDITIONAL, and
-    REJECTED are valid review comments but do not clear the gate.
+    This is the verdict-independent predicate the symmetric safety check is
+    built on (rework #3): it asks "would this text clear role's gate?" using
+    the SAME matchers the CI gate itself uses (has_ce_approval, etc.), not a
+    model of them (e.g. header shape). detect_header_verdict_conflict() (see
+    review_formats.py) is NOT a substitute for this -- it only inspects the
+    assessment's leading header, so it missed approving text anywhere else
+    in the body: a leading GO/APPROVES header (tokens the gate accepts but
+    that were absent from the header-shape allowlist), approval text on a
+    later line, a lowercased header, or approval prose with no header shape
+    at all. Because this predicate calls the real matcher, none of those
+    shapes -- nor any future one -- can evade it; there is no shape-specific
+    denylist to maintain. detect_header_verdict_conflict() still earns its
+    place for the precise, actionable error on the common contradictory-
+    header case and for driving defect-B's dedup -- but it is NOT the safety
+    boundary. This function, used symmetrically for BOTH directions in
+    submit_review(), is.
     """
-    if verdict != "APPROVED":
-        return False
-
     if role == "CRS":
         return has_crs_approval([comment])
     elif role == "CE":
@@ -114,6 +125,20 @@ def _check_would_clear_gate(comment: str, role: str, verdict: str) -> bool:
         return has_ho_review([comment])
 
     return False
+
+
+def _check_would_clear_gate(comment: str, role: str, verdict: str) -> bool:
+    """Check if the formatted comment would clear the review gate.
+
+    Only APPROVED verdicts can clear gates. BLOCKED, CONDITIONAL, and
+    REJECTED are valid review comments but do not clear the gate -- enforced
+    by submit_review()'s symmetric check calling _matches_role_gate()
+    directly for the non-APPROVED direction; see that function's docstring.
+    """
+    if verdict != "APPROVED":
+        return False
+
+    return _matches_role_gate(comment, role)
 
 
 def _get_tier_requirements(role: str) -> str:
@@ -371,6 +396,40 @@ def submit_review(
         model_annotation=annotation,
         commit_sha=sha,
     )
+
+    # Step 2b: Symmetric fail-open guard (rework #3). The invariant is:
+    # a non-approving verdict must NEVER emit a comment that satisfies the
+    # role's real gate matcher. detect_header_verdict_conflict() (Step 1)
+    # only catches the common contradictory-LEADING-HEADER shape; it cannot
+    # see approval text anywhere else in the body -- a leading GO/APPROVES
+    # header (gate-clearing tokens absent from the header-shape allowlist),
+    # approval text on a later line, a lowercased header, or approval prose
+    # with no header shape at all all evade it. This check consults the
+    # SAME matcher the CI gate uses (via _matches_role_gate()) on the
+    # FINISHED artifact rather than inferring the answer from header shape,
+    # so it closes all of those evasions -- and any future one -- at once.
+    # Symmetric with the APPROVED-must-clear check below: this is the
+    # non-APPROVED-must-NOT-clear direction of the same invariant.
+    if verdict != "APPROVED" and _matches_role_gate(formatted_comment, role):
+        return {
+            "status": "error",
+            "comment_url": None,
+            "commit_sha": sha,
+            "error_type": "validation",
+            "validation": {
+                "error": (
+                    f"Format validation failed: '{verdict}' comment for role "
+                    f"'{role}' matches the {role} approval pattern and would "
+                    f"incorrectly clear the gate. Offending text: "
+                    f"{formatted_comment.split(chr(10), 1)[0]!r}. Reword the "
+                    f"assessment so it does not read as an approval for the "
+                    f"{role} role."
+                ),
+                "would_clear_gate": True,
+                "tier_requirements": _get_tier_requirements(role),
+            },
+            "dry_run": dry_run,
+        }
 
     # Step 3: Self-validate against gate patterns
     would_clear = _check_would_clear_gate(formatted_comment, role, verdict)
