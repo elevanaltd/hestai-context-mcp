@@ -4,7 +4,8 @@ META:
   VERSION::"1.1"
   TOKEN::HO-SUBMIT-REVIEW-GATE-RETRIGGER-20260810
   STATUS::RATIFIED
-  RATIFIED_BY::"SHAUN BUSWELL"
+  RATIFIED_BY::"human:operator<shaunbuswell>"
+  RATIFIED_AT::"2026-08-10T00:00:00Z"
   TIER::STRATEGIC
   COMPRESSION_TIER::CONSERVATIVE
   LOSS_PROFILE::"[preserve:ruleset_trigger_limitation∧head_sha_attachment∧abstain_failure_policy∧rerun_only_scope_guard∧re_review_trigger∧inherited_not_asserted_binding∧caller_token_dependency,drop:narrative_of_the_three_reworks_that_surfaced_it]"
