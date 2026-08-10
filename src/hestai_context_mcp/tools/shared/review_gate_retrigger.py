@@ -180,8 +180,7 @@ class _GhCliClient:
         listings without a client implementation of their own.
         """
         path = (
-            f"repos/{repo}/actions/runs"
-            f"?head_sha={head_sha}&event={_REQUIRED_EVENT}&per_page=20"
+            f"repos/{repo}/actions/runs" f"?head_sha={head_sha}&event={_REQUIRED_EVENT}&per_page=20"
         )
         status, body = self._api(path)
         if not (200 <= status < 300):

@@ -84,7 +84,9 @@ class _FakeClient:
     ) -> list[dict[str, Any]]:
         idx = self.list_calls
         self.list_calls += 1
-        result = self._runs_sequence[idx] if idx < len(self._runs_sequence) else self._runs_sequence[-1]
+        result = (
+            self._runs_sequence[idx] if idx < len(self._runs_sequence) else self._runs_sequence[-1]
+        )
         if isinstance(result, Exception):
             raise result
         return result
@@ -192,9 +194,7 @@ class TestPrNumberSelection:
         PR, so we must abstain rather than guess which one to re-run.
         """
         client = _FakeClient(
-            runs_sequence=[
-                [_run(10, pr_number=None, status="completed"), _run(20, pr_number=None)]
-            ]
+            runs_sequence=[[_run(10, pr_number=None, status="completed"), _run(20, pr_number=None)]]
         )
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
             result = retrigger_review_gate("owner/repo", 7, client=client, sleep=lambda _: None)
