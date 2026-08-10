@@ -90,9 +90,7 @@ def _is_valid_repo(repo: str) -> bool:
         return False
     if not _REPO_NAME_PATTERN.fullmatch(name):
         return False
-    if name in (".", ".."):
-        return False
-    return True
+    return name not in (".", "..")
 
 
 def _validate_inputs(

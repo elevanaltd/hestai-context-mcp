@@ -37,8 +37,8 @@ import pytest
 
 from hestai_context_mcp.tools.shared.review_gate_retrigger import (
     DEFAULT_OVERALL_BUDGET_SECONDS,
-    GhApiError,
     WORKFLOW_FILE,
+    GhApiError,
     retrigger_review_gate,
 )
 
@@ -100,7 +100,9 @@ class _FakeClient:
         self.list_call_args.append((repo, workflow_file, head_sha))
         idx = self.list_calls
         self.list_calls += 1
-        result = self._runs_sequence[idx] if idx < len(self._runs_sequence) else self._runs_sequence[-1]
+        result = (
+            self._runs_sequence[idx] if idx < len(self._runs_sequence) else self._runs_sequence[-1]
+        )
         if isinstance(result, Exception):
             raise result
         return result
@@ -600,10 +602,7 @@ class TestPageSizeBound:
             patch(f"{_MOD}.subprocess.run") as mock_run,
         ):
             mock_run.return_value.returncode = 0
-            mock_run.return_value.stdout = (
-                "HTTP/2 200 OK\n\n"
-                '{"head": {"sha": "abc123"}}'
-            )
+            mock_run.return_value.stdout = "HTTP/2 200 OK\n\n" '{"head": {"sha": "abc123"}}'
             mock_run.return_value.stderr = ""
 
             retrigger_review_gate("owner/repo", 1, sleep=lambda _: None)
