@@ -33,6 +33,9 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_sr_approval,
     has_tmg_approval,
 )
+from hestai_context_mcp.tools.shared.review_gate_retrigger import (
+    retrigger_review_gate as _retrigger_review_gate,
+)
 
 # GitHub token resolution (three-tier lookup, shape guard, 5 s timeout) and the
 # operator-facing auth error message now live in the shared single-source-of-
@@ -371,6 +374,25 @@ def submit_review(
           fix lands OR a future Phase 3 sub-scope on a workbench-team signal
           — DO NOT remove without that coordinated signal.
         * ``dry_run`` — echo of the ``dry_run`` input.
+        * ``retrigger`` — present ONLY on the successful, non-dry-run post
+          path (issue #145). Best-effort outcome of re-running the most
+          recent ``pull_request``-attached Review Gate workflow run for the
+          PR's actual head SHA (resolved independently of ``commit_sha``),
+          so a verdict posted between pushes updates the required check
+          instead of reading as a missing review. A dict with:
+
+            * ``status`` — ``"re-triggered"`` or ``"skipped"``.
+            * ``reason`` — ``None`` when re-triggered; a human-readable
+              diagnostic string when skipped (no token, no matching run,
+              or an Actions API failure).
+            * ``run_id`` — the located workflow run id, or ``None``.
+            * ``head_sha`` — the resolved PR head SHA, or ``None``.
+
+          Strictly additive and best-effort per
+          HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724: a
+          re-trigger failure NEVER fails the post (``status`` stays
+          ``"ok"``) and NEVER fabricates a gate outcome that was not
+          observed.
     """
     # Normalize empty strings to None for internal processing
     annotation = model_annotation if model_annotation else None
@@ -486,10 +508,36 @@ def submit_review(
             "dry_run": False,
         }
 
+    # Step 6: Best-effort Review Gate re-trigger (issue #145). The org-wide
+    # ruleset required-workflow feature only enforces pull_request /
+    # pull_request_target / merge_group -- it silently drops the
+    # issue_comment trigger that would otherwise re-run the gate when this
+    # verdict comment lands. Re-running the most recent pull_request-
+    # attached run for the PR's head SHA makes the required check re-read
+    # the comment we just posted.
+    #
+    # Strictly additive and best-effort per
+    # HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724: the post above
+    # already succeeded and MUST be reported as such regardless of what
+    # happens here. _retrigger_review_gate() is itself designed to never
+    # raise, but the call is wrapped defensively anyway so that no failure
+    # mode of this step -- expected or not -- can turn a successful post
+    # into an error response.
+    try:
+        retrigger = _retrigger_review_gate(repo, pr_number)
+    except Exception as exc:  # noqa: BLE001 -- defense in depth, see comment above
+        retrigger = {
+            "status": "skipped",
+            "reason": f"unexpected error during Review Gate re-trigger: {exc}",
+            "run_id": None,
+            "head_sha": None,
+        }
+
     return {
         "status": "ok",
         "comment_url": post_result["comment_url"],
         "commit_sha": sha,
         "validation": validation,
         "dry_run": False,
+        "retrigger": retrigger,
     }
