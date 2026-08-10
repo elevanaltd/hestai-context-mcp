@@ -2091,3 +2091,192 @@ class TestTokenResolution:
                 dry_run=False,
             )
         assert result["status"] == "ok"
+
+# ---------------------------------------------------------------------------
+# Review Gate re-trigger wiring (issue #145)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestReviewGateRetrigger:
+    """After a verdict comment posts successfully, submit_review must invoke
+    the best-effort Review Gate re-trigger and surface its outcome under a
+    new, additive ``retrigger`` key -- WITHOUT disturbing the existing
+    ``status``/``comment_url``/``commit_sha``/``error_type`` contract.
+
+    The re-trigger call itself is exercised in isolation in
+    tests/unit/tools/shared/test_review_gate_retrigger.py; here we only
+    verify the WIRING: is it called, with what, when, and does its outcome
+    (including failure) ever leak into or break the post's own result.
+    """
+
+    @staticmethod
+    def _post_success_mock_run():
+        from unittest.mock import MagicMock
+
+        mock_run = MagicMock()
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = (
+            "HTTP/2 201 Created\ncontent-type: application/json\n\n"
+            '{"html_url": "https://github.com/owner/repo/pull/1#issuecomment-1"}'
+        )
+        mock_run.return_value.stderr = ""
+        return mock_run
+
+    def test_successful_post_calls_retrigger_with_repo_and_pr_number(self):
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(
+                submit_review_module,
+                "_retrigger_review_gate",
+                return_value={
+                    "status": "re-triggered",
+                    "reason": None,
+                    "run_id": 42,
+                    "head_sha": "abc123",
+                },
+            ) as mock_retrigger,
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=17,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_called_once_with("owner/repo", 17)
+        assert result["status"] == "ok"
+        assert result["retrigger"] == {
+            "status": "re-triggered",
+            "reason": None,
+            "run_id": 42,
+            "head_sha": "abc123",
+        }
+
+    def test_retrigger_outcome_included_when_skipped(self):
+        """A "skipped" retrigger outcome is surfaced verbatim -- the post
+        itself must still read as a success.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        skipped = {
+            "status": "skipped",
+            "reason": "no GitHub token available for the Actions API",
+            "run_id": None,
+            "head_sha": None,
+        }
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(submit_review_module, "_retrigger_review_gate", return_value=skipped),
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        assert result["status"] == "ok"
+        assert result["retrigger"] == skipped
+
+    def test_retrigger_exception_never_fails_the_post(self):
+        """Defense in depth: even if retrigger_review_gate somehow raises
+        (it is designed not to), submit_review must swallow it -- the post
+        already succeeded and must be reported as such.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(
+                submit_review_module,
+                "_retrigger_review_gate",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        assert result["status"] == "ok"
+        assert result["comment_url"]
+        assert result["retrigger"]["status"] == "skipped"
+        assert "boom" in result["retrigger"]["reason"]
+
+    def test_dry_run_never_calls_retrigger_and_omits_key(self):
+        """dry_run=True must NOT re-trigger anything -- it never even posts."""
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with patch.object(submit_review_module, "_retrigger_review_gate") as mock_retrigger:
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=True,
+            )
+
+        mock_retrigger.assert_not_called()
+        assert result["status"] == "ok"
+        assert result["dry_run"] is True
+        assert "retrigger" not in result
+
+    def test_post_failure_never_calls_retrigger_and_omits_key(self):
+        """If the comment post itself fails, there is no new verdict for the
+        gate to observe -- retrigger must not be attempted.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(submit_review_module, "_retrigger_review_gate") as mock_retrigger,
+        ):
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stdout = ""
+            mock_run.return_value.stderr = "Not Found"
+
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_not_called()
+        assert result["status"] == "error"
+        assert "retrigger" not in result
+
+    def test_validation_failure_never_calls_retrigger(self):
+        """Input-validation errors happen before any GitHub interaction --
+        retrigger must not be attempted.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with patch.object(submit_review_module, "_retrigger_review_gate") as mock_retrigger:
+            result = submit_review_module.submit_review(
+                repo="bad-repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Test.",
+            )
+
+        mock_retrigger.assert_not_called()
+        assert result["status"] == "error"
+        assert "retrigger" not in result
