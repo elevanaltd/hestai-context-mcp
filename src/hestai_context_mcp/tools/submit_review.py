@@ -516,22 +516,42 @@ def submit_review(
     # attached run for the PR's head SHA makes the required check re-read
     # the comment we just posted.
     #
-    # Strictly additive and best-effort per
-    # HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724: the post above
-    # already succeeded and MUST be reported as such regardless of what
-    # happens here. _retrigger_review_gate() is itself designed to never
-    # raise, but the call is wrapped defensively anyway so that no failure
-    # mode of this step -- expected or not -- can turn a successful post
-    # into an error response.
-    try:
-        retrigger = _retrigger_review_gate(repo, pr_number)
-    except Exception as exc:  # noqa: BLE001 -- defense in depth, see comment above
+    # Gated on `would_clear` (rework #1, PR #148 finding 3) -- the SAME
+    # value already computed at Step 3, NOT a fresh `verdict == "APPROVED"`
+    # comparison. The gate counts approvals; a non-approving verdict cannot
+    # change the outcome, so re-triggering for one would only burn Actions
+    # minutes and MCP response latency (retry sleeps + subprocess calls) on
+    # every post for no possible effect. Using would_clear rather than a
+    # literal verdict check also keeps this correct for the IL/HO
+    # SELF-REVIEWED/REVIEWED substitutions without re-deriving that logic
+    # here.
+    if not would_clear:
         retrigger = {
             "status": "skipped",
-            "reason": f"unexpected error during Review Gate re-trigger: {exc}",
+            "reason": (
+                f"verdict '{verdict}' for role '{role}' does not clear the "
+                "gate, so re-triggering it cannot change the outcome"
+            ),
             "run_id": None,
             "head_sha": None,
         }
+    else:
+        # Strictly additive and best-effort per
+        # HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724: the post
+        # above already succeeded and MUST be reported as such regardless
+        # of what happens here. _retrigger_review_gate() is itself designed
+        # to never raise, but the call is wrapped defensively anyway so
+        # that no failure mode of this step -- expected or not -- can turn
+        # a successful post into an error response.
+        try:
+            retrigger = _retrigger_review_gate(repo, pr_number)
+        except Exception as exc:  # noqa: BLE001 -- defense in depth, see comment above
+            retrigger = {
+                "status": "skipped",
+                "reason": f"unexpected error during Review Gate re-trigger: {exc}",
+                "run_id": None,
+                "head_sha": None,
+            }
 
     return {
         "status": "ok",

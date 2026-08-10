@@ -9,14 +9,15 @@ workflow. So a verdict comment posted between pushes never causes the
 required check to re-evaluate, and a valid approval reads as a missing
 review until the next push.
 
-This module closes that gap by re-running the most recent
-``pull_request``-attached Review Gate workflow run for the PR's HEAD SHA
+This module closes that gap by re-running the most recent ``pull_request``-
+attached, COMPLETED Review Gate workflow run for the given PR's HEAD SHA
 after a verdict has been posted. The re-run re-reads PR comments live and
 updates the required check bound to the head commit.
 
 Scope guard: this module has authority to re-run an EXISTING workflow run
 ONLY. It must never merge, approve, dispatch arbitrary workflows, or touch
-rulesets/branch protection.
+rulesets/branch protection. Binding: HO-SUBMIT-REVIEW-GATE-RETRIGGER-20260810
+(.hestai/decisions/), which inherits, not asserts, the abstain policy below.
 
 Failure policy (HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724):
 re-triggering is best-effort and strictly additive to posting the verdict
@@ -26,13 +27,28 @@ unexpected exception) collapses to a ``"skipped"`` result with a
 human-readable ``reason``. It never reports ``"re-triggered"`` unless the
 rerun API call was actually observed to succeed, and it never infers a
 gate outcome (approved/cleared) that was not itself observed.
+
+Selection (rework #1, PR #148 cubic triage):
+  * A run at the right head SHA is not necessarily for the right PR --
+    stacked branches, re-opened duplicates, or a branch pushed to two PRs
+    can share a head commit. Selection filters each candidate run's own
+    ``pull_requests`` metadata for ``pr_number`` before picking one; if
+    that metadata is unusable (GitHub's documented empty-array shape when
+    it cannot determine PR association, e.g. fork-triggered runs), this
+    module abstains rather than guessing.
+  * GitHub's rerun endpoint only accepts COMPLETED runs (a non-completed
+    run 422s). Selection picks the most recent COMPLETED run among those
+    matching the PR; if the newest matching run is still queued/in_progress,
+    this module abstains with a reason naming that state instead of
+    attempting -- and failing -- the rerun call. A run already in flight
+    will evaluate on its own.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from hestai_context_mcp.tools.shared.github_auth import resolve_github_token
 
@@ -45,12 +61,20 @@ WORKFLOW_NAME = "Review Gate"
 # the required check bound to the PR's head SHA.
 _REQUIRED_EVENT = "pull_request"
 
+# The only run status the rerun endpoint accepts (a non-completed run 422s).
+_COMPLETED_STATUS = "completed"
+
 # Bounded retry delays (seconds) for the read-after-write race: the verdict
-# comment was just posted, and the Actions "list runs" listing (and/or the
-# run itself, once re-triggered) may not immediately reflect either a very
-# recently created run or the just-written comment. Each entry is the delay
+# comment was just posted, and the Actions "list runs" listing may not
+# immediately reflect a very recently created run. Each entry is the delay
 # BEFORE the corresponding retry attempt; the first attempt fires with no
 # delay. Small and bounded by design -- this is a bolt-on, not a poller.
+#
+# Retries apply ONLY to the "no matching run found yet" case, which is a
+# genuine listing-propagation race. A run that IS found but is not yet
+# COMPLETED, or whose PR association cannot be verified, is a definitive
+# answer -- retrying either would just burn the budget waiting on a run
+# that will evaluate on its own, or metadata that will not appear.
 DEFAULT_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
 
 _GH_API_TIMEOUT_SECONDS = 15.0
@@ -71,9 +95,9 @@ class ReviewGateClient(Protocol):
 
     def get_pr_head_sha(self, repo: str, pr_number: int) -> str: ...
 
-    def find_latest_pull_request_run(
+    def list_pull_request_runs(
         self, repo: str, workflow_name: str, head_sha: str
-    ) -> int | None: ...
+    ) -> list[dict[str, Any]]: ...
 
     def rerun_workflow_run(self, repo: str, run_id: int) -> None: ...
 
@@ -144,11 +168,20 @@ class _GhCliClient:
             raise GhApiError("PR response missing head.sha")
         return str(sha)
 
-    def find_latest_pull_request_run(
+    def list_pull_request_runs(
         self, repo: str, workflow_name: str, head_sha: str
-    ) -> int | None:
+    ) -> list[dict[str, Any]]:
+        """List ``pull_request``-attached runs at ``head_sha`` named
+        ``workflow_name``, newest first (GitHub's default list order).
+
+        Returns the raw run dicts (including ``status`` and
+        ``pull_requests``) -- PR-association and status filtering happens
+        in ``_select_run``, not here, so tests can inject deterministic run
+        listings without a client implementation of their own.
+        """
         path = (
-            f"repos/{repo}/actions/runs" f"?head_sha={head_sha}&event={_REQUIRED_EVENT}&per_page=20"
+            f"repos/{repo}/actions/runs"
+            f"?head_sha={head_sha}&event={_REQUIRED_EVENT}&per_page=20"
         )
         status, body = self._api(path)
         if not (200 <= status < 300):
@@ -159,17 +192,82 @@ class _GhCliClient:
         except (json.JSONDecodeError, AttributeError) as exc:
             raise GhApiError(f"malformed workflow runs response: {exc}") from exc
 
-        for run in runs:
-            if run.get("name") == workflow_name:
-                run_id = run.get("id")
-                if isinstance(run_id, int):
-                    return run_id
-        return None
+        return [run for run in runs if run.get("name") == workflow_name]
 
     def rerun_workflow_run(self, repo: str, run_id: int) -> None:
         status, _body = self._api(f"repos/{repo}/actions/runs/{run_id}/rerun", method="POST")
         if not (200 <= status < 300):
             raise GhApiError(f"HTTP {status} re-running workflow run {run_id}")
+
+
+class _Selection(NamedTuple):
+    """Outcome of filtering a run listing down to one PR-scoped, completed run."""
+
+    run_id: int | None
+    reason: str | None
+    # True iff the "not found" outcome could plausibly resolve on a later
+    # attempt (a listing-propagation race) -- False for definitive answers
+    # (in-flight run, unverifiable metadata) that retrying cannot fix.
+    retryable: bool
+
+
+def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
+    """Pick the most recent COMPLETED run belonging to ``pr_number``.
+
+    ``runs`` is assumed newest-first (GitHub's default list order),
+    pre-filtered to the right head SHA / event / workflow name.
+    """
+    matching: list[dict[str, Any]] = []
+    saw_unverifiable = False
+    for run in runs:
+        pull_requests = run.get("pull_requests")
+        # GitHub returns an empty array (sometimes null) when it cannot
+        # determine which PR(s) a run belongs to (e.g. fork-triggered
+        # runs). Either shape means "cannot verify" -- NOT "no match".
+        if not pull_requests:
+            saw_unverifiable = True
+            continue
+        if any(isinstance(pr, dict) and pr.get("number") == pr_number for pr in pull_requests):
+            matching.append(run)
+
+    if not matching:
+        if saw_unverifiable:
+            return _Selection(
+                None,
+                (
+                    f"could not verify PR association for PR #{pr_number}: the "
+                    f"workflow run listing at this head SHA did not carry usable "
+                    "pull_requests metadata (GitHub omits it for some runs, e.g. "
+                    "fork-triggered) -- abstaining rather than guessing"
+                ),
+                False,
+            )
+        return _Selection(
+            None,
+            (
+                f"no completed {_REQUIRED_EVENT}-attached '{WORKFLOW_NAME}' run found "
+                f"for PR #{pr_number} at this head SHA"
+            ),
+            True,
+        )
+
+    for run in matching:
+        if run.get("status") == _COMPLETED_STATUS:
+            run_id = run.get("id")
+            if isinstance(run_id, int):
+                return _Selection(run_id, None, False)
+
+    newest_status = matching[0].get("status", "unknown")
+    return _Selection(
+        None,
+        (
+            f"the most recent '{WORKFLOW_NAME}' run for PR #{pr_number} is still "
+            f"'{newest_status}' (not completed) -- GitHub only allows re-running "
+            "completed runs, and this run will evaluate on its own once it "
+            "finishes, so re-run is skipped rather than attempted and failed"
+        ),
+        False,
+    )
 
 
 def _skip(reason: str, *, head_sha: str | None = None, run_id: int | None = None) -> dict[str, Any]:
@@ -199,10 +297,10 @@ def retrigger_review_gate(
             "head_sha": str | None,     # the resolved PR head SHA, if resolved
         }
 
-    NEVER raises -- every failure mode (missing token, API failure, no
-    matching run, or any unexpected exception) collapses to a "skipped"
-    result with a diagnostic reason. Only reports "re-triggered" when the
-    rerun API call was actually observed to succeed.
+    NEVER raises -- every failure mode (missing token, API failure, wrong-PR
+    run, non-completed run, no matching run, or any unexpected exception)
+    collapses to a "skipped" result with a diagnostic reason. Only reports
+    "re-triggered" when the rerun API call was actually observed to succeed.
     """
     import time as _time_module
 
@@ -222,28 +320,26 @@ def retrigger_review_gate(
         except Exception as exc:  # noqa: BLE001 -- abstain on ANY failure mode
             return _skip(f"could not resolve PR head SHA: {exc}")
 
-        run_id: int | None = None
+        selection = _Selection(None, "no attempt made", True)
         attempt_delays: tuple[float, ...] = (0.0, *retry_delays)
         for delay in attempt_delays:
             if delay:
                 _sleep(delay)
             try:
-                run_id = _client.find_latest_pull_request_run(repo, WORKFLOW_NAME, head_sha)
+                runs = _client.list_pull_request_runs(repo, WORKFLOW_NAME, head_sha)
             except Exception as exc:  # noqa: BLE001
                 return _skip(
                     f"Actions API error while listing workflow runs: {exc}",
                     head_sha=head_sha,
                 )
-            if run_id is not None:
+            selection = _select_run(runs, pr_number)
+            if selection.run_id is not None or not selection.retryable:
                 break
 
-        if run_id is None:
-            return _skip(
-                f"no {_REQUIRED_EVENT}-attached '{WORKFLOW_NAME}' run found for "
-                f"head SHA {head_sha} after {len(attempt_delays)} attempt(s)",
-                head_sha=head_sha,
-            )
+        if selection.run_id is None:
+            return _skip(selection.reason or "no matching run found", head_sha=head_sha)
 
+        run_id = selection.run_id
         try:
             _client.rerun_workflow_run(repo, run_id)
         except Exception as exc:  # noqa: BLE001
