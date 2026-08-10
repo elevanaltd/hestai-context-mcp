@@ -72,6 +72,11 @@ class _FakeClient:
     ``runs_sequence`` supplies one "list of run dicts" (or an exception) per
     ``list_workflow_runs_for_head_sha`` call, for retry tests; the last
     entry repeats once exhausted.
+
+    Every method records the ``timeout`` it was called with (rework #4:
+    the caller now computes a fresh, budget-bounded timeout for every
+    call), so tests unconcerned with timing can ignore it while
+    budget-focused tests can assert on it directly.
     """
 
     def __init__(
@@ -85,19 +90,24 @@ class _FakeClient:
         self._rerun_result = rerun_result
         self.list_calls = 0
         self.list_call_args: list[tuple[str, str, str]] = []
+        self.list_call_timeouts: list[float] = []
         self.rerun_calls: list[tuple[str, int]] = []
+        self.rerun_timeouts: list[float] = []
         self.head_sha_calls = 0
+        self.head_sha_timeouts: list[float] = []
 
-    def get_pr_head_sha(self, repo: str, pr_number: int) -> str:
+    def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str:
         self.head_sha_calls += 1
+        self.head_sha_timeouts.append(timeout)
         if isinstance(self._head_sha, Exception):
             raise self._head_sha
         return self._head_sha
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str
+        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
     ) -> list[dict[str, Any]]:
         self.list_call_args.append((repo, workflow_file, head_sha))
+        self.list_call_timeouts.append(timeout)
         idx = self.list_calls
         self.list_calls += 1
         result = (
@@ -107,25 +117,103 @@ class _FakeClient:
             raise result
         return result
 
-    def rerun_workflow_run(self, repo: str, run_id: int) -> None:
+    def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None:
         self.rerun_calls.append((repo, run_id))
+        self.rerun_timeouts.append(timeout)
         if self._rerun_result is not None:
             raise self._rerun_result
 
 
-class _FakeClock:
-    """Deterministic monotonic-clock stand-in: returns a fixed sequence of
-    values, one per call, then repeats the last value forever.
+class _SimClock:
+    """Stateful simulated monotonic clock for budget-ceiling tests.
+
+    Starts at ``t=0`` and only advances when explicitly told to (via
+    ``advance()``), from an injected ``sleep`` and from simulated call
+    durations (see ``_SimTimingClient`` below) -- so ``now()`` always
+    reflects the TOTAL simulated time consumed so far, and a test can make
+    a single, direct assertion: the last time read never exceeds the
+    budget's deadline. This is what makes it possible to assert the
+    ceiling itself, not just that some abstain happened (rework #4).
     """
 
-    def __init__(self, values: list[float]) -> None:
-        self._values = list(values)
-        self._idx = 0
+    def __init__(self) -> None:
+        self.t = 0.0
 
-    def __call__(self) -> float:
-        value = self._values[self._idx] if self._idx < len(self._values) else self._values[-1]
-        self._idx += 1
-        return value
+    def now(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        assert seconds >= 0.0
+        self.t += seconds
+
+    def sleep(self, seconds: float) -> None:
+        """Usable directly as the injected ``sleep`` callable: simulated
+        sleeping really does consume simulated time, exactly like a real
+        ``time.sleep`` call would consume real wall-clock time.
+        """
+        self.advance(seconds)
+
+
+class _SimTimingClient:
+    """Fake ``ReviewGateClient`` whose calls consume simulated clock time,
+    mirroring real ``subprocess.run(timeout=...)`` semantics: a call whose
+    configured ``duration`` exceeds the ``timeout`` it was given only
+    consumes time UP TO that timeout before raising -- it does not run to
+    completion and then get reported as a timeout after the fact. This is
+    what makes it possible to prove a call's ACTUAL wall-clock consumption
+    is bounded by the timeout it was passed, not by some larger fixed
+    value (rework #4 hole b).
+    """
+
+    def __init__(
+        self,
+        clock: _SimClock,
+        *,
+        head_sha: str = "abc123headsha",
+        head_sha_duration: float = 0.1,
+        list_duration: float = 0.1,
+        list_results: list[Any] | None = None,
+        rerun_duration: float = 0.1,
+    ) -> None:
+        self._clock = clock
+        self._head_sha = head_sha
+        self._head_sha_duration = head_sha_duration
+        self._list_duration = list_duration
+        # One "list of run dicts" per call (repeats the last entry once
+        # exhausted), same convention as _FakeClient.runs_sequence -- lets
+        # a test simulate "no match yet, then a match on a later attempt"
+        # while still exercising real simulated-time consumption.
+        self._list_results: list[Any] = list(list_results) if list_results is not None else [[]]
+        self._list_call_count = 0
+        self._rerun_duration = rerun_duration
+        self.list_call_timeouts: list[float] = []
+        self.rerun_calls: list[tuple[str, int]] = []
+
+    def _consume(self, configured_duration: float, timeout: float, *, label: str) -> None:
+        if configured_duration > timeout:
+            self._clock.advance(timeout)
+            raise GhApiError(
+                f"gh api call timed out: simulated {label} duration "
+                f"{configured_duration:.1f}s exceeds passed timeout {timeout:.1f}s"
+            )
+        self._clock.advance(configured_duration)
+
+    def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str:
+        self._consume(self._head_sha_duration, timeout, label="head-SHA lookup")
+        return self._head_sha
+
+    def list_workflow_runs_for_head_sha(
+        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
+    ) -> list[dict[str, Any]]:
+        self.list_call_timeouts.append(timeout)
+        self._consume(self._list_duration, timeout, label="run-listing")
+        idx = self._list_call_count
+        self._list_call_count += 1
+        return self._list_results[idx] if idx < len(self._list_results) else self._list_results[-1]
+
+    def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None:
+        self._consume(self._rerun_duration, timeout, label="rerun")
+        self.rerun_calls.append((repo, run_id))
 
 
 @pytest.mark.unit
@@ -498,93 +586,182 @@ class TestRetryRaceHandling:
 
 @pytest.mark.unit
 class TestOverallTimeBudget:
-    """Finding 2 (CE): worst-case latency was 6 calls x 15s + 7s of sleeps =
-    97s, blocking the MCP stdio response. An overall budget now bounds the
-    whole operation, checked BETWEEN steps (not mid-call), using an
-    injectable clock so this is deterministic with no real sleeping.
+    """Rework #4 (CE, confirmed by coordinator): the rework #2 budget check
+    was not an actual ceiling. Two holes: (a) the deadline was checked
+    BEFORE sleeping, never after, so a retry delay could itself consume
+    the remaining budget and still be followed by a full-length call; (b)
+    nothing bounded a call's DURATION by the remaining budget, so a call
+    starting just before the deadline still ran its full per-call timeout.
+    Demonstrated concretely: a 25s budget with three 8s-timeout listing
+    calls at t=100.1/109.1/119.1 finished at 27.1s -- a 2.1s overrun on a
+    "25s budget".
+
+    These tests assert the CEILING directly (final simulated elapsed time
+    never exceeds the budget), using a stateful simulated clock/sleep/
+    client where sleeping and calls actually consume simulated time --
+    not just that an abstain happened, which is what let the 27.1s run
+    look like a 25s budget in the first place.
     """
 
     def test_default_budget_is_documented_and_bounded(self) -> None:
-        # 25s keeps worst case (budget-respecting steps + at most one
-        # in-flight per-call timeout) comfortably under typical stdio/tool
-        # call ceilings, while still allowing a head lookup + a few retry
+        # 25s keeps worst case comfortably under typical stdio/tool call
+        # ceilings, while still allowing a head lookup + a few retry
         # attempts + a rerun call to complete under normal conditions.
         assert 15.0 <= DEFAULT_OVERALL_BUDGET_SECONDS <= 30.0
 
-    def test_abstains_when_budget_exhausted_after_head_sha_resolution(self) -> None:
-        client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
-        # First call establishes the deadline (now() + budget); the second
-        # call (checked right after head-SHA resolution) reports elapsed
-        # time already past the deadline.
-        clock = _FakeClock([0.0, 100.0])
+    def test_sleep_is_capped_so_it_cannot_cross_the_deadline(self) -> None:
+        """Hole (a): a nominal retry delay (20s) far exceeds the remaining
+        budget (10s). The sleep itself must be capped at the remaining
+        budget -- not the full nominal delay -- so total elapsed can never
+        exceed the deadline. The budget is re-checked immediately AFTER
+        the (capped) sleep too, so the now-exhausted remainder correctly
+        abstains rather than issuing another call -- both checks (before
+        AND after the sleep) matter: this scenario passes the before-sleep
+        check (there was still time to make sleeping worthwhile) and is
+        then caught by the after-sleep check once the capped sleep has
+        consumed exactly what remained.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(clock, list_results=[[]])  # every listing: no match, retryable
+
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
             result = retrigger_review_gate(
                 "owner/repo",
                 1,
                 client=client,
-                sleep=lambda _: None,
-                now=clock,
+                sleep=clock.sleep,
+                now=clock.now,
                 overall_budget=10.0,
+                retry_delays=(20.0,),
             )
 
+        assert clock.now() <= 10.0, "total simulated elapsed time exceeded the budget"
+        assert clock.now() == pytest.approx(10.0)
         assert result["status"] == "skipped"
         assert "budget" in result["reason"].lower()
-        assert result["head_sha"] == "abc123headsha"
-        assert client.list_calls == 0
-        assert client.rerun_calls == []
+        assert "run-listing call" in result["reason"]
+        # Only the FIRST attempt's listing call happened; the second was
+        # correctly abandoned (by the after-sleep check) before being issued.
+        assert len(client.list_call_timeouts) == 1
 
-    def test_abstains_when_budget_exhausted_mid_retry_loop(self) -> None:
-        client = _FakeClient(runs_sequence=[[], [], []])
-        # deadline check, post-head-sha check (still ok), then attempt-loop
-        # checks: first attempt ok, second attempt reports exhausted.
-        clock = _FakeClock([0.0, 1.0, 1.0, 100.0])
+    def test_abstains_before_sleeping_when_remaining_budget_already_too_small(self) -> None:
+        """The PRE-sleep check's own distinct message: when remaining budget
+        is already below the useful threshold before a retry delay would
+        even be attempted, no sleep happens at all -- distinguishable from
+        the post-sleep "insufficient for a run-listing call" message
+        exercised above.
+        """
+        clock = _SimClock()
+        # head-SHA lookup + first listing call consume 9.5s of a 10s budget,
+        # leaving 0.5s -- below the 1.0s minimum-useful threshold, so the
+        # second attempt's retry delay must never be slept at all.
+        client = _SimTimingClient(
+            clock, head_sha_duration=5.0, list_duration=4.5, list_results=[[]]
+        )
+
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
             result = retrigger_review_gate(
                 "owner/repo",
                 1,
                 client=client,
-                sleep=lambda _: None,
-                now=clock,
+                sleep=clock.sleep,
+                now=clock.now,
                 overall_budget=10.0,
-                retry_delays=(1.0, 2.0),
+                retry_delays=(1.0,),
             )
 
+        assert clock.now() == pytest.approx(9.5), "no sleep should have been attempted"
+        assert clock.now() <= 10.0
         assert result["status"] == "skipped"
         assert "budget" in result["reason"].lower()
-        assert client.list_calls == 1
-        assert client.rerun_calls == []
+        assert "wait for the next retry attempt" in result["reason"]
+        assert len(client.list_call_timeouts) == 1  # only the first attempt's call
 
-    def test_abstains_when_budget_exhausted_before_rerun_call(self) -> None:
-        client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
-        # deadline, post-head-sha check ok, pre-listing check ok, then the
-        # pre-rerun check reports exhausted.
-        clock = _FakeClock([0.0, 1.0, 1.0, 100.0])
+    def test_call_timeout_is_capped_so_a_call_cannot_run_past_the_deadline(self) -> None:
+        """Hole (b): even with no sleeping involved, a call whose nominal
+        duration (8s) exceeds the REMAINING budget (5s, after a 5s head-SHA
+        lookup against a 10s budget) must be capped to that remaining
+        budget -- not allowed to run its full nominal duration past the
+        deadline.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(
+            clock,
+            head_sha_duration=5.0,
+            list_duration=8.0,  # would exceed remaining budget once capped
+        )
+
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
             result = retrigger_review_gate(
                 "owner/repo",
                 1,
                 client=client,
-                sleep=lambda _: None,
-                now=clock,
+                sleep=clock.sleep,
+                now=clock.now,
                 overall_budget=10.0,
+                retry_delays=(),
             )
 
+        assert clock.now() <= 10.0, "total simulated elapsed time exceeded the budget"
+        assert clock.now() == pytest.approx(10.0)
+        # The timeout PASSED to the client was capped at the remaining
+        # budget (5.0s), not the module's 8.0s per-call ceiling.
+        assert client.list_call_timeouts == [pytest.approx(5.0)]
         assert result["status"] == "skipped"
-        assert "budget" in result["reason"].lower()
-        assert result["run_id"] == 1
-        assert client.rerun_calls == []
+        assert "Actions API error while listing workflow runs" in result["reason"]
 
-    def test_completes_normally_within_budget(self) -> None:
-        """A generous, never-exhausted clock must not perturb the happy path."""
-        client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
-        clock = _FakeClock([0.0, 0.1, 0.2, 0.3])
+    def test_per_call_timeout_shrinks_as_budget_depletes(self) -> None:
+        """The timeout handed to the client on each successive call must
+        shrink to track the remaining budget, not stay fixed at the
+        module's per-call ceiling.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(
+            clock,
+            head_sha_duration=1.0,
+            list_duration=1.0,
+            # First listing call: no match (forces a retry). Second (after
+            # the retry delay): a completed match.
+            list_results=[[], [_run(42, pr_number=1, status="completed")]],
+        )
+
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
             result = retrigger_review_gate(
-                "owner/repo", 1, client=client, sleep=lambda _: None, now=clock, overall_budget=25.0
+                "owner/repo",
+                1,
+                client=client,
+                sleep=clock.sleep,
+                now=clock.now,
+                overall_budget=10.0,
+                retry_delays=(2.0,),
+            )
+
+        assert result["status"] == "re-triggered"
+        assert client.list_call_timeouts == [pytest.approx(8.0), pytest.approx(6.0)]
+        assert client.list_call_timeouts[0] > client.list_call_timeouts[1]
+        assert clock.now() <= 10.0
+
+    def test_completes_normally_well_within_budget(self) -> None:
+        """A generous budget against fast simulated calls must not perturb
+        the happy path or come anywhere near the ceiling.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(clock, list_results=[[_run(1, pr_number=1, status="completed")]])
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=clock.sleep,
+                now=clock.now,
+                overall_budget=25.0,
             )
 
         assert result["status"] == "re-triggered"
         assert result["run_id"] == 1
+        assert clock.now() < 1.0
+        assert clock.now() <= 25.0
 
 
 @pytest.mark.unit

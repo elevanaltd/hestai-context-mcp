@@ -17,9 +17,9 @@ comments live and updates the required check bound to the head commit.
 Scope guard: this module has authority to re-run an EXISTING workflow run
 ONLY. It must never merge, approve, dispatch arbitrary workflows, or touch
 rulesets/branch protection. Binding: HO-SUBMIT-REVIEW-GATE-RETRIGGER-20260810
-(.hestai/decisions/), which inherits, not asserts, the abstain policy below.
-The workflow-scoped LISTING endpoint used for finding 4 below is still
-read-only -- it does not authorise workflow_dispatch.
+(.hestai/decisions/, RATIFIED), which inherits, not asserts, the abstain
+policy below. The workflow-scoped LISTING endpoint used for finding 4 below
+is still read-only -- it does not authorise workflow_dispatch.
 
 Failure policy (HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724):
 re-triggering is best-effort and strictly additive to posting the verdict
@@ -67,9 +67,20 @@ Selection & robustness (rework #2, all-four-reviewers CONDITIONAL triage):
     one, matching what this module's own docstring already promised.
   * Finding 2: an overall time budget (``DEFAULT_OVERALL_BUDGET_SECONDS``)
     now bounds the whole operation, checked BETWEEN steps via an
-    injectable clock, with a reduced per-call timeout -- bounding worst-
-    case latency instead of letting per-call timeouts multiply unbounded
-    across a head lookup, several retry attempts, and a rerun call.
+    injectable clock, with a reduced per-call timeout.
+
+Budget enforcement (rework #4, CE + coordinator): the rework #2 budget
+check was NOT actually a ceiling -- it was checked BEFORE sleeping (never
+after, so a retry delay could itself consume the remaining budget and
+still be followed by a full-length API call) and no call's DURATION was
+ever bounded by the remaining budget (a call starting a moment before the
+deadline still ran its full timeout). Both holes are closed the same way:
+every time-consuming operation (sleep OR API call) is preceded by a FRESH
+remaining-budget read, and both the sleep duration and the call's timeout
+are capped by whatever remains -- so no single step, and therefore no
+sequence of steps, can push total elapsed time past ``overall_budget``.
+When remaining budget drops below ``_MIN_USEFUL_CALL_SECONDS``, this module
+abstains rather than issue a call with no realistic chance to complete.
 """
 
 from __future__ import annotations
@@ -92,8 +103,8 @@ WORKFLOW_FILE = "review-gate.yml"
 # List Workflow Runs API's own ``event`` query parameter accepts only a
 # single value, so filtering across all three happens client-side in
 # _select_run() against a single head-SHA-scoped listing, rather than
-# issuing one API call per event (which would also worsen finding 2's
-# latency budget).
+# issuing one API call per event (which would also worsen the latency
+# budget below).
 _REQUIRED_EVENTS = frozenset({"pull_request", "pull_request_target", "merge_group"})
 
 # The only run status the rerun endpoint accepts (a non-completed run 422s).
@@ -104,8 +115,8 @@ _COMPLETED_STATUS = "completed"
 # sharing all three is not a realistic scenario -- it would require over
 # 100 reruns of the identical workflow at the identical commit. Documented
 # bound instead of implementing multi-page fetching, which would also eat
-# into the overall time budget (finding 2) for a truncation risk this
-# combination of filters already makes vanishingly small.
+# into the overall time budget for a truncation risk this combination of
+# filters already makes vanishingly small.
 _MAX_PAGE_SIZE = 100
 
 # Bounded retry delays (seconds) for the read-after-write race: the verdict
@@ -122,20 +133,27 @@ _MAX_PAGE_SIZE = 100
 # run that will evaluate on its own.
 DEFAULT_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
 
-# Reduced from an earlier 15.0s (rework #2 finding 2: CE's arithmetic --
-# up to 6 calls x 15s + 7s of retry sleeps = 97s worst case, blocking the
-# MCP stdio response). 8s is still generous for a single Actions API call
-# under normal conditions, while keeping the worst case (budget-respecting
-# steps + at most one in-flight per-call timeout) well bounded.
+# Maximum timeout offered to any single Actions API call. The ACTUAL
+# per-call timeout passed to the client is ``min(_GH_API_TIMEOUT_SECONDS,
+# <remaining budget>)`` (rework #4) -- this constant is only the ceiling
+# used when plenty of budget remains.
 _GH_API_TIMEOUT_SECONDS = 8.0
 
-# Overall wall-clock budget for the ENTIRE re-trigger operation, checked
-# BETWEEN steps (not mid-call) via an injectable clock. 25s keeps the
-# worst case (25s of budget-respecting steps + at most one already-
-# in-flight per-call timeout of 8s =~ 33s) comfortably under typical
-# stdio/tool-call ceilings, while still giving a head lookup + a few retry
-# attempts + a rerun call room to complete under normal conditions.
+# Overall wall-clock budget for the ENTIRE re-trigger operation. 25s keeps
+# the worst case comfortably under typical stdio/tool-call ceilings, while
+# still giving a head lookup + a few retry attempts + a rerun call room to
+# complete under normal conditions. Rework #4 makes this an ACTUAL ceiling
+# (see module docstring) rather than a check that could still be exceeded
+# by an in-flight sleep or call.
 DEFAULT_OVERALL_BUDGET_SECONDS = 25.0
+
+# Below this much remaining budget, neither a retry sleep nor an API call
+# is attempted -- there is no realistic chance either completes usefully,
+# so this module abstains instead of spending the last of the budget on an
+# attempt with essentially no chance of succeeding. 1s is generous relative
+# to a local subprocess invocation's own overhead while still leaving
+# meaningful room for the call itself.
+_MIN_USEFUL_CALL_SECONDS = 1.0
 
 
 class GhApiError(Exception):
@@ -149,24 +167,32 @@ class GhApiError(Exception):
 class ReviewGateClient(Protocol):
     """The three Actions-API operations this module needs, as a Protocol so
     tests can inject a deterministic fake instead of hitting a real gh CLI.
+
+    Every method takes ``timeout`` as a required keyword argument (rework
+    #4): the caller (``retrigger_review_gate``) computes it fresh, bounded
+    by remaining budget, immediately before each call -- there is no
+    client-side default to fall back on, so a call can never silently run
+    longer than the budget allows for it.
     """
 
-    def get_pr_head_sha(self, repo: str, pr_number: int) -> str: ...
+    def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str: ...
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str
+        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
     ) -> list[dict[str, Any]]: ...
 
-    def rerun_workflow_run(self, repo: str, run_id: int) -> None: ...
+    def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None: ...
 
 
 class _GhCliClient:
-    """Default ``ReviewGateClient`` backed by the ``gh`` CLI subprocess."""
+    """Default ``ReviewGateClient`` backed by the ``gh`` CLI subprocess.
 
-    def __init__(self, timeout: float = _GH_API_TIMEOUT_SECONDS) -> None:
-        self._timeout = timeout
+    Stateless: every call site supplies its own ``timeout`` (see
+    ``ReviewGateClient``), so there is no instance-level default to drift
+    out of sync with the caller's actual remaining budget.
+    """
 
-    def _api(self, path: str, *, method: str | None = None) -> tuple[int, str]:
+    def _api(self, path: str, *, method: str | None = None, timeout: float) -> tuple[int, str]:
         args = ["gh", "api", "--include"]
         if method:
             args += ["-X", method]
@@ -176,7 +202,7 @@ class _GhCliClient:
                 args,
                 capture_output=True,
                 text=True,
-                timeout=self._timeout,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise GhApiError(f"gh api call timed out: {exc}") from exc
@@ -192,8 +218,8 @@ class _GhCliClient:
         status, _headers, body = parse_gh_api_response(result.stdout or "")
         return status, body
 
-    def get_pr_head_sha(self, repo: str, pr_number: int) -> str:
-        status, body = self._api(f"repos/{repo}/pulls/{pr_number}")
+    def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str:
+        status, body = self._api(f"repos/{repo}/pulls/{pr_number}", timeout=timeout)
         if not (200 <= status < 300):
             raise GhApiError(f"HTTP {status} resolving PR head SHA")
         try:
@@ -206,7 +232,7 @@ class _GhCliClient:
         return str(sha)
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str
+        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
     ) -> list[dict[str, Any]]:
         """List runs of ``workflow_file`` at ``head_sha``, newest first
         (GitHub's default list order).
@@ -228,7 +254,7 @@ class _GhCliClient:
             f"repos/{repo}/actions/workflows/{workflow_file}/runs"
             f"?head_sha={head_sha}&per_page={_MAX_PAGE_SIZE}"
         )
-        status, body = self._api(path)
+        status, body = self._api(path, timeout=timeout)
         if not (200 <= status < 300):
             raise GhApiError(f"HTTP {status} listing workflow runs")
         try:
@@ -239,8 +265,10 @@ class _GhCliClient:
 
         return list(runs)
 
-    def rerun_workflow_run(self, repo: str, run_id: int) -> None:
-        status, _body = self._api(f"repos/{repo}/actions/runs/{run_id}/rerun", method="POST")
+    def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None:
+        status, _body = self._api(
+            f"repos/{repo}/actions/runs/{run_id}/rerun", method="POST", timeout=timeout
+        )
         if not (200 <= status < 300):
             raise GhApiError(f"HTTP {status} re-running workflow run {run_id}")
 
@@ -325,6 +353,22 @@ def _skip(reason: str, *, head_sha: str | None = None, run_id: int | None = None
     return {"status": "skipped", "reason": reason, "run_id": run_id, "head_sha": head_sha}
 
 
+def _budget_reason(overall_budget: float, remaining: float, insufficient_for: str) -> str:
+    """Build a distinct, diagnostic abstain reason for a budget shortfall.
+
+    ``insufficient_for`` names the SPECIFIC step that couldn't be attempted
+    (e.g. "to wait for the next retry attempt" vs "for a run-listing
+    call") so an operator can tell "ran out while waiting" from "ran out
+    before a call" apart at a glance, rather than seeing the same generic
+    "budget exhausted" string for every shortfall (rework #4).
+    """
+    return (
+        f"Review Gate re-trigger abandoned: the {overall_budget:.0f}s overall "
+        f"budget left only {max(remaining, 0.0):.1f}s remaining, insufficient "
+        f"{insufficient_for}"
+    )
+
+
 def retrigger_review_gate(
     repo: str,
     pr_number: int,
@@ -343,10 +387,13 @@ def retrigger_review_gate(
     the PR via the Actions API.
 
     ``now`` is an injectable monotonic-clock callable (defaults to
-    ``time.monotonic``) used to enforce ``overall_budget``: a wall-clock
-    ceiling on the WHOLE operation, checked between steps (after resolving
-    the head SHA, before each run-listing retry attempt, and before the
-    rerun call) rather than only bounding individual API calls.
+    ``time.monotonic``) used to enforce ``overall_budget`` as an ACTUAL
+    ceiling on the whole operation (rework #4 -- see module docstring for
+    why the rework #2 version of this check was not one): every sleep and
+    every API call is preceded by a fresh remaining-budget read, and both
+    the sleep duration and the call's timeout are capped by whatever
+    remains, so no step -- and therefore no sequence of steps -- can push
+    total elapsed time past ``overall_budget``.
 
     Returns a dict:
         {
@@ -369,8 +416,11 @@ def retrigger_review_gate(
     _client: ReviewGateClient = client if client is not None else _GhCliClient()
     deadline = _now() + overall_budget
 
-    def _budget_exhausted() -> bool:
-        return _now() >= deadline
+    def _remaining() -> float:
+        return deadline - _now()
+
+    def _call_timeout(remaining: float) -> float:
+        return min(_GH_API_TIMEOUT_SECONDS, remaining)
 
     try:
         if resolve_github_token() is None:
@@ -380,35 +430,47 @@ def retrigger_review_gate(
                 "for token resolution)"
             )
 
+        # --- resolve the PR's real head SHA -------------------------------
+        remaining = _remaining()
+        if remaining < _MIN_USEFUL_CALL_SECONDS:
+            return _skip(_budget_reason(overall_budget, remaining, "to resolve the PR head SHA"))
         try:
-            head_sha = _client.get_pr_head_sha(repo, pr_number)
+            head_sha = _client.get_pr_head_sha(repo, pr_number, timeout=_call_timeout(remaining))
         except Exception as exc:  # noqa: BLE001 -- abstain on ANY failure mode
             return _skip(f"could not resolve PR head SHA: {exc}")
 
-        if _budget_exhausted():
-            return _skip(
-                f"Review Gate re-trigger abandoned: {overall_budget:.0f}s "
-                "budget exhausted after resolving PR head SHA",
-                head_sha=head_sha,
-            )
-
+        # --- locate a completed, PR-matching run, with bounded retry -----
         selection = _Selection(None, "no attempt made", True)
         attempt_delays: tuple[float, ...] = (0.0, *retry_delays)
         for delay in attempt_delays:
-            if _budget_exhausted():
+            if delay:
+                remaining = _remaining()
+                if remaining < _MIN_USEFUL_CALL_SECONDS:
+                    selection = _Selection(
+                        None,
+                        _budget_reason(
+                            overall_budget, remaining, "to wait for the next retry attempt"
+                        ),
+                        False,
+                    )
+                    break
+                # Cap the sleep itself, not just the call that follows it --
+                # otherwise a real time.sleep(delay) still blocks for the
+                # full nominal delay regardless of budget (rework #4 hole a).
+                _sleep(min(delay, remaining))
+
+            remaining = _remaining()
+            if remaining < _MIN_USEFUL_CALL_SECONDS:
                 selection = _Selection(
                     None,
-                    (
-                        f"Review Gate re-trigger abandoned: {overall_budget:.0f}s "
-                        "budget exhausted while looking for a matching run"
-                    ),
+                    _budget_reason(overall_budget, remaining, "for a run-listing call"),
                     False,
                 )
                 break
-            if delay:
-                _sleep(delay)
             try:
-                runs = _client.list_workflow_runs_for_head_sha(repo, WORKFLOW_FILE, head_sha)
+                runs = _client.list_workflow_runs_for_head_sha(
+                    repo, WORKFLOW_FILE, head_sha, timeout=_call_timeout(remaining)
+                )
             except Exception as exc:  # noqa: BLE001
                 return _skip(
                     f"Actions API error while listing workflow runs: {exc}",
@@ -423,16 +485,16 @@ def retrigger_review_gate(
 
         run_id = selection.run_id
 
-        if _budget_exhausted():
+        # --- re-run the located run ---------------------------------------
+        remaining = _remaining()
+        if remaining < _MIN_USEFUL_CALL_SECONDS:
             return _skip(
-                f"Review Gate re-trigger abandoned: {overall_budget:.0f}s budget "
-                f"exhausted before re-running run {run_id}",
+                _budget_reason(overall_budget, remaining, f"to re-run run {run_id}"),
                 head_sha=head_sha,
                 run_id=run_id,
             )
-
         try:
-            _client.rerun_workflow_run(repo, run_id)
+            _client.rerun_workflow_run(repo, run_id, timeout=_call_timeout(remaining))
         except Exception as exc:  # noqa: BLE001
             return _skip(
                 f"Actions API error while re-running run {run_id}: {exc}",
