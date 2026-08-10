@@ -79,6 +79,89 @@ class TestInputValidation:
         assert result["status"] == "error"
         assert "assessment" in result["validation"]["error"].lower()
 
+    @pytest.mark.parametrize(
+        "hostile_repo",
+        [
+            "../../etc/passwd/x",
+            "o/r?foo=bar",
+            "o/r/../../../user",
+            "owner/repo name",
+            "owner/repo\n",
+            "owner/../repo",
+            "/etc/passwd",
+            "owner/",
+            "/repo",
+            "owner//repo",
+            "owner/repo/",
+            "-owner/repo",
+            "owner/..",
+            "owner/.",
+        ],
+    )
+    def test_hostile_repo_strings_rejected(self, hostile_repo):
+        """Rework #2 (PR #148 finding 1, CE + CIV): ``repo`` was checked only
+        for containing a slash, then interpolated straight into ``gh api``
+        paths across four call sites (the original ``_post_comment`` plus
+        the three new Actions-API sites this PR added). Must now enforce
+        strict ``owner/name``: exactly one slash, each side matching
+        GitHub's own allowed character set, no traversal, no query string,
+        no whitespace.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        # Belt-and-braces: patch subprocess.run so that even if the
+        # validator has a gap for a given hostile string, this test cannot
+        # make a real `gh` call -- test isolation must not depend on the
+        # validator being correct.
+        with patch("subprocess.run") as mock_run:
+            result = submit_review(
+                repo=hostile_repo,
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Test assessment",
+            )
+
+        assert result["status"] == "error"
+        assert "repo" in result["validation"]["error"].lower()
+        mock_run.assert_not_called()
+
+    def test_hostile_repo_never_reaches_subprocess(self):
+        """Not just "validation returned an error" -- the hostile value must
+        never be handed to ``gh`` at all, for any of the four interpolation
+        sites (post-comment, PR head-SHA lookup, run listing, rerun).
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch("subprocess.run") as mock_run:
+            result = submit_review(
+                repo="../../etc/passwd/x",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Test assessment",
+                dry_run=False,
+            )
+
+        assert result["status"] == "error"
+        mock_run.assert_not_called()
+
+    def test_valid_repo_with_dots_and_hyphens_accepted(self):
+        """Legitimate repo names use '.', '_', '-' -- the strict validator
+        must not over-reject real GitHub repo names.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="my-org_1/my.repo-name_2",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Verified.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
     def test_negative_pr_number_rejected(self):
         """PR number must be a positive integer."""
         from hestai_context_mcp.tools.submit_review import submit_review

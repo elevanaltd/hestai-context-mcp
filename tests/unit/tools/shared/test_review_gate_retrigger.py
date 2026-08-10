@@ -1,24 +1,31 @@
-"""Unit tests for the Review Gate re-trigger helper (issue #145, rework #1).
+"""Unit tests for the Review Gate re-trigger helper (issue #145, rework #2).
 
 ``retrigger_review_gate`` is invoked by ``submit_review`` AFTER a verdict
 comment has been posted successfully. It is best-effort and strictly
 additive to posting (HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724):
 it must NEVER raise, and must NEVER report an outcome it did not actually
 observe. These tests exercise the module directly with an injected fake
-client -- no live GitHub API calls, no real sleeping.
+client -- no live GitHub API calls, no real sleeping, no real clock reads.
 
-Rework #1 (cubic triage on PR #148) added two selection constraints on top
-of the original head-SHA + event + name filter:
+Rework #2 (all-four-reviewers CONDITIONAL triage on PR #148) fixed:
 
-  1. A run at the right head SHA is not necessarily for the right PR --
-     stacked branches / re-opened duplicates / a branch pushed to two PRs
-     can share a head commit. Selection must filter each candidate run's
-     ``pull_requests`` metadata for ``pr_number`` before picking one.
-  2. GitHub's rerun endpoint only accepts COMPLETED runs (verified against
-     GitHub's REST API docs/community reports: a non-completed run 422s).
-     Selection must pick the most recent COMPLETED run for the PR, and
-     abstain -- rather than attempt-and-fail -- when the newest matching
-     run is still queued/in_progress.
+  2. Worst-case latency (CE): an overall time budget now bounds the whole
+     re-trigger, checked between steps, with a reduced per-call timeout.
+  3. Retry aborted by one unverifiable run (CRS): a run with unusable
+     ``pull_requests`` metadata no longer suppresses retry when no PR match
+     was found -- it only becomes the terminal reason once the retry
+     budget is spent.
+  4. Fragile run lookup (CE + CRS): listing is now scoped to the workflow
+     FILE name (stable) via the workflow-scoped endpoint, not the mutable
+     display name, with an explicit, tested page-size bound instead of an
+     unbounded/undocumented truncation risk.
+  5. Event filter too narrow (CRS/coordinator): the ruleset enforces
+     pull_request, pull_request_target AND merge_group -- selection now
+     accepts all three rather than hardcoding one.
+  7. Vacuous default-client test: now asserts the abstain reason actually
+     carries the observed HTTP signal, not just that status == "skipped".
+  9/10. Additional coverage: a listing failure mid-retry-loop, the outer
+     catch-all exception path, and more `_GhCliClient` edge cases.
 """
 
 from __future__ import annotations
@@ -29,14 +36,21 @@ from unittest.mock import patch
 import pytest
 
 from hestai_context_mcp.tools.shared.review_gate_retrigger import (
+    DEFAULT_OVERALL_BUDGET_SECONDS,
     GhApiError,
+    WORKFLOW_FILE,
     retrigger_review_gate,
 )
 
 _MOD = "hestai_context_mcp.tools.shared.review_gate_retrigger"
 
 
-def _run(run_id: int, pr_number: int | None, status: str = "completed") -> dict[str, Any]:
+def _run(
+    run_id: int,
+    pr_number: int | None,
+    status: str = "completed",
+    event: str = "pull_request",
+) -> dict[str, Any]:
     """Build a workflow-run dict shaped like GitHub's list-runs response.
 
     ``pr_number=None`` produces an empty ``pull_requests`` list -- GitHub's
@@ -47,7 +61,7 @@ def _run(run_id: int, pr_number: int | None, status: str = "completed") -> dict[
     return {
         "id": run_id,
         "status": status,
-        "name": "Review Gate",
+        "event": event,
         "pull_requests": [] if pr_number is None else [{"number": pr_number}],
     }
 
@@ -56,8 +70,8 @@ class _FakeClient:
     """Deterministic stand-in for the gh CLI Actions client.
 
     ``runs_sequence`` supplies one "list of run dicts" (or an exception) per
-    ``list_pull_request_runs`` call, for retry tests; the last entry repeats
-    once exhausted.
+    ``list_workflow_runs_for_head_sha`` call, for retry tests; the last
+    entry repeats once exhausted.
     """
 
     def __init__(
@@ -70,6 +84,7 @@ class _FakeClient:
         self._runs_sequence = list(runs_sequence) if runs_sequence is not None else [[]]
         self._rerun_result = rerun_result
         self.list_calls = 0
+        self.list_call_args: list[tuple[str, str, str]] = []
         self.rerun_calls: list[tuple[str, int]] = []
         self.head_sha_calls = 0
 
@@ -79,14 +94,13 @@ class _FakeClient:
             raise self._head_sha
         return self._head_sha
 
-    def list_pull_request_runs(
-        self, repo: str, workflow_name: str, head_sha: str
+    def list_workflow_runs_for_head_sha(
+        self, repo: str, workflow_file: str, head_sha: str
     ) -> list[dict[str, Any]]:
+        self.list_call_args.append((repo, workflow_file, head_sha))
         idx = self.list_calls
         self.list_calls += 1
-        result = (
-            self._runs_sequence[idx] if idx < len(self._runs_sequence) else self._runs_sequence[-1]
-        )
+        result = self._runs_sequence[idx] if idx < len(self._runs_sequence) else self._runs_sequence[-1]
         if isinstance(result, Exception):
             raise result
         return result
@@ -95,6 +109,21 @@ class _FakeClient:
         self.rerun_calls.append((repo, run_id))
         if self._rerun_result is not None:
             raise self._rerun_result
+
+
+class _FakeClock:
+    """Deterministic monotonic-clock stand-in: returns a fixed sequence of
+    values, one per call, then repeats the last value forever.
+    """
+
+    def __init__(self, values: list[float]) -> None:
+        self._values = list(values)
+        self._idx = 0
+
+    def __call__(self) -> float:
+        value = self._values[self._idx] if self._idx < len(self._values) else self._values[-1]
+        self._idx += 1
+        return value
 
 
 @pytest.mark.unit
@@ -147,19 +176,26 @@ class TestHappyPath:
         assert client.head_sha_calls == 1
         assert result["head_sha"] == "freshly-resolved-sha"
 
+    def test_lists_runs_via_the_stable_workflow_file_not_display_name(self) -> None:
+        """Finding 4: the listing must be scoped by the workflow's FILE name
+        (stable) rather than its mutable display name.
+        """
+        client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            retrigger_review_gate("owner/repo", 1, client=client, sleep=lambda _: None)
+
+        assert client.list_call_args == [("owner/repo", WORKFLOW_FILE, "abc123headsha")]
+        assert WORKFLOW_FILE == "review-gate.yml"
+
 
 @pytest.mark.unit
 class TestPrNumberSelection:
-    """Finding 1 (P1): a run at the right head SHA is not necessarily for the
-    right PR. Selection must filter on the run's own ``pull_requests``
-    metadata, not just head SHA + event + name.
+    """Finding 1 (rework #1): a run at the right head SHA is not necessarily
+    for the right PR. Selection must filter on the run's own
+    ``pull_requests`` metadata, not just head SHA + event.
     """
 
     def test_selects_run_matching_pr_number_ignoring_other_prs_at_same_sha(self) -> None:
-        """Newest run (id 10) belongs to PR 999 (e.g. a stacked branch sharing
-        this head commit); the older run (id 20) belongs to PR 7, the PR
-        this call is actually about. Only run 20 may be re-run.
-        """
         client = _FakeClient(
             runs_sequence=[
                 [
@@ -187,30 +223,68 @@ class TestPrNumberSelection:
         assert result["run_id"] is None
         assert client.rerun_calls == []
 
-    def test_abstains_when_pull_requests_metadata_unusable(self) -> None:
-        """Every candidate run has an empty ``pull_requests`` list (GitHub's
-        documented shape when it cannot determine PR association, e.g.
-        fork-triggered runs) -- we cannot verify any of them belong to our
-        PR, so we must abstain rather than guess which one to re-run.
-        """
+
+@pytest.mark.unit
+class TestUnverifiableMetadataRetries:
+    """Finding 3 (rework #2, CRS): a single unverifiable run must NOT abort
+    the retry loop -- it only becomes the terminal reason once the retry
+    budget is spent, exactly like the plain "not found yet" case.
+    """
+
+    def test_keeps_retrying_past_an_unverifiable_run_before_abstaining(self) -> None:
+        # Every attempt sees only an unverifiable run (empty pull_requests).
+        # If unverifiable runs wrongly aborted retry, list_calls would stop
+        # at 1; the fix requires it to consume the full retry budget.
         client = _FakeClient(
-            runs_sequence=[[_run(10, pr_number=None, status="completed"), _run(20, pr_number=None)]]
+            runs_sequence=[
+                [_run(9, pr_number=None, status="completed")],
+                [_run(9, pr_number=None, status="completed")],
+                [_run(9, pr_number=None, status="completed")],
+            ]
         )
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
-            result = retrigger_review_gate("owner/repo", 7, client=client, sleep=lambda _: None)
+            result = retrigger_review_gate(
+                "owner/repo",
+                148,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(1.0, 2.0),
+            )
 
         assert result["status"] == "skipped"
         assert "verify" in result["reason"].lower() or "metadata" in result["reason"].lower()
         assert result["run_id"] is None
         assert client.rerun_calls == []
-        # Unverifiable metadata is a definitive answer, not a listing race --
-        # must not burn the retry budget.
-        assert client.list_calls == 1
+        assert client.list_calls == 3  # initial attempt + 2 retries -- NOT aborted early
+
+    def test_finds_real_match_on_a_later_attempt_despite_earlier_unverifiable_run(self) -> None:
+        """The propagation race this retry loop exists to win: an
+        unverifiable (fork-triggered) run shows up first, and the real
+        PR-matching run only appears on a later listing.
+        """
+        client = _FakeClient(
+            runs_sequence=[
+                [_run(9, pr_number=None, status="completed")],
+                [_run(9, pr_number=None), _run(20, pr_number=148, status="completed")],
+            ]
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                148,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(1.0, 2.0),
+            )
+
+        assert result["status"] == "re-triggered"
+        assert result["run_id"] == 20
+        assert client.list_calls == 2
 
 
 @pytest.mark.unit
 class TestRunStatusSelection:
-    """Finding 2 (P2): the rerun endpoint only accepts COMPLETED runs.
+    """Finding 2 (rework #1): the rerun endpoint only accepts COMPLETED runs.
     Selection must skip non-completed runs and abstain rather than attempt
     a rerun call doomed to fail.
     """
@@ -243,6 +317,50 @@ class TestRunStatusSelection:
         # An in-flight run is a definitive answer (it will evaluate on its
         # own) -- must not retry waiting for it to complete.
         assert client.list_calls == 1
+
+
+@pytest.mark.unit
+class TestEventSet:
+    """Finding 5: the ruleset's required-workflow feature enforces
+    pull_request, pull_request_target AND merge_group -- selection must
+    accept runs from all three, not hardcode ``pull_request`` alone.
+    """
+
+    def test_pull_request_target_run_is_selected(self) -> None:
+        client = _FakeClient(
+            runs_sequence=[[_run(5, pr_number=1, status="completed", event="pull_request_target")]]
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate("owner/repo", 1, client=client, sleep=lambda _: None)
+
+        assert result["status"] == "re-triggered"
+        assert result["run_id"] == 5
+
+    def test_merge_group_run_is_selected(self) -> None:
+        client = _FakeClient(
+            runs_sequence=[[_run(6, pr_number=1, status="completed", event="merge_group")]]
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate("owner/repo", 1, client=client, sleep=lambda _: None)
+
+        assert result["status"] == "re-triggered"
+        assert result["run_id"] == 6
+
+    def test_unrelated_event_is_ignored(self) -> None:
+        """A run at the right head SHA/PR but from an unenforced event (e.g.
+        ``workflow_dispatch``) must not be selected -- it is not the run
+        backing the required check.
+        """
+        client = _FakeClient(
+            runs_sequence=[[_run(7, pr_number=1, status="completed", event="workflow_dispatch")]]
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 1, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert client.rerun_calls == []
 
 
 @pytest.mark.unit
@@ -303,6 +421,41 @@ class TestAbstainPaths:
         assert result["status"] == "skipped"
         assert result["reason"]
 
+    def test_listing_failure_mid_retry_loop_skips(self) -> None:
+        """Finding 9: the listing call can fail on a LATER retry attempt,
+        not just the first one -- must abstain cleanly there too.
+        """
+        client = _FakeClient(
+            runs_sequence=[[], GhApiError("HTTP 502 listing workflow runs")],
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(1.0, 2.0),
+            )
+
+        assert result["status"] == "skipped"
+        assert "502" in result["reason"]
+        assert client.list_calls == 2
+        assert client.rerun_calls == []
+
+    def test_outer_catch_all_never_propagates_unexpected_token_resolution_failure(self) -> None:
+        """Finding 10: cover the OUTER catch-all (wrapping the whole
+        function body), not just the inner per-step try/excepts. Force an
+        exception at a point with no dedicated try/except of its own
+        (resolve_github_token raising instead of returning None).
+        """
+        client = _FakeClient()
+        with patch(f"{_MOD}.resolve_github_token", side_effect=RuntimeError("keyring exploded")):
+            result = retrigger_review_gate("owner/repo", 1, client=client, sleep=lambda _: None)
+
+        assert result["status"] == "skipped"
+        assert "keyring exploded" in result["reason"]
+        assert client.head_sha_calls == 0
+
 
 @pytest.mark.unit
 class TestRetryRaceHandling:
@@ -342,12 +495,136 @@ class TestRetryRaceHandling:
 
 
 @pytest.mark.unit
+class TestOverallTimeBudget:
+    """Finding 2 (CE): worst-case latency was 6 calls x 15s + 7s of sleeps =
+    97s, blocking the MCP stdio response. An overall budget now bounds the
+    whole operation, checked BETWEEN steps (not mid-call), using an
+    injectable clock so this is deterministic with no real sleeping.
+    """
+
+    def test_default_budget_is_documented_and_bounded(self) -> None:
+        # 25s keeps worst case (budget-respecting steps + at most one
+        # in-flight per-call timeout) comfortably under typical stdio/tool
+        # call ceilings, while still allowing a head lookup + a few retry
+        # attempts + a rerun call to complete under normal conditions.
+        assert 15.0 <= DEFAULT_OVERALL_BUDGET_SECONDS <= 30.0
+
+    def test_abstains_when_budget_exhausted_after_head_sha_resolution(self) -> None:
+        client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
+        # First call establishes the deadline (now() + budget); the second
+        # call (checked right after head-SHA resolution) reports elapsed
+        # time already past the deadline.
+        clock = _FakeClock([0.0, 100.0])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock,
+                overall_budget=10.0,
+            )
+
+        assert result["status"] == "skipped"
+        assert "budget" in result["reason"].lower()
+        assert result["head_sha"] == "abc123headsha"
+        assert client.list_calls == 0
+        assert client.rerun_calls == []
+
+    def test_abstains_when_budget_exhausted_mid_retry_loop(self) -> None:
+        client = _FakeClient(runs_sequence=[[], [], []])
+        # deadline check, post-head-sha check (still ok), then attempt-loop
+        # checks: first attempt ok, second attempt reports exhausted.
+        clock = _FakeClock([0.0, 1.0, 1.0, 100.0])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock,
+                overall_budget=10.0,
+                retry_delays=(1.0, 2.0),
+            )
+
+        assert result["status"] == "skipped"
+        assert "budget" in result["reason"].lower()
+        assert client.list_calls == 1
+        assert client.rerun_calls == []
+
+    def test_abstains_when_budget_exhausted_before_rerun_call(self) -> None:
+        client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
+        # deadline, post-head-sha check ok, pre-listing check ok, then the
+        # pre-rerun check reports exhausted.
+        clock = _FakeClock([0.0, 1.0, 1.0, 100.0])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock,
+                overall_budget=10.0,
+            )
+
+        assert result["status"] == "skipped"
+        assert "budget" in result["reason"].lower()
+        assert result["run_id"] == 1
+        assert client.rerun_calls == []
+
+    def test_completes_normally_within_budget(self) -> None:
+        """A generous, never-exhausted clock must not perturb the happy path."""
+        client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
+        clock = _FakeClock([0.0, 0.1, 0.2, 0.3])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 1, client=client, sleep=lambda _: None, now=clock, overall_budget=25.0
+            )
+
+        assert result["status"] == "re-triggered"
+        assert result["run_id"] == 1
+
+
+@pytest.mark.unit
+class TestPageSizeBound:
+    """Finding 4 (CE + CRS): the run listing must be scoped to the stable
+    workflow FILE name via the workflow-scoped endpoint (fixing the
+    mutable-display-name fragility), and its page-size bound must be
+    explicit and tested at the boundary rather than an undocumented
+    truncation risk.
+    """
+
+    def test_default_client_requests_the_documented_max_page_size(self) -> None:
+        with (
+            patch(f"{_MOD}.resolve_github_token", return_value="fake-token"),
+            patch(f"{_MOD}.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = (
+                "HTTP/2 200 OK\n\n"
+                '{"head": {"sha": "abc123"}}'
+            )
+            mock_run.return_value.stderr = ""
+
+            retrigger_review_gate("owner/repo", 1, sleep=lambda _: None)
+
+        # Second call is the runs listing (first is the PR head-SHA lookup).
+        list_call_args = mock_run.call_args_list[1].args[0]
+        joined = " ".join(list_call_args)
+        assert f"repos/owner/repo/actions/workflows/{WORKFLOW_FILE}/runs" in joined
+        assert "per_page=100" in joined
+        assert "head_sha=abc123" in joined
+
+
+@pytest.mark.unit
 class TestDefaultClientIsGhCli:
     def test_default_client_used_when_none_injected(self) -> None:
         """Without an injected client, the module must fall back to a real
-        gh-CLI-backed client rather than silently no-op'ing. We verify this
-        by observing that it attempts a subprocess call (mocked) rather than
-        skipping straight through with zero client interaction.
+        gh-CLI-backed client rather than silently no-op'ing. Finding 7: this
+        must discriminate on the OBSERVED failure signal (HTTP 500), not
+        just on "some skip happened" -- a client that crashed locally
+        before issuing any request would also produce status == "skipped"
+        and previously passed this test.
         """
         with (
             patch(f"{_MOD}.resolve_github_token", return_value="fake-token"),
@@ -361,3 +638,46 @@ class TestDefaultClientIsGhCli:
 
         assert mock_run.called
         assert result["status"] == "skipped"
+        assert "500" in result["reason"]
+
+    def test_default_client_surfaces_subprocess_not_found(self) -> None:
+        """Finding 10: FileNotFoundError (gh CLI missing) is a distinct
+        `_GhCliClient` edge case from a timeout or a non-2xx response.
+        """
+        with (
+            patch(f"{_MOD}.resolve_github_token", return_value="fake-token"),
+            patch(f"{_MOD}.subprocess.run", side_effect=FileNotFoundError("gh")),
+        ):
+            result = retrigger_review_gate("owner/repo", 1, sleep=lambda _: None)
+
+        assert result["status"] == "skipped"
+        assert "could not resolve PR head SHA" in result["reason"]
+
+    def test_default_client_surfaces_subprocess_timeout(self) -> None:
+        import subprocess as sp
+
+        with (
+            patch(f"{_MOD}.resolve_github_token", return_value="fake-token"),
+            patch(
+                f"{_MOD}.subprocess.run",
+                side_effect=sp.TimeoutExpired(cmd="gh", timeout=8),
+            ),
+        ):
+            result = retrigger_review_gate("owner/repo", 1, sleep=lambda _: None)
+
+        assert result["status"] == "skipped"
+        assert "timed out" in result["reason"]
+
+    def test_default_client_nonzero_returncode_with_stderr_and_no_stdout(self) -> None:
+        with (
+            patch(f"{_MOD}.resolve_github_token", return_value="fake-token"),
+            patch(f"{_MOD}.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stdout = ""
+            mock_run.return_value.stderr = "authentication required"
+
+            result = retrigger_review_gate("owner/repo", 1, sleep=lambda _: None)
+
+        assert result["status"] == "skipped"
+        assert "authentication required" in result["reason"]
