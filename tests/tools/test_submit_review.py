@@ -4,7 +4,7 @@ Written against the ADR-0353 interface contract:
 - Input: repo, pr_number, role, verdict, assessment, model_annotation?, commit_sha?, dry_run?
 - Output: { status, comment_url, validation, dry_run }
 - 8 roles: CE, CIV, CRS, HO, IL, PE, SR, TMG
-- 3 verdicts: APPROVED, BLOCKED, CONDITIONAL
+- 4 verdicts: APPROVED, BLOCKED, CONDITIONAL, REJECTED
 - Supports dry_run validation without HTTP calls
 - Supports commit_sha pinning for audit trail
 
@@ -121,9 +121,17 @@ class TestInputValidation:
         )
         assert result["status"] == "ok"
 
-    @pytest.mark.parametrize("verdict", ["APPROVED", "BLOCKED", "CONDITIONAL"])
+    @pytest.mark.parametrize("verdict", ["APPROVED", "BLOCKED", "CONDITIONAL", "REJECTED"])
     def test_all_valid_verdicts_accepted(self, verdict: str):
-        """All 3 valid verdicts must be accepted."""
+        """All 4 valid verdicts must be accepted.
+
+        REJECTED regression (elevanaltd/elevana-studio PR #1694): the tool used
+        to reject REJECTED outright, forcing callers to pass verdict='BLOCKED'
+        while leaving their own 'CE REJECTED: ...' header in the assessment
+        text -- producing double-headered comments like
+        'CE BLOCKED: CE REJECTED: ...'. REJECTED must now be accepted as a
+        first-class, non-clearing verdict (see TestRejectedVerdict below).
+        """
         from hestai_context_mcp.tools.submit_review import submit_review
 
         result = submit_review(
@@ -429,6 +437,620 @@ class TestGateCompliance:
             dry_run=True,
         )
         assert result["validation"]["would_clear_gate"] is True
+
+
+# ---------------------------------------------------------------------------
+# REJECTED verdict tests (defect A: verdict vocabulary gap)
+# ---------------------------------------------------------------------------
+# Diagnosis correction: the original bug report described this as "REJECTED
+# silently rewritten to BLOCKED". That mechanism does NOT exist in this code
+# -- there is no rewrite anywhere. The actual mechanism is that
+# _validate_inputs() rejected the verdict='REJECTED' call outright (REJECTED
+# was absent from VALID_VERDICTS), so callers worked around the hard failure
+# by passing verdict='BLOCKED' while leaving their own "CE REJECTED: ..."
+# text at the head of the assessment -- producing the observed double-headed
+# "CE BLOCKED: CE REJECTED: ..." comments on elevana-studio PR #1694.
+@pytest.mark.unit
+class TestRejectedVerdict:
+    """REJECTED must be a first-class, non-gate-clearing verdict."""
+
+    def test_rejected_verdict_is_accepted_not_rewritten(self):
+        """A REJECTED verdict must be accepted verbatim, not rejected or rewritten.
+
+        Pins requirement: 'never silently rewrite a reviewer's verdict'. The
+        formatted comment must contain the literal token REJECTED -- not
+        BLOCKED, and not a duplicated/rewritten verdict.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="REJECTED",
+            assessment="Fundamental design flaw.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        comment = result["validation"]["formatted_comment"]
+        assert "CE REJECTED: Fundamental design flaw." in comment
+        assert "BLOCKED" not in comment
+
+    @pytest.mark.parametrize("role", ["CE", "CIV", "CRS", "PE", "SR", "TMG", "IL", "HO"])
+    def test_rejected_never_clears_gate(self, role: str):
+        """REJECTED must never clear the review gate, for any role.
+
+        Same non-clearing class as BLOCKED -- a REJECTED verdict is a valid
+        review comment but must not satisfy the gate's approval check.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role=role,
+            verdict="REJECTED",
+            assessment="Not acceptable.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is False
+
+    def test_rejected_comment_does_not_satisfy_approval_matcher(self):
+        """A REJECTED comment must not match any role's approval pattern.
+
+        Proves non-clearing with a test, not just an assertion on the tool's
+        own self-check: runs the formatted comment through the same matcher
+        the CI gate uses.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_ce_approval,
+        )
+
+        comment = format_review_comment(role="CE", verdict="REJECTED", assessment="No.")
+        assert has_ce_approval([comment]) is False
+
+    def test_invalid_verdict_error_lists_rejected_as_accepted(self):
+        """The invalid-verdict error message must name REJECTED as accepted."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="NOT_A_REAL_VERDICT",
+            assessment="Test assessment",
+        )
+        assert result["status"] == "error"
+        assert "REJECTED" in result["validation"]["error"]
+
+    def test_historical_double_headed_ce_blocked_rejected_comment_still_parses(self):
+        """Backwards compatibility: pre-fix 'CE BLOCKED: CE REJECTED: ...'
+        comments already posted on elevana-studio PR #1694 must remain
+        legible/parseable by the gate -- i.e. still recognized as a BLOCKED
+        (non-clearing) comment, not silently reinterpreted as an approval.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            has_ce_approval,
+            matches_approval_pattern,
+        )
+
+        historical_comment = "CE BLOCKED: CE REJECTED: fundamental design flaw in the retry logic"
+        assert matches_approval_pattern(historical_comment, "CE", "BLOCKED") is True
+        assert has_ce_approval([historical_comment]) is False
+
+
+# ---------------------------------------------------------------------------
+# Byte-exact header tests (requirement 6)
+# ---------------------------------------------------------------------------
+# "Worth pinning as a test, since this is a gate whose own tooling can't
+# currently emit a gate-readable verdict." -- pins the exact header shape for
+# the pass-through path (no pre-existing header in the assessment): no
+# parenthetical, no duplication.
+@pytest.mark.unit
+class TestByteExactHeader:
+    """The formatted comment must begin with an exact, unadorned header."""
+
+    def test_approved_header_is_byte_exact(self):
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(role="CE", verdict="APPROVED", assessment="Looks good.")
+        assert comment.startswith("CE APPROVED: Looks good.")
+        assert comment.split("\n", 1)[0] == "CE APPROVED: Looks good."
+
+    def test_rejected_header_is_byte_exact(self):
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        comment = format_review_comment(
+            role="CE", verdict="REJECTED", assessment="Fundamental design flaw."
+        )
+        assert comment.startswith("CE REJECTED: Fundamental design flaw.")
+        assert comment.split("\n", 1)[0] == "CE REJECTED: Fundamental design flaw."
+
+
+# ---------------------------------------------------------------------------
+# Header/verdict conflict validation (rework #2: structural fix)
+# ---------------------------------------------------------------------------
+# Rework #1 closed BLOCKED and REJECTED fail-opens with a prose-negation
+# denylist widening, but CONDITIONAL stayed open -- it isn't a negation word
+# and never will be, so no denylist entry could ever cover it. That coupling
+# (verdict vocabulary <-> denylist upkeep) is the actual defect. The
+# structural fix rejects the submit_review() call outright -- through the
+# standard validation error envelope, at _validate_inputs() -- whenever the
+# assessment's own header disagrees with the submitted verdict, for ANY
+# verdict. No formatted_comment, no gate-clearing artifact, is ever produced.
+@pytest.mark.unit
+class TestHeaderVerdictConflictValidation:
+    """submit_review() rejects (not silently resolves) a header/verdict conflict."""
+
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "REJECTED", "CONDITIONAL"])
+    def test_non_approving_verdict_with_approved_header_is_rejected(self, verdict: str):
+        """Table-driven contradiction case across ALL non-approving verdicts.
+
+        This is the RED case for CONDITIONAL: prior to the structural fix,
+        submit_review(role='CE', verdict='CONDITIONAL',
+        assessment="CE APPROVED: looks fine to me") returned status='ok'
+        with a formatted_comment that satisfied has_ce_approval() --
+        i.e. cleared the gate on a non-approving verdict. Must now be
+        REJECTED as a validation error instead, for all three non-approving
+        verdicts uniformly.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict=verdict,
+            assessment="CE APPROVED: looks fine to me",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+        error = result["validation"]["error"]
+        assert "CE APPROVED" in error
+        assert verdict in error
+        # No gate-clearing (or any) comment artifact is produced on the error path.
+        assert "formatted_comment" not in result["validation"]
+
+    def test_conditional_contradiction_produces_no_gate_clearing_body(self):
+        """Direct proof for the CONDITIONAL case the coordinator flagged:
+        no body is ever produced, so has_ce_approval() has nothing to
+        wrongly clear on.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="CONDITIONAL",
+            assessment="CE APPROVED: looks fine to me",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result.get("comment_url") is None
+
+    def test_approved_verdict_with_blocked_header_is_also_rejected(self):
+        """Disagreement in the harmless direction is rejected too -- the tool
+        never silently prepends over, or silently trusts, the caller's own
+        conflicting header text.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE BLOCKED: actually there are issues",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_agreement_case_is_accepted(self):
+        """Control: a header that AGREES with the verdict is unaffected."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE APPROVED: https://example.com/evidence",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is True
+
+    def test_no_header_case_is_accepted(self):
+        """Control: ordinary assessment text with no header is unaffected."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="BLOCKED",
+            assessment="There are real issues here.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_il_substituted_keyword_agreement_is_accepted(self):
+        """Control: IL/APPROVED against a body already agreeing via the
+        substituted SELF-REVIEWED keyword is unaffected.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="APPROVED",
+            assessment="IL SELF-REVIEWED: fixed typo",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_il_approved_header_conflicts_with_self_reviewed_substitution(self):
+        """IL/APPROVED resolves to SELF-REVIEWED; a body opening
+        'IL APPROVED:' disagrees with that resolved keyword and is rejected,
+        not silently treated as agreement.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="APPROVED",
+            assessment="IL APPROVED: fixed typo",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+
+# ---------------------------------------------------------------------------
+# Symmetric gate guard (rework #3): the invariant enforced on the FINISHED
+# artifact, not inferred from header shape
+# ---------------------------------------------------------------------------
+# Cubic (bot review) found four additional fail-open shapes on top of the
+# rework #2 structural (header-shape) fix, all against role=CE:
+#
+#   format_review_comment('CE','CONDITIONAL','CE GO: fine')
+#     -> 'CE CONDITIONAL: CE GO: fine'               has_ce_approval TRUE
+#   format_review_comment('CE','CONDITIONAL','CE APPROVES: fine')
+#     -> 'CE CONDITIONAL: CE APPROVES: fine'         has_ce_approval TRUE
+#   format_review_comment('CE','REJECTED','summary text\nCE APPROVED: fine')
+#     -> approval survives on line 2                 has_ce_approval TRUE
+#   format_review_comment('CE','REJECTED','ce approved: fine')
+#     -> 'CE REJECTED: ce approved: fine'            has_ce_approval TRUE
+#   format_review_comment('CE','REJECTED','CE REJECTED: the SR APPROVED this')
+#     -> 'CE REJECTED: the SR APPROVED this'         has_ce_approval TRUE
+#
+# Root cause: detect_header_verdict_conflict() only inspects the assessment's
+# LEADING header shape ("<role> <token>:" at position 0, token drawn from
+# _RECOGNIZED_HEADER_TOKENS which does NOT include GO or the APPROVE(D|S)?
+# conjugation family). It cannot see approving text using a token outside
+# that allowlist, on a later line, in a different case, or with no header
+# shape at all.
+#
+# Fix: submit_review() now runs the role's REAL gate matcher
+# (_matches_role_gate(), the same has_*_approval() functions the CI gate
+# uses) over the FINISHED formatted comment, symmetrically:
+#   verdict == APPROVED  and NOT matches -> error (existed already)
+#   verdict != APPROVED  and     matches -> error (this fix)
+# This is exhaustive by construction -- it consults the actual matcher, not
+# a model of it -- so no future token/case/position variant can evade it.
+@pytest.mark.unit
+class TestSymmetricGateGuard:
+    """A non-approving verdict must never emit a comment that satisfies the
+    role's gate matcher, regardless of shape, case, position, or token."""
+
+    # Evasion shapes, parametrized by role, using each role's OWN gate
+    # keyword family (APPROVED-family roles use APPROVED/APPROVES/GO; IL
+    # uses SELF-REVIEWED; HO uses REVIEWED -- has_ho_review only recognizes
+    # REVIEWED, no GO alias for HO).
+    _APPROVED_FAMILY_ROLES = ["CRS", "CE", "TMG", "CIV", "PE", "SR"]
+
+    @staticmethod
+    def _evasion_shapes_for(role: str) -> dict[str, str]:
+        """Map shape-name -> assessment text containing an evasive approval
+        for this role, using tokens/positions/case the header-shape check
+        (detect_header_verdict_conflict) does NOT cover."""
+        if role in TestSymmetricGateGuard._APPROVED_FAMILY_ROLES:
+            return {
+                "leading_go_header": f"{role} GO: fine",
+                "leading_approves_header": f"{role} APPROVES: fine",
+                "approval_on_later_line": f"Summary text.\n{role} APPROVED: fine",
+                "lowercase_header": f"{role.lower()} approved: fine",
+                "documented_table_format": f"| {role} | Gemini | **APPROVED** |",
+            }
+        if role == "IL":
+            return {
+                "approval_on_later_line": "Summary text.\nIL SELF-REVIEWED: fine",
+                "lowercase_header": "il self-reviewed: fine",
+            }
+        if role == "HO":
+            return {
+                "approval_on_later_line": "Summary text.\nHO REVIEWED: fine",
+                "lowercase_header": "ho reviewed: fine",
+            }
+        raise ValueError(f"no evasion shapes defined for role {role!r}")
+
+    # --- Matrix A: role=CE fixed, full cross of verdict x evasion shape ---
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "REJECTED", "CONDITIONAL"])
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "leading_go_header",
+            "leading_approves_header",
+            "approval_on_later_line",
+            "lowercase_header",
+            "documented_table_format",
+        ],
+    )
+    def test_ce_evasion_matrix_is_refused(self, verdict: str, shape: str):
+        """The invariant under test is 'never emits gate-clearing text for a
+        non-approving verdict', not 'always refuses'. For most cells the
+        symmetric guard enforces this by REFUSING the call (status=error).
+        For BLOCKED specifically combined with a shape where the evasive
+        token sits on the SAME LINE immediately after the canonical
+        "CE BLOCKED:" prefix (leading_go_header, leading_approves_header,
+        documented_table_format), the invariant already held BEFORE this
+        fix and without refusal: "BLOCKED" is itself a pre-existing
+        _NEGATION_HEDGE_RE denylist word, and it lands literally in the gap
+        between the role prefix and the evasive approval keyword on that
+        same line, so has_ce_approval() already correctly returns False --
+        verified directly:
+            has_ce_approval(['CE BLOCKED: CE GO: fine']) -> False
+            has_ce_approval(['CE BLOCKED: CE APPROVES: fine']) -> False
+            has_ce_approval(['CE BLOCKED: | CE | Gemini | **APPROVED** |']) -> False
+        Forcing an outright refusal for an input that is ALREADY safe would
+        be over-fitting the test to a blanket claim ("every cell is a
+        fail-open") that doesn't hold for those three specific cells, not
+        testing the actual invariant. REJECTED and CONDITIONAL are not
+        negation words, so the same same-line shapes DO leak for those two
+        verdicts without this fix, and must be refused -- asserted below via
+        the general invariant, which is what actually matters.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = self._evasion_shapes_for("CE")[shape]
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict=verdict,
+            assessment=assessment,
+            dry_run=True,
+        )
+        if result["status"] == "error":
+            assert result["error_type"] == "validation"
+            assert "formatted_comment" not in result["validation"]
+        else:
+            # Not refused -- acceptable ONLY if it is independently proven
+            # (via the real matcher the tool itself just ran) to never have
+            # been gate-clearing in the first place.
+            assert result["status"] == "ok"
+            assert result["validation"]["would_clear_gate"] is False, (
+                f"role=CE verdict={verdict} shape={shape} assessment={assessment!r} "
+                f"was neither refused NOR proven safe: {result}"
+            )
+
+    # --- Matrix B: role coverage, one representative shape per role ---
+    @pytest.mark.parametrize("role", ["CRS", "CE", "TMG", "CIV", "PE", "SR", "IL", "HO"])
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "REJECTED", "CONDITIONAL"])
+    def test_every_role_evasion_via_later_line_is_refused(self, role: str, verdict: str):
+        """Every role the gate checks has its OWN matcher (has_crs_approval,
+        has_ce_approval, ..., has_self_review, has_ho_review) -- a role-blind
+        test suite is how the next one of these gets through. Uses the
+        'approval on a later line' shape, which is representative and
+        applicable to every role's keyword family.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = self._evasion_shapes_for(role)["approval_on_later_line"]
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role=role,
+            verdict=verdict,
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error", (
+            f"role={role} verdict={verdict} assessment={assessment!r} " f"was NOT refused: {result}"
+        )
+        assert result["error_type"] == "validation"
+
+    def test_exact_reported_cubic_repro_ce_conditional_go(self):
+        """Byte-exact pin of the first cubic-reported repro."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="CONDITIONAL",
+            assessment="CE GO: fine",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        # Belt-and-braces: prove against the real matcher there is nothing
+        # to accidentally post that would clear the gate.
+        assert "formatted_comment" not in result["validation"]
+
+    def test_exact_reported_cubic_repro_ce_rejected_approved_second_line(self):
+        """Byte-exact pin of the third cubic-reported repro (later-line evasion)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="REJECTED",
+            assessment="summary text\nCE APPROVED: fine",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_exact_reported_cubic_repro_ce_rejected_lowercase(self):
+        """Byte-exact pin of the fourth cubic-reported repro (case evasion)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="REJECTED",
+            assessment="ce approved: fine",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_exact_reported_cubic_repro_ce_rejected_other_role_approved(self):
+        """Byte-exact pin of the fifth cubic-reported repro (own-verdict header,
+        but a DIFFERENT role's approval embedded in the trailing prose)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="REJECTED",
+            assessment="CE REJECTED: the SR APPROVED this",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# Legitimate APPROVED formats must remain unaffected (regression risk of the
+# symmetric guard above -- it must never turn a genuine approval into a
+# refusal)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestLegitimateApprovalFormatsUnaffectedBySymmetricGuard:
+    """The APPROVED direction, across every documented format, still clears."""
+
+    def test_plain_approved_clears(self):
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Looks good, all tests pass.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is True
+
+    def test_parenthetical_model_annotation_approved_clears(self):
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CRS",
+            verdict="APPROVED",
+            assessment="All tests pass.",
+            model_annotation="Gemini",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is True
+
+    def test_go_alias_read_side_still_accepted_by_matcher(self):
+        """GO remains a valid alias for APPROVED on the read side (this
+        change does not touch matches_approval_pattern / has_*_approval).
+        """
+        from hestai_context_mcp.tools.shared.review_formats import has_ce_approval
+
+        assert has_ce_approval(["CE GO: ship it"]) is True
+
+    def test_documented_table_format_read_side_still_accepted_by_matcher(self):
+        from hestai_context_mcp.tools.shared.review_formats import has_crs_approval
+
+        assert has_crs_approval(["| CRS | Gemini | **APPROVED** |"]) is True
+
+    def test_markdown_heading_format_read_side_still_accepted_by_matcher(self):
+        from hestai_context_mcp.tools.shared.review_formats import has_tmg_approval
+
+        assert has_tmg_approval(["## TMG APPROVED ✅"]) is True
+
+    @pytest.mark.parametrize("role", ["CRS", "CE", "TMG", "CIV", "PE", "SR"])
+    def test_every_approved_family_role_still_clears_plain_approval(self, role: str):
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role=role,
+            verdict="APPROVED",
+            assessment="Verified, no issues.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is True
+
+    def test_il_self_reviewed_still_clears(self):
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="APPROVED",
+            assessment="Trivial fix, self-reviewed.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is True
+
+    def test_ho_reviewed_still_clears(self):
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="HO",
+            verdict="APPROVED",
+            assessment="Delegated to IL, verified output.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert result["validation"]["would_clear_gate"] is True
+
+
+# ---------------------------------------------------------------------------
+# Denylist scope confirmation (rework #2 reverted a rework #1 widening of
+# _NEGATION_HEDGE_RE; rework #3 must NOT restore it -- pin the false-negative
+# it caused, closed, and must stay closed)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestNegationDenylistAtMainScope:
+    """_NEGATION_HEDGE_RE stays at its original (main) scope -- the symmetric
+    guard makes the REJECTED-specific widening from rework #1 unnecessary,
+    and that widening caused a real false-negative on a production gate.
+    """
+
+    def test_tmg_rejected_prose_does_not_block_a_later_genuine_approval(self):
+        """'reject' (not 'reject(?:ed|s)?') is main's scope. Widening it in
+        rework #1 caused this exact string to stop clearing -- a new
+        false-negative on a production gate, found and reverted in rework
+        #2. Must still clear on this HEAD.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import has_tmg_approval
+
+        text = "TMG rejected the first attempt; TMG APPROVED now"
+        assert has_tmg_approval([text]) is True
 
 
 # ---------------------------------------------------------------------------
