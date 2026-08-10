@@ -1,9 +1,9 @@
 ===DECISION_RECORD===
 META:
   TYPE::DECISION_RECORD
-  VERSION::"1.0"
+  VERSION::"1.1"
   TOKEN::HO-SUBMIT-REVIEW-GATE-RETRIGGER-20260810
-  STATUS::PROPOSED
+  STATUS::RATIFIED
   TIER::STRATEGIC
   COMPRESSION_TIER::CONSERVATIVE
   LOSS_PROFILE::"[preserve:ruleset_trigger_limitation∧head_sha_attachment∧abstain_failure_policy∧rerun_only_scope_guard∧re_review_trigger∧inherited_not_asserted_binding∧caller_token_dependency,drop:narrative_of_the_three_reworks_that_surfaced_it]"
