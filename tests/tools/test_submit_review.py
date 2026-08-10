@@ -11,9 +11,78 @@ Written against the ADR-0353 interface contract:
 TDD RED phase: These tests are written before the implementation.
 """
 
+import io
+import tokenize
 from unittest.mock import patch
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Source-level gating-check helpers (rework #3, PR #148 finding 1)
+#
+# Used by TestReviewGateRetriggerGating to prove submit_review's Step 6
+# retrigger gate reads the computed `would_clear` value rather than a fresh
+# `verdict == "APPROVED"` literal comparison -- a distinction no
+# BEHAVIOURAL test can observe (Step 3's own fail-closed guard makes the
+# two provably equivalent by the time Step 6 runs), so this has to be a
+# source-level pin. Module-level (not nested in the test class) so a
+# dedicated test can prove the checker itself discriminates, independent
+# of any one call site.
+# ---------------------------------------------------------------------------
+def _strip_comments(source: str) -> str:
+    """Blank out comment token text in place, preserving every other
+    character, line, and column exactly -- so character offsets computed
+    against the ORIGINAL source remain valid indices into the result.
+    """
+    lines = source.splitlines(keepends=True)
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    for tok_type, _tok_string, start, end, _line in tokens:
+        if tok_type == tokenize.COMMENT:
+            start_row, start_col = start
+            end_row, end_col = end
+            assert start_row == end_row, "comment tokens are always single-line"
+            line = lines[start_row - 1]
+            lines[start_row - 1] = line[:start_col] + (" " * (end_col - start_col)) + line[end_col:]
+    return "".join(lines)
+
+
+def _step6_gating_window(source: str) -> str:
+    """Extract the Step 6 (retrigger-gating) region, with comments blanked
+    out, from ``source`` (expected to be ``submit_review``'s own source,
+    real or mutated).
+
+    Anchored on stable, comment-based landmarks that BRACKET the gating
+    logic without being PART OF the condition under test: mutating the
+    condition itself (e.g. reverting it to a literal verdict comparison)
+    cannot also break the anchor search, unlike the prior (broken) version
+    of this check, which anchored on text that was itself inside the
+    window it was trying to validate.
+    """
+    start_marker = "# Step 6:"
+    end_marker = '"retrigger": retrigger,'
+    start_idx = source.index(start_marker)
+    end_idx = source.index(end_marker, start_idx)
+    stripped = _strip_comments(source)
+    return stripped[start_idx:end_idx]
+
+
+def _gating_reads_would_clear_not_literal_verdict(source: str) -> bool:
+    """True iff the Step 6 gating window branches on ``would_clear`` AND
+    contains no fresh ``verdict ==`` comparison or bare ``"APPROVED"``
+    literal.
+
+    The negative check is the load-bearing one: it is what actually
+    catches a regression back to a literal verdict comparison. The
+    positive check (the name ``would_clear`` appears) is necessary but, on
+    its own, weak -- it is trivially satisfied by code that never uses the
+    value at all, which is exactly how the prior version of this guard
+    failed to discriminate.
+    """
+    window = _step6_gating_window(source)
+    reads_would_clear = "would_clear" in window
+    has_fresh_literal_comparison = "verdict ==" in window or '"APPROVED"' in window
+    return reads_would_clear and not has_fresh_literal_comparison
 
 
 # ---------------------------------------------------------------------------
@@ -2492,26 +2561,64 @@ class TestReviewGateRetriggerGating:
         assert result["status"] == "ok"
         assert result["retrigger"]["status"] == "re-triggered"
 
-    def test_gating_reads_would_clear_variable_not_a_fresh_literal_comparison(self):
-        """Source-level pin for the trap named in the finding: ``verdict ==
-        "APPROVED"`` and the computed ``would_clear`` are provably
-        equivalent at the point retrigger is gated (Step 3 already rejects
-        any APPROVED verdict whose formatted comment would not clear the
-        gate, before Step 6 is ever reached) -- so no behavioural test can
-        distinguish "reads would_clear" from "re-derives verdict ==
-        'APPROVED'" today. Enforce the single-source-of-truth requirement
-        directly: the gating site must reference the ``would_clear`` name,
-        not construct its own verdict comparison.
+    def test_gating_reads_would_clear_not_a_fresh_literal_verdict_comparison(self):
+        """Source-level pin for the trap named in the finding (rework #3
+        fix, PR #148 finding 1): ``verdict == "APPROVED"`` and the computed
+        ``would_clear`` are provably equivalent at the point retrigger is
+        gated (Step 3 already rejects any APPROVED verdict whose formatted
+        comment would not clear the gate, before Step 6 is ever reached) --
+        so no BEHAVIOURAL test can distinguish "reads would_clear" from
+        "re-derives verdict == 'APPROVED'" today; the coordinator tried and
+        confirmed this independently. A source-level guard is the only
+        option, but the FIRST version of this guard (rework #2) was itself
+        broken: it sliced from the ``would_clear = ...`` ASSIGNMENT (which
+        trivially contains the substring "would_clear") to the first
+        substring match of "_retrigger_review_gate(" -- which resolved to
+        a COMMENT mentioning that name, several lines before the real call
+        site, so the window never actually covered the gating condition.
+        That version would have passed even if the code reverted to a
+        literal comparison.
+
+        This version fixes both defects: it anchors on stable,
+        comment-based landmarks that bracket the REAL gating region without
+        being part of the condition itself (so mutating the condition can't
+        also break the anchor search), strips comment text before
+        searching (so a comment mentioning either name can't satisfy or
+        pollute the check), and asserts the LOAD-BEARING negative --
+        no fresh ``verdict ==`` / bare ``"APPROVED"`` literal appears in
+        the window -- rather than only the weak positive that the name
+        ``would_clear`` appears somewhere in it.
         """
         import inspect
 
         from hestai_context_mcp.tools import submit_review as submit_review_module
 
         source = inspect.getsource(submit_review_module.submit_review)
-        # Step 6 (retrigger gating) must appear after Step 3 assigns
-        # would_clear, and must consult that same binding.
-        step3_idx = source.index("would_clear = _check_would_clear_gate(")
-        step6_idx = source.index("_retrigger_review_gate(")
-        assert step6_idx > step3_idx, "retrigger gating must come after would_clear is computed"
-        gating_window = source[step3_idx:step6_idx]
-        assert "would_clear" in gating_window
+        assert _gating_reads_would_clear_not_literal_verdict(source) is True
+
+    def test_gating_check_discriminates_against_a_reverted_literal_comparison(self):
+        """Proof the check above is not assurance theatre (rework #3
+        finding 1): apply the SAME assertion logic to the real source
+        mutated to reintroduce exactly the literal ``verdict == "APPROVED"``
+        comparison the AGR rejected, and confirm that source FAILS the
+        check. A checker that cannot fail on this mutant cannot catch the
+        regression it exists to catch -- which is precisely what was wrong
+        with the prior version of this test.
+        """
+        import inspect
+
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        real_source = inspect.getsource(submit_review_module.submit_review)
+        assert "if not would_clear:" in real_source
+
+        mutant_source = real_source.replace(
+            "if not would_clear:", 'if not (verdict == "APPROVED"):'
+        )
+        assert mutant_source != real_source
+        # Sanity: the mutation must land INSIDE the window the checker
+        # inspects, or this proof is vacuous for a different reason.
+        assert "# Step 6:" in mutant_source
+        assert '"retrigger": retrigger,' in mutant_source
+
+        assert _gating_reads_would_clear_not_literal_verdict(mutant_source) is False

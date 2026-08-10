@@ -40,10 +40,13 @@ Selection (rework #1, PR #148 cubic triage):
     module abstains rather than guessing.
   * GitHub's rerun endpoint only accepts COMPLETED runs (a non-completed
     run 422s). Selection picks the most recent COMPLETED run among those
-    matching the PR; if the newest matching run is still queued/in_progress,
-    this module abstains with a reason naming that state instead of
-    attempting -- and failing -- the rerun call. A run already in flight
-    will evaluate on its own.
+    matching the PR, SKIPPING OVER any newer matching run that is still
+    queued/in_progress in favour of an older completed one -- a run
+    already in flight will evaluate on its own, so there is no need to
+    wait for or abstain on it while a usable completed run exists. Only
+    when NONE of the matching runs are completed does this module abstain,
+    with a reason naming the newest matching run's non-completed state,
+    instead of attempting -- and failing -- a rerun call.
 
 Selection & robustness (rework #2, all-four-reviewers CONDITIONAL triage):
   * Finding 3: a run with unverifiable ``pull_requests`` metadata no longer
