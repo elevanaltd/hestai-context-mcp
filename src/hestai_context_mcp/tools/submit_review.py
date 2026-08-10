@@ -10,9 +10,13 @@ Fail-closed: validates format before posting.
 """
 
 import json
+import re
 import subprocess
 from typing import Any
 
+from hestai_context_mcp.tools.shared.gh_http import (
+    parse_gh_api_response as _parse_http_response,
+)
 from hestai_context_mcp.tools.shared.github_auth import (
     AUTH_ERROR_MESSAGE as _AUTH_ERROR_MESSAGE,
 )
@@ -45,6 +49,51 @@ from hestai_context_mcp.tools.shared.review_gate_retrigger import (
 # the CIV-flagged duplication that previously copied the same logic into
 # governance.linker.
 
+# Strict ``owner/name`` repo validation (rework #2, PR #148 finding 1 -- CE,
+# echoed by CIV). Before this, ``repo`` was checked only for containing a
+# slash, then interpolated directly into ``gh api`` path segments across
+# FOUR call sites: the original ``_post_comment`` here, plus the three
+# Actions-API sites added by ``review_gate_retrigger`` (PR head-SHA lookup,
+# run listing, rerun). ``_validate_inputs`` is the single gate all of them
+# sit behind (retrigger only ever runs after a successful post, which
+# requires passing this check first), so enforcing strictly here protects
+# every interpolation site without duplicating the check at each one.
+#
+# GitHub's own allowed character sets:
+#   - owner (user/org login): alphanumeric or hyphen, may not start or end
+#     with a hyphen, max 39 characters.
+#   - repository name: alphanumeric, hyphen, underscore, or period, up to
+#     100 characters. ``.`` and ``..`` are explicitly rejected below even
+#     though the character-class regex would otherwise accept them --
+#     GitHub itself disallows a repo literally named ``.``/``..``, and
+#     rejecting them here is a cheap extra guard against path-segment
+#     confusion in the interpolated API paths.
+_OWNER_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
+_REPO_NAME_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,100}")
+
+
+def _is_valid_repo(repo: str) -> bool:
+    """Strict ``owner/name`` check: exactly one slash, each side matching
+    GitHub's own allowed character set, no traversal, no query string, no
+    whitespace.
+
+    Uses ``fullmatch`` (not ``match`` with a ``$`` anchor) deliberately:
+    Python's ``$`` also matches immediately before a single trailing
+    newline, which would let ``"owner/repo\\n"`` slip through -- exactly
+    the kind of hostile-input gap this check exists to close.
+    """
+    parts = repo.split("/")
+    if len(parts) != 2:
+        return False
+    owner, name = parts
+    if not _OWNER_PATTERN.fullmatch(owner):
+        return False
+    if not _REPO_NAME_PATTERN.fullmatch(name):
+        return False
+    if name in (".", ".."):
+        return False
+    return True
+
 
 def _validate_inputs(
     repo: str,
@@ -66,8 +115,13 @@ def _validate_inputs(
     if pr_number < 1:
         return f"Invalid PR number: {pr_number}. Must be a positive integer"
 
-    if not repo or "/" not in repo:
-        return f"Invalid repo format: '{repo}'. Must be in owner/name format"
+    if not repo or not _is_valid_repo(repo):
+        return (
+            f"Invalid repo format: '{repo}'. Must be exactly 'owner/name' -- "
+            "a single slash, each side matching GitHub's allowed characters "
+            "(letters, digits, and hyphens for owner; also '.' and '_' for "
+            "name), no path traversal, no query string, no whitespace"
+        )
 
     # Header/verdict agreement (structural fix, verdict-vocabulary-agnostic):
     # if the assessment's own first line already opens with a recognised
@@ -157,50 +211,6 @@ def _get_tier_requirements(role: str) -> str:
         "HO": "TIER_1_SELF: HO REVIEWED comment required (supervisory review)",
     }
     return requirements.get(role, "Unknown tier requirement")
-
-
-def _parse_http_response(raw_output: str) -> tuple[int, dict[str, str], str]:
-    """Parse HTTP response from gh api --include output.
-
-    Args:
-        raw_output: Raw HTTP response from gh api --include.
-
-    Returns:
-        Tuple of (status_code, headers_dict, body_string).
-        Header keys are lowercased for consistent access.
-    """
-    if "\r\n\r\n" in raw_output:
-        parts = raw_output.split("\r\n\r\n", 1)
-        line_separator = "\r\n"
-    elif "\n\n" in raw_output:
-        parts = raw_output.split("\n\n", 1)
-        line_separator = "\n"
-    else:
-        return 0, {}, raw_output
-
-    if len(parts) != 2:
-        return 0, {}, raw_output
-
-    header_section, body = parts
-    lines = header_section.split(line_separator)
-
-    status_line = lines[0]
-    status_parts = status_line.split()
-    if len(status_parts) < 2:
-        return 0, {}, raw_output
-
-    try:
-        status_code = int(status_parts[1])
-    except (ValueError, IndexError):
-        return 0, {}, raw_output
-
-    headers: dict[str, str] = {}
-    for line in lines[1:]:
-        if ": " in line:
-            key, value = line.split(": ", 1)
-            headers[key.lower()] = value
-
-    return status_code, headers, body
 
 
 def _map_status_to_error_type(status: int, headers: dict[str, str]) -> str:

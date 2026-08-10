@@ -148,12 +148,14 @@ class TestInputValidation:
 
     def test_valid_repo_with_dots_and_hyphens_accepted(self):
         """Legitimate repo names use '.', '_', '-' -- the strict validator
-        must not over-reject real GitHub repo names.
+        must not over-reject real GitHub repo names. (Owner names cannot
+        contain underscores per GitHub's own rules, so only the repo-name
+        side exercises '_' here.)
         """
         from hestai_context_mcp.tools.submit_review import submit_review
 
         result = submit_review(
-            repo="my-org_1/my.repo-name_2",
+            repo="my-org-1/my.repo-name_2",
             pr_number=1,
             role="CE",
             verdict="APPROVED",
