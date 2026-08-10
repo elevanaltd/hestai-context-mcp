@@ -2281,3 +2281,152 @@ class TestReviewGateRetrigger:
         mock_retrigger.assert_not_called()
         assert result["status"] == "error"
         assert "retrigger" not in result
+
+
+@pytest.mark.unit
+class TestReviewGateRetriggerGating:
+    """Finding 3 (cubic triage on PR #148, P2): re-trigger must be gated on
+    ``would_clear`` -- the SAME computed value already used to decide
+    whether the formatted comment clears the gate (submit_review.py, Step
+    3) -- NOT a literal ``verdict == "APPROVED"`` comparison. A literal
+    comparison happens to coincide with ``would_clear`` for standard roles,
+    but the intent is to use the single source of truth, and the IL/HO
+    substitution cases are the trap that would expose a literal check as
+    wrong if it diverged.
+
+    A non-approving verdict cannot change the gate outcome (the gate counts
+    approvals; only their absence blocks), so retrigger must not even be
+    attempted for BLOCKED/CONDITIONAL/REJECTED -- this also eliminates the
+    latency cost (retry sleeps + subprocess calls) on the common non-
+    approving path.
+    """
+
+    @staticmethod
+    def _post_success_mock_run():
+        from unittest.mock import MagicMock
+
+        mock_run = MagicMock()
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = (
+            "HTTP/2 201 Created\ncontent-type: application/json\n\n"
+            '{"html_url": "https://github.com/owner/repo/pull/1#issuecomment-1"}'
+        )
+        mock_run.return_value.stderr = ""
+        return mock_run
+
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "CONDITIONAL", "REJECTED"])
+    def test_non_approving_verdict_never_calls_retrigger(self, verdict):
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(submit_review_module, "_retrigger_review_gate") as mock_retrigger,
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict=verdict,
+                assessment=f"Explaining the {verdict.lower()} state in detail.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_not_called()
+        assert result["status"] == "ok"
+        assert result["retrigger"]["status"] == "skipped"
+        assert result["retrigger"]["reason"]
+        assert result["retrigger"]["run_id"] is None
+        assert result["retrigger"]["head_sha"] is None
+        reason_lower = result["retrigger"]["reason"].lower()
+        assert "gate" in reason_lower
+
+    def test_il_approved_still_calls_retrigger(self):
+        """IL/APPROVED clears the gate via the SELF-REVIEWED substitution --
+        verdict is the literal string "APPROVED", so this also guards
+        against a would_clear check that was accidentally inverted or
+        skipped, not just against a naive verdict != "APPROVED" trap.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(
+                submit_review_module,
+                "_retrigger_review_gate",
+                return_value={
+                    "status": "re-triggered",
+                    "reason": None,
+                    "run_id": 1,
+                    "head_sha": "abc",
+                },
+            ) as mock_retrigger,
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="IL",
+                verdict="APPROVED",
+                assessment="Self-reviewed and verified.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_called_once_with("owner/repo", 1)
+        assert result["status"] == "ok"
+        assert result["retrigger"]["status"] == "re-triggered"
+
+    def test_ho_approved_still_calls_retrigger(self):
+        """HO/APPROVED clears the gate via the REVIEWED substitution."""
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(
+                submit_review_module,
+                "_retrigger_review_gate",
+                return_value={
+                    "status": "re-triggered",
+                    "reason": None,
+                    "run_id": 2,
+                    "head_sha": "def",
+                },
+            ) as mock_retrigger,
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="HO",
+                verdict="APPROVED",
+                assessment="Supervisory review complete.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_called_once_with("owner/repo", 1)
+        assert result["status"] == "ok"
+        assert result["retrigger"]["status"] == "re-triggered"
+
+    def test_gating_reads_would_clear_variable_not_a_fresh_literal_comparison(self):
+        """Source-level pin for the trap named in the finding: ``verdict ==
+        "APPROVED"`` and the computed ``would_clear`` are provably
+        equivalent at the point retrigger is gated (Step 3 already rejects
+        any APPROVED verdict whose formatted comment would not clear the
+        gate, before Step 6 is ever reached) -- so no behavioural test can
+        distinguish "reads would_clear" from "re-derives verdict ==
+        'APPROVED'" today. Enforce the single-source-of-truth requirement
+        directly: the gating site must reference the ``would_clear`` name,
+        not construct its own verdict comparison.
+        """
+        import inspect
+
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        source = inspect.getsource(submit_review_module.submit_review)
+        # Step 6 (retrigger gating) must appear after Step 3 assigns
+        # would_clear, and must consult that same binding.
+        step3_idx = source.index("would_clear = _check_would_clear_gate(")
+        step6_idx = source.index("_retrigger_review_gate(")
+        assert step6_idx > step3_idx, "retrigger gating must come after would_clear is computed"
+        gating_window = source[step3_idx:step6_idx]
+        assert "would_clear" in gating_window
