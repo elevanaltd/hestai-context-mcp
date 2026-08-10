@@ -142,14 +142,13 @@ class _GhCliClient:
             raise GhApiError(f"malformed PR response: {exc}") from exc
         if not sha or not isinstance(sha, str):
             raise GhApiError("PR response missing head.sha")
-        return sha
+        return str(sha)
 
     def find_latest_pull_request_run(
         self, repo: str, workflow_name: str, head_sha: str
     ) -> int | None:
         path = (
-            f"repos/{repo}/actions/runs"
-            f"?head_sha={head_sha}&event={_REQUIRED_EVENT}&per_page=20"
+            f"repos/{repo}/actions/runs" f"?head_sha={head_sha}&event={_REQUIRED_EVENT}&per_page=20"
         )
         status, body = self._api(path)
         if not (200 <= status < 300):
@@ -168,16 +167,12 @@ class _GhCliClient:
         return None
 
     def rerun_workflow_run(self, repo: str, run_id: int) -> None:
-        status, _body = self._api(
-            f"repos/{repo}/actions/runs/{run_id}/rerun", method="POST"
-        )
+        status, _body = self._api(f"repos/{repo}/actions/runs/{run_id}/rerun", method="POST")
         if not (200 <= status < 300):
             raise GhApiError(f"HTTP {status} re-running workflow run {run_id}")
 
 
-def _skip(
-    reason: str, *, head_sha: str | None = None, run_id: int | None = None
-) -> dict[str, Any]:
+def _skip(reason: str, *, head_sha: str | None = None, run_id: int | None = None) -> dict[str, Any]:
     return {"status": "skipped", "reason": reason, "run_id": run_id, "head_sha": head_sha}
 
 

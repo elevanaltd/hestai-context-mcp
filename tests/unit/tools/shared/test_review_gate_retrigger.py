@@ -49,7 +49,9 @@ class _FakeClient:
             raise self._head_sha
         return self._head_sha
 
-    def find_latest_pull_request_run(self, repo: str, workflow_name: str, head_sha: str) -> int | None:
+    def find_latest_pull_request_run(
+        self, repo: str, workflow_name: str, head_sha: str
+    ) -> int | None:
         idx = self.find_run_calls
         self.find_run_calls += 1
         if idx >= len(self._find_run_results):
