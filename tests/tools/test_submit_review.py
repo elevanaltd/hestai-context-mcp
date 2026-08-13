@@ -11,9 +11,78 @@ Written against the ADR-0353 interface contract:
 TDD RED phase: These tests are written before the implementation.
 """
 
+import io
+import tokenize
 from unittest.mock import patch
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Source-level gating-check helpers (rework #3, PR #148 finding 1)
+#
+# Used by TestReviewGateRetriggerGating to prove submit_review's Step 6
+# retrigger gate reads the computed `would_clear` value rather than a fresh
+# `verdict == "APPROVED"` literal comparison -- a distinction no
+# BEHAVIOURAL test can observe (Step 3's own fail-closed guard makes the
+# two provably equivalent by the time Step 6 runs), so this has to be a
+# source-level pin. Module-level (not nested in the test class) so a
+# dedicated test can prove the checker itself discriminates, independent
+# of any one call site.
+# ---------------------------------------------------------------------------
+def _strip_comments(source: str) -> str:
+    """Blank out comment token text in place, preserving every other
+    character, line, and column exactly -- so character offsets computed
+    against the ORIGINAL source remain valid indices into the result.
+    """
+    lines = source.splitlines(keepends=True)
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    for tok_type, _tok_string, start, end, _line in tokens:
+        if tok_type == tokenize.COMMENT:
+            start_row, start_col = start
+            end_row, end_col = end
+            assert start_row == end_row, "comment tokens are always single-line"
+            line = lines[start_row - 1]
+            lines[start_row - 1] = line[:start_col] + (" " * (end_col - start_col)) + line[end_col:]
+    return "".join(lines)
+
+
+def _step6_gating_window(source: str) -> str:
+    """Extract the Step 6 (retrigger-gating) region, with comments blanked
+    out, from ``source`` (expected to be ``submit_review``'s own source,
+    real or mutated).
+
+    Anchored on stable, comment-based landmarks that BRACKET the gating
+    logic without being PART OF the condition under test: mutating the
+    condition itself (e.g. reverting it to a literal verdict comparison)
+    cannot also break the anchor search, unlike the prior (broken) version
+    of this check, which anchored on text that was itself inside the
+    window it was trying to validate.
+    """
+    start_marker = "# Step 6:"
+    end_marker = '"retrigger": retrigger,'
+    start_idx = source.index(start_marker)
+    end_idx = source.index(end_marker, start_idx)
+    stripped = _strip_comments(source)
+    return stripped[start_idx:end_idx]
+
+
+def _gating_reads_would_clear_not_literal_verdict(source: str) -> bool:
+    """True iff the Step 6 gating window branches on ``would_clear`` AND
+    contains no fresh ``verdict ==`` comparison or bare ``"APPROVED"``
+    literal.
+
+    The negative check is the load-bearing one: it is what actually
+    catches a regression back to a literal verdict comparison. The
+    positive check (the name ``would_clear`` appears) is necessary but, on
+    its own, weak -- it is trivially satisfied by code that never uses the
+    value at all, which is exactly how the prior version of this guard
+    failed to discriminate.
+    """
+    window = _step6_gating_window(source)
+    reads_would_clear = "would_clear" in window
+    has_fresh_literal_comparison = "verdict ==" in window or '"APPROVED"' in window
+    return reads_would_clear and not has_fresh_literal_comparison
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +147,91 @@ class TestInputValidation:
         )
         assert result["status"] == "error"
         assert "assessment" in result["validation"]["error"].lower()
+
+    @pytest.mark.parametrize(
+        "hostile_repo",
+        [
+            "../../etc/passwd/x",
+            "o/r?foo=bar",
+            "o/r/../../../user",
+            "owner/repo name",
+            "owner/repo\n",
+            "owner/../repo",
+            "/etc/passwd",
+            "owner/",
+            "/repo",
+            "owner//repo",
+            "owner/repo/",
+            "-owner/repo",
+            "owner/..",
+            "owner/.",
+        ],
+    )
+    def test_hostile_repo_strings_rejected(self, hostile_repo):
+        """Rework #2 (PR #148 finding 1, CE + CIV): ``repo`` was checked only
+        for containing a slash, then interpolated straight into ``gh api``
+        paths across four call sites (the original ``_post_comment`` plus
+        the three new Actions-API sites this PR added). Must now enforce
+        strict ``owner/name``: exactly one slash, each side matching
+        GitHub's own allowed character set, no traversal, no query string,
+        no whitespace.
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        # Belt-and-braces: patch subprocess.run so that even if the
+        # validator has a gap for a given hostile string, this test cannot
+        # make a real `gh` call -- test isolation must not depend on the
+        # validator being correct.
+        with patch("subprocess.run") as mock_run:
+            result = submit_review(
+                repo=hostile_repo,
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Test assessment",
+            )
+
+        assert result["status"] == "error"
+        assert "repo" in result["validation"]["error"].lower()
+        mock_run.assert_not_called()
+
+    def test_hostile_repo_never_reaches_subprocess(self):
+        """Not just "validation returned an error" -- the hostile value must
+        never be handed to ``gh`` at all, for any of the four interpolation
+        sites (post-comment, PR head-SHA lookup, run listing, rerun).
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch("subprocess.run") as mock_run:
+            result = submit_review(
+                repo="../../etc/passwd/x",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Test assessment",
+                dry_run=False,
+            )
+
+        assert result["status"] == "error"
+        mock_run.assert_not_called()
+
+    def test_valid_repo_with_dots_and_hyphens_accepted(self):
+        """Legitimate repo names use '.', '_', '-' -- the strict validator
+        must not over-reject real GitHub repo names. (Owner names cannot
+        contain underscores per GitHub's own rules, so only the repo-name
+        side exercises '_' here.)
+        """
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="my-org-1/my.repo-name_2",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Verified.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
 
     def test_negative_pr_number_rejected(self):
         """PR number must be a positive integer."""
@@ -2091,3 +2245,380 @@ class TestTokenResolution:
                 dry_run=False,
             )
         assert result["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Review Gate re-trigger wiring (issue #145)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestReviewGateRetrigger:
+    """After a verdict comment posts successfully, submit_review must invoke
+    the best-effort Review Gate re-trigger and surface its outcome under a
+    new, additive ``retrigger`` key -- WITHOUT disturbing the existing
+    ``status``/``comment_url``/``commit_sha``/``error_type`` contract.
+
+    The re-trigger call itself is exercised in isolation in
+    tests/unit/tools/shared/test_review_gate_retrigger.py; here we only
+    verify the WIRING: is it called, with what, when, and does its outcome
+    (including failure) ever leak into or break the post's own result.
+    """
+
+    @staticmethod
+    def _post_success_mock_run():
+        from unittest.mock import MagicMock
+
+        mock_run = MagicMock()
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = (
+            "HTTP/2 201 Created\ncontent-type: application/json\n\n"
+            '{"html_url": "https://github.com/owner/repo/pull/1#issuecomment-1"}'
+        )
+        mock_run.return_value.stderr = ""
+        return mock_run
+
+    def test_successful_post_calls_retrigger_with_repo_and_pr_number(self):
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(
+                submit_review_module,
+                "_retrigger_review_gate",
+                return_value={
+                    "status": "re-triggered",
+                    "reason": None,
+                    "run_id": 42,
+                    "head_sha": "abc123",
+                },
+            ) as mock_retrigger,
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=17,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_called_once_with("owner/repo", 17)
+        assert result["status"] == "ok"
+        assert result["retrigger"] == {
+            "status": "re-triggered",
+            "reason": None,
+            "run_id": 42,
+            "head_sha": "abc123",
+        }
+
+    def test_retrigger_outcome_included_when_skipped(self):
+        """A "skipped" retrigger outcome is surfaced verbatim -- the post
+        itself must still read as a success.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        skipped = {
+            "status": "skipped",
+            "reason": "no GitHub token available for the Actions API",
+            "run_id": None,
+            "head_sha": None,
+        }
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(submit_review_module, "_retrigger_review_gate", return_value=skipped),
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        assert result["status"] == "ok"
+        assert result["retrigger"] == skipped
+
+    def test_retrigger_exception_never_fails_the_post(self):
+        """Defense in depth: even if retrigger_review_gate somehow raises
+        (it is designed not to), submit_review must swallow it -- the post
+        already succeeded and must be reported as such.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(
+                submit_review_module,
+                "_retrigger_review_gate",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        assert result["status"] == "ok"
+        assert result["comment_url"]
+        assert result["retrigger"]["status"] == "skipped"
+        assert "boom" in result["retrigger"]["reason"]
+
+    def test_dry_run_never_calls_retrigger_and_omits_key(self):
+        """dry_run=True must NOT re-trigger anything -- it never even posts."""
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with patch.object(submit_review_module, "_retrigger_review_gate") as mock_retrigger:
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Verified.",
+                dry_run=True,
+            )
+
+        mock_retrigger.assert_not_called()
+        assert result["status"] == "ok"
+        assert result["dry_run"] is True
+        assert "retrigger" not in result
+
+    def test_post_failure_never_calls_retrigger_and_omits_key(self):
+        """If the comment post itself fails, there is no new verdict for the
+        gate to observe -- retrigger must not be attempted.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(submit_review_module, "_retrigger_review_gate") as mock_retrigger,
+        ):
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stdout = ""
+            mock_run.return_value.stderr = "Not Found"
+
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="LGTM.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_not_called()
+        assert result["status"] == "error"
+        assert "retrigger" not in result
+
+    def test_validation_failure_never_calls_retrigger(self):
+        """Input-validation errors happen before any GitHub interaction --
+        retrigger must not be attempted.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with patch.object(submit_review_module, "_retrigger_review_gate") as mock_retrigger:
+            result = submit_review_module.submit_review(
+                repo="bad-repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Test.",
+            )
+
+        mock_retrigger.assert_not_called()
+        assert result["status"] == "error"
+        assert "retrigger" not in result
+
+
+@pytest.mark.unit
+class TestReviewGateRetriggerGating:
+    """Finding 3 (cubic triage on PR #148, P2): re-trigger must be gated on
+    ``would_clear`` -- the SAME computed value already used to decide
+    whether the formatted comment clears the gate (submit_review.py, Step
+    3) -- NOT a literal ``verdict == "APPROVED"`` comparison. A literal
+    comparison happens to coincide with ``would_clear`` for standard roles,
+    but the intent is to use the single source of truth, and the IL/HO
+    substitution cases are the trap that would expose a literal check as
+    wrong if it diverged.
+
+    A non-approving verdict cannot change the gate outcome (the gate counts
+    approvals; only their absence blocks), so retrigger must not even be
+    attempted for BLOCKED/CONDITIONAL/REJECTED -- this also eliminates the
+    latency cost (retry sleeps + subprocess calls) on the common non-
+    approving path.
+    """
+
+    @staticmethod
+    def _post_success_mock_run():
+        from unittest.mock import MagicMock
+
+        mock_run = MagicMock()
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = (
+            "HTTP/2 201 Created\ncontent-type: application/json\n\n"
+            '{"html_url": "https://github.com/owner/repo/pull/1#issuecomment-1"}'
+        )
+        mock_run.return_value.stderr = ""
+        return mock_run
+
+    @pytest.mark.parametrize("verdict", ["BLOCKED", "CONDITIONAL", "REJECTED"])
+    def test_non_approving_verdict_never_calls_retrigger(self, verdict):
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(submit_review_module, "_retrigger_review_gate") as mock_retrigger,
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict=verdict,
+                assessment=f"Explaining the {verdict.lower()} state in detail.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_not_called()
+        assert result["status"] == "ok"
+        assert result["retrigger"]["status"] == "skipped"
+        assert result["retrigger"]["reason"]
+        assert result["retrigger"]["run_id"] is None
+        assert result["retrigger"]["head_sha"] is None
+        reason_lower = result["retrigger"]["reason"].lower()
+        assert "gate" in reason_lower
+
+    def test_il_approved_still_calls_retrigger(self):
+        """IL/APPROVED clears the gate via the SELF-REVIEWED substitution --
+        verdict is the literal string "APPROVED", so this also guards
+        against a would_clear check that was accidentally inverted or
+        skipped, not just against a naive verdict != "APPROVED" trap.
+        """
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(
+                submit_review_module,
+                "_retrigger_review_gate",
+                return_value={
+                    "status": "re-triggered",
+                    "reason": None,
+                    "run_id": 1,
+                    "head_sha": "abc",
+                },
+            ) as mock_retrigger,
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="IL",
+                verdict="APPROVED",
+                assessment="Self-reviewed and verified.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_called_once_with("owner/repo", 1)
+        assert result["status"] == "ok"
+        assert result["retrigger"]["status"] == "re-triggered"
+
+    def test_ho_approved_still_calls_retrigger(self):
+        """HO/APPROVED clears the gate via the REVIEWED substitution."""
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        with (
+            patch("subprocess.run", self._post_success_mock_run()),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "fake-token"}),
+            patch.object(
+                submit_review_module,
+                "_retrigger_review_gate",
+                return_value={
+                    "status": "re-triggered",
+                    "reason": None,
+                    "run_id": 2,
+                    "head_sha": "def",
+                },
+            ) as mock_retrigger,
+        ):
+            result = submit_review_module.submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="HO",
+                verdict="APPROVED",
+                assessment="Supervisory review complete.",
+                dry_run=False,
+            )
+
+        mock_retrigger.assert_called_once_with("owner/repo", 1)
+        assert result["status"] == "ok"
+        assert result["retrigger"]["status"] == "re-triggered"
+
+    def test_gating_reads_would_clear_not_a_fresh_literal_verdict_comparison(self):
+        """Source-level pin for the trap named in the finding (rework #3
+        fix, PR #148 finding 1): ``verdict == "APPROVED"`` and the computed
+        ``would_clear`` are provably equivalent at the point retrigger is
+        gated (Step 3 already rejects any APPROVED verdict whose formatted
+        comment would not clear the gate, before Step 6 is ever reached) --
+        so no BEHAVIOURAL test can distinguish "reads would_clear" from
+        "re-derives verdict == 'APPROVED'" today; the coordinator tried and
+        confirmed this independently. A source-level guard is the only
+        option, but the FIRST version of this guard (rework #2) was itself
+        broken: it sliced from the ``would_clear = ...`` ASSIGNMENT (which
+        trivially contains the substring "would_clear") to the first
+        substring match of "_retrigger_review_gate(" -- which resolved to
+        a COMMENT mentioning that name, several lines before the real call
+        site, so the window never actually covered the gating condition.
+        That version would have passed even if the code reverted to a
+        literal comparison.
+
+        This version fixes both defects: it anchors on stable,
+        comment-based landmarks that bracket the REAL gating region without
+        being part of the condition itself (so mutating the condition can't
+        also break the anchor search), strips comment text before
+        searching (so a comment mentioning either name can't satisfy or
+        pollute the check), and asserts the LOAD-BEARING negative --
+        no fresh ``verdict ==`` / bare ``"APPROVED"`` literal appears in
+        the window -- rather than only the weak positive that the name
+        ``would_clear`` appears somewhere in it.
+        """
+        import inspect
+
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        source = inspect.getsource(submit_review_module.submit_review)
+        assert _gating_reads_would_clear_not_literal_verdict(source) is True
+
+    def test_gating_check_discriminates_against_a_reverted_literal_comparison(self):
+        """Proof the check above is not assurance theatre (rework #3
+        finding 1): apply the SAME assertion logic to the real source
+        mutated to reintroduce exactly the literal ``verdict == "APPROVED"``
+        comparison the AGR rejected, and confirm that source FAILS the
+        check. A checker that cannot fail on this mutant cannot catch the
+        regression it exists to catch -- which is precisely what was wrong
+        with the prior version of this test.
+        """
+        import inspect
+
+        from hestai_context_mcp.tools import submit_review as submit_review_module
+
+        real_source = inspect.getsource(submit_review_module.submit_review)
+        assert "if not would_clear:" in real_source
+
+        mutant_source = real_source.replace(
+            "if not would_clear:", 'if not (verdict == "APPROVED"):'
+        )
+        assert mutant_source != real_source
+        # Sanity: the mutation must land INSIDE the window the checker
+        # inspects, or this proof is vacuous for a different reason.
+        assert "# Step 6:" in mutant_source
+        assert '"retrigger": retrigger,' in mutant_source
+
+        assert _gating_reads_would_clear_not_literal_verdict(mutant_source) is False
