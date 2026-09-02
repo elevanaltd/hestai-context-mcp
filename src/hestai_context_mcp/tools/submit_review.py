@@ -544,10 +544,29 @@ def submit_review(
     # reference_that_does_not_clear_foreign_gate_still_posts).
     #
     # Implemented by running every OTHER role's REAL has_*_approval()
-    # matcher (via the same _matches_role_gate() the CI gate itself uses)
-    # over the finished comment -- not a model of the matcher, the matcher
-    # itself -- so this closes all nine shapes above, and any future one,
-    # in a single rule with no shape-specific maintenance.
+    # TEXT matcher (via the same _matches_role_gate() the CI gate itself
+    # uses) over the finished comment -- not a model of the matcher, the
+    # matcher itself -- so this closes all nine TEXT-SHAPE bypasses above,
+    # and any future text-shape variant, in a single rule with no
+    # shape-specific maintenance.
+    #
+    # SCOPE CORRECTION (round 5, PROSE item -- caught by the coordinator,
+    # the prior wording here was the fifth false claim in this PR): this
+    # closes only the TEXT-matcher half of what CI actually checks per
+    # role. validate_review.py's real per-role dispatch is
+    # `_meta_has(role, "APPROVED") or <text matcher>(...)`
+    # (validate_review.py's _role_checkers, e.g. the SR entry) -- a
+    # SEPARATE, machine-readable metadata channel (the hidden
+    # `<!-- review: {...} -->` JSON comment format_review_comment() emits)
+    # that this loop does NOT inspect at all. Reproduced: a comment whose
+    # VISIBLE text never claims any approval but whose metadata comment
+    # names a different role/verdict (e.g. an embedded
+    # `<!-- review: {"role":"X","verdict":"SELF-REVIEWED"} -->` alongside
+    # unrelated BLOCKED prose) still posts "ok" here, and CI's `_meta_has`
+    # half would read it as a satisfied approval for role X. This
+    # metadata-channel gap is PRE-EXISTING (not introduced by this PR) and
+    # is explicitly NOT fixed here -- it is tracked as a separate issue,
+    # filed by the coordinator. Do not chase it in this PR.
     for other_role in VALID_ROLES:
         if other_role == role:
             continue
