@@ -3024,3 +3024,30 @@ class TestSubmitReviewCiParity:
             "_matches_role_gate() disagree on whether the following "
             "probe(s) satisfy this role:\n" + "\n".join(mismatches)
         )
+
+
+@pytest.mark.security
+class TestSecurityBasenamesIsFrozen:
+    """BLOCKING (small), cubic P2 flagged on the very first review
+    (f989e6f) and unaddressed for four rework rounds: _SECURITY_BASENAMES
+    was declared as a plain mutable ``set`` literal, while both the PR
+    body and prior commit messages in this repo's history called it
+    "frozen". This test pins the actual immutability the name/prose
+    claims."""
+
+    def test_security_basenames_is_a_frozenset(self):
+        """_SECURITY_BASENAMES must be an actual frozenset, not a mutable
+        set that merely happens not to be mutated at runtime."""
+        assert isinstance(validate_review._SECURITY_BASENAMES, frozenset), (
+            "_SECURITY_BASENAMES must be a frozenset -- it is currently a "
+            f"mutable {type(validate_review._SECURITY_BASENAMES).__name__}, "
+            "contradicting the 'frozen' claim made about it in the PR body "
+            "and prior commit messages."
+        )
+
+    def test_security_basenames_rejects_mutation(self):
+        """A frozenset has no .add() -- attempting to mutate it must raise
+        AttributeError, proving immutability is structural, not just
+        conventional."""
+        with pytest.raises(AttributeError):
+            validate_review._SECURITY_BASENAMES.add(".new-basename")  # type: ignore[attr-defined]
