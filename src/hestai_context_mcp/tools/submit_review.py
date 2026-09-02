@@ -210,6 +210,34 @@ def _check_would_clear_gate(comment: str, role: str, verdict: str) -> bool:
     return _matches_role_gate(comment, role)
 
 
+def _find_matching_line(comment: str, role: str) -> str:
+    """Return the first line of ``comment`` that itself satisfies
+    ``role``'s real gate matcher, for use in an "Offending text:" error
+    fragment.
+
+    elevana-studio#1851, final rework round, HIGH non-blocking (found
+    independently by CE and CIV). Both rejection paths that quote
+    "Offending text:" previously always quoted
+    ``comment.split(chr(10), 1)[0]`` -- unconditionally line 1 -- even when
+    the actual match was on a later line, naming an innocent line (often
+    the submitted role's own header) instead of the real offense. Since
+    matches_approval_pattern() (review_formats.py) already evaluates each
+    line independently (no cross-line lookaheads or state), testing each
+    line of ``comment`` against ``_matches_role_gate()`` in isolation
+    reproduces the exact same per-line matching the real check used to
+    decide the comment matches at all -- so the first line that matches
+    standalone IS the line responsible.
+
+    Falls back to line 1 if (unexpectedly) no single line matches in
+    isolation, so a caller that already confirmed a match on the full
+    text always gets a usable, non-empty quote.
+    """
+    for line in comment.split("\n"):
+        if _matches_role_gate(line, role):
+            return line
+    return comment.split("\n", 1)[0]
+
+
 def _get_tier_requirements(role: str) -> str:
     """Get human-readable tier requirement description for a role."""
     requirements = {
@@ -491,7 +519,7 @@ def submit_review(
                         f"Format validation failed: assessment clears the "
                         f"{other_role} approval pattern in addition to (or "
                         f"instead of) the submitted role '{role}'. Offending "
-                        f"text: {formatted_comment.split(chr(10), 1)[0]!r}. "
+                        f"text: {_find_matching_line(formatted_comment, other_role)!r}. "
                         "A review comment must never clear a role's gate "
                         "other than the one it is submitted under -- reword "
                         f"the assessment so it does not read as an approval "
@@ -527,7 +555,7 @@ def submit_review(
                     f"Format validation failed: '{verdict}' comment for role "
                     f"'{role}' matches the {role} approval pattern and would "
                     f"incorrectly clear the gate. Offending text: "
-                    f"{formatted_comment.split(chr(10), 1)[0]!r}. Reword the "
+                    f"{_find_matching_line(formatted_comment, role)!r}. Reword the "
                     f"assessment so it does not read as an approval for the "
                     f"{role} role."
                 ),
