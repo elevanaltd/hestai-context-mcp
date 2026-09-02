@@ -37,6 +37,9 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_sr_approval,
     has_tmg_approval,
 )
+from hestai_context_mcp.tools.shared.review_formats import (
+    _match_existing_header_token as _match_existing_header_token,
+)
 from hestai_context_mcp.tools.shared.review_gate_retrigger import (
     retrigger_review_gate as _retrigger_review_gate,
 )
@@ -93,6 +96,46 @@ def _is_valid_repo(repo: str) -> bool:
     return name not in (".", "..")
 
 
+def _detect_cross_role_header(assessment: str, role: str) -> tuple[str, str] | None:
+    """Scan position 0 of ``assessment`` for a "<OTHER_ROLE> <token>:" header
+    naming a DIFFERENT role than the one being submitted under.
+
+    elevana-studio#1851 (PARTIAL -- cross-labelled-body shape only, NOT
+    provenance validation). A body opening "CIV APPROVED:" submitted with
+    role="CE" would otherwise post as "CE APPROVED: CIV APPROVED: ..." with
+    no signal that the body itself names a different role. This is a
+    payload-SHAPE check only: it inspects what the caller wrote, not who
+    actually dispatched the call, and it cannot establish that -- per
+    technical-architect deep-tier ruling, PR #1840's mislabelled verdict was
+    lexically self-consistent as CE (the submitted role) at every layer, so
+    this check would NOT have caught it. Establishing an actual dispatched-
+    reviewer identity requires a Workbench-issued dispatch attestation, out
+    of this repo's scope per North Star §4 ("agent identity or governance
+    (Vault owns)").
+
+    Reuses review_formats._match_existing_header_token(), the same helper
+    detect_header_verdict_conflict() is built on, so the position-0-only
+    and recognised-token-only scoping is identical and does not drift.
+    Position-zero only, by design: reviewers legitimately quote each other
+    in the body of an assessment (e.g. "TMG APPROVED the test methodology
+    in a separate thread" on a later line), and that must NOT trigger
+    rejection.
+
+    Returns (other_role, token) for the first OTHER role (iteration order
+    over VALID_ROLES) whose header the first line matches, or None when no
+    other role's header is present -- including when there is no header at
+    all (unknown provenance proceeds with no block and no flag; see
+    submit_review() docstring).
+    """
+    for candidate_role in VALID_ROLES:
+        if candidate_role == role:
+            continue
+        token = _match_existing_header_token(assessment, candidate_role)
+        if token is not None:
+            return candidate_role, token
+    return None
+
+
 def _validate_inputs(
     repo: str,
     pr_number: int,
@@ -119,6 +162,24 @@ def _validate_inputs(
             "a single slash, each side matching GitHub's allowed characters "
             "(letters, digits, and hyphens for owner; also '.' and '_' for "
             "name), no path traversal, no query string, no whitespace"
+        )
+
+    # Cross-role leading-header rejection (elevana-studio#1851, PARTIAL --
+    # see _detect_cross_role_header() docstring for the exact scope: this
+    # closes the cross-labelled-body SHAPE only, not provenance validation).
+    # Positive mismatch hard-rejects unconditionally -- a contradictory role
+    # token is defect evidence the payload produces about itself, so this
+    # does NOT inherit any abstain/best-effort posture. Unknown provenance
+    # (no header at all) proceeds with no block and no flag by design; see
+    # submit_review() docstring for why no `role_provenance` field exists.
+    cross_role_header = _detect_cross_role_header(assessment, role)
+    if cross_role_header is not None:
+        other_role, other_token = cross_role_header
+        return (
+            f"Assessment opens with a '{other_role} {other_token}:' header, "
+            f"but the submitted role is '{role}'. The leading header must "
+            "name the role actually submitting this review -- edit the "
+            "assessment text or correct the role."
         )
 
     # Header/verdict agreement (structural fix, verdict-vocabulary-agnostic):
