@@ -869,6 +869,128 @@ class TestHeaderVerdictConflictValidation:
 
 
 # ---------------------------------------------------------------------------
+# Cross-role header rejection (elevana-studio#1851, PARTIAL). NOT provenance
+# validation: this closes only the cross-labelled-body shape, where the
+# assessment's own leading header names a DIFFERENT role than the one it is
+# submitted under (e.g. role="CE", body opening "CIV APPROVED:"). It has NO
+# ability to catch a body that self-labels with the MATCHING (wrong) role --
+# per technical-architect deep-tier ruling, PR #1840's mislabelled verdict
+# was lexically self-consistent as CE at every layer, so this check would
+# NOT have caught it. Establishing an actual dispatched-reviewer identity
+# requires a Workbench-issued dispatch attestation, out of this repo's scope
+# per North Star §4 ("agent identity or governance (Vault owns)").
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestCrossRoleHeaderRejection:
+    """submit_review() rejects an assessment whose leading header names a
+    role OTHER than the one it is submitted under."""
+
+    def test_cross_role_leading_header_is_rejected(self):
+        """role='CE' with a body opening 'CIV APPROVED:' must be rejected,
+        not silently posted as 'CE APPROVED: CIV APPROVED: ...'."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="CIV APPROVED: architecture validates...",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+        assert "CIV" in result["validation"]["error"]
+        assert result["comment_url"] is None
+
+    def test_unknown_provenance_does_not_block(self):
+        """An assessment with NO role header at all proceeds with no block
+        and no flag -- deliberately no `role_provenance` field, since it
+        would be emitted on ~100% of calls and read as coverage nobody can
+        act on."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Architecture validates cleanly, no issues found.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert "role_provenance" not in result["validation"]
+        # Verified against the real return shape, not asserted on faith:
+        # format_review_comment() PREPENDS the role's own "CE APPROVED: "
+        # header when the assessment has none, so the FINISHED comment
+        # always carries a matching header and would_clear_gate is True
+        # here, exactly as the architect expected.
+        assert result["validation"]["would_clear_gate"] is True
+
+    @pytest.mark.parametrize(
+        "role",
+        ["CRS", "CE", "SR", "IL", "HO", "TMG", "CIV", "PE"],
+    )
+    def test_matching_role_header_still_posts_regression(self, role: str):
+        """Regression sweep: a header that AGREES with the submitted role
+        must still post normally for every VALID_ROLES member."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            resolve_verdict_keyword,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        keyword = resolve_verdict_keyword(role, "APPROVED")
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role=role,
+            verdict="APPROVED",
+            assessment=f"{role} {keyword}: evidence checks out",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_cross_role_header_rejection_precedes_posting(self):
+        """The rejection must happen in validation, before _post_comment is
+        ever called."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch(
+            "hestai_context_mcp.tools.submit_review._post_comment"
+        ) as mock_post:
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="CIV APPROVED: architecture validates...",
+                dry_run=False,
+            )
+            assert result["status"] == "error"
+            mock_post.assert_not_called()
+
+    def test_cross_role_scan_is_position_zero_only(self):
+        """Position-zero only, by design: reviewers legitimately quote each
+        other in the BODY of an assessment. A later line mentioning another
+        role's approval must NOT trigger rejection -- this is the guard
+        against a fail-closed change that would be worse than the bug."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=(
+                "CE APPROVED: implementation is sound.\n"
+                "TMG APPROVED the test methodology in a separate thread."
+            ),
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
 # Symmetric gate guard (rework #3): the invariant enforced on the FINISHED
 # artifact, not inferred from header shape
 # ---------------------------------------------------------------------------
