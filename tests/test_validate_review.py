@@ -2849,8 +2849,7 @@ class TestSecurityLoadBearingExtensionlessDotfiles:
     def test_pgtap_quarantine_classifies_security(self):
         """supabase/tests/.pgtap-quarantine must classify as SECURITY."""
         assert (
-            validate_review._classify_file_facet("supabase/tests/.pgtap-quarantine")
-            == "SECURITY"
+            validate_review._classify_file_facet("supabase/tests/.pgtap-quarantine") == "SECURITY"
         )
 
     def test_drift_exceptions_classifies_security(self):
