@@ -231,11 +231,27 @@ def _find_matching_line(comment: str, role: str) -> str:
     Falls back to line 1 if (unexpectedly) no single line matches in
     isolation, so a caller that already confirmed a match on the full
     text always gets a usable, non-empty quote.
+
+    Uses str.splitlines() (elevana-studio#1851, third rework round, HIGH
+    -- issue #154 overlap, splitlines() half fixed here) rather than
+    ``comment.split("\n")`` for BOTH the scan and the fallback.
+    ``split("\n")`` only recognises a literal LF, so a CR (U+000D) or
+    Unicode line separator (U+2028/U+2029) between an innocent line and
+    the real offense was not treated as a line break -- the scan then
+    tested (and, on match, quoted) a multi-logical-line blob spanning
+    both, disagreeing with matches_approval_pattern() (review_formats.py),
+    which already uses splitlines() internally and therefore sees the
+    true per-line boundaries. splitlines() recognises \r, \r\n, \n, and
+    the Unicode separators, so the scan now agrees with the real matcher
+    on what a "line" is. (The sorted(VALID_ROLES) determinism half of
+    issue #154 is intentionally left there -- unrelated to this string-
+    splitting defect.)
     """
-    for line in comment.split("\n"):
+    for line in comment.splitlines():
         if _matches_role_gate(line, role):
             return line
-    return comment.split("\n", 1)[0]
+    lines = comment.splitlines()
+    return lines[0] if lines else comment
 
 
 def _get_tier_requirements(role: str) -> str:
