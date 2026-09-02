@@ -216,10 +216,12 @@ _SECURITY_PATTERNS = [
 # extensionless file, so these are matched by exact basename instead.
 # MIP: two basenames, no configurable per-consumer-repo path list — add a
 # third only when a third real consumer exists.
-_SECURITY_BASENAMES = {
-    ".pgtap-quarantine",
-    ".drift-exceptions",
-}
+_SECURITY_BASENAMES: frozenset[str] = frozenset(
+    {
+        ".pgtap-quarantine",
+        ".drift-exceptions",
+    }
+)
 
 # OCTAVE types that classify as EXECUTABLE_SPEC
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
