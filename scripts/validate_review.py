@@ -223,6 +223,35 @@ _SECURITY_BASENAMES: frozenset[str] = frozenset(
     }
 )
 
+# Casefolded once at module load (round 5, BLOCKING -- codex/CIV catch):
+# the basename comparison must be case-INSENSITIVE. Matters more on
+# macOS, where the filesystem is case-insensitive, so the SAME on-disk
+# file can reach this classifier under a different casing than the set
+# above literally contains (e.g. supabase/tests/.pgTap-quarantine is the
+# SAME file as .pgtap-quarantine on a case-insensitive filesystem, but was
+# previously an exact-case string-membership miss -> silent ROUTINE_CODE
+# fall-through). Precomputed once here rather than casefolding the set on
+# every _classify_file_facet() call.
+_SECURITY_BASENAMES_CASEFOLDED: frozenset[str] = frozenset(
+    name.casefold() for name in _SECURITY_BASENAMES
+)
+
+# Vendored-path guard (round 5, BLOCKING -- gemini/CRS catch). Moving the
+# basename check to the FIRST position (round 3, correct and required to
+# close the ^tests/.*$ shadowing hole) made it also fire on VENDORED
+# copies of these exact basenames -- a third-party dependency tree
+# checked into node_modules/ or vendor/ can legitimately contain a
+# same-named file with zero bearing on THIS repo's security posture. A
+# spurious TIER_3_CRITICAL/four-role demand on every such vendored path in
+# every consumer repo is exactly the gate noise this thread has warned
+# pushes operators toward bypassing the gate. MIP: two entries, no
+# configurable list -- same posture as _SECURITY_BASENAMES itself. This
+# guard narrows WHEN the FIRST-position check fires; it does not move
+# where the check sits (that ordering, ahead of ^tests/.*$, remains
+# load-bearing and mutation-tested from round 3).
+_VENDOR_LEADING_PREFIX = "vendor/"
+_VENDOR_PATH_MARKER = "node_modules/"
+
 # OCTAVE types that classify as EXECUTABLE_SPEC
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
@@ -269,7 +298,8 @@ def _classify_file_facet(path: str) -> str | None:
     # this check first, ahead of ALL other branches, is what actually
     # guarantees it cannot be shadowed -- not a claim about what the later
     # branches happen to match.
-    if path.rsplit("/", 1)[-1] in _SECURITY_BASENAMES:
+    is_vendored = path.startswith(_VENDOR_LEADING_PREFIX) or _VENDOR_PATH_MARKER in path
+    if not is_vendored and path.rsplit("/", 1)[-1].casefold() in _SECURITY_BASENAMES_CASEFOLDED:
         return "SECURITY"
 
     # Bundled hub skill/pattern files (.md but NOT exempt — governance artifacts)
