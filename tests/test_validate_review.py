@@ -3051,3 +3051,86 @@ class TestSecurityBasenamesIsFrozen:
         conventional."""
         with pytest.raises(AttributeError):
             validate_review._SECURITY_BASENAMES.add(".new-basename")  # type: ignore[attr-defined]
+
+
+@pytest.mark.security
+class TestSecurityBasenameCaseInsensitive:
+    """BLOCKING (round 5, cold non-Claude reviewer catch -- CIV via codex).
+    The basename check used an exact-case membership test, so a
+    differently-cased copy of a security-load-bearing basename bypassed
+    classification entirely. This matters more on macOS, where the
+    filesystem is case-insensitive: the SAME on-disk file can reach the
+    classifier under a different casing than the set literally contains
+    (e.g. a case-preserving-but-insensitive checkout, or an editor/tool
+    that normalises casing on write). Both sides of the comparison must be
+    casefolded."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "supabase/tests/.pgTap-quarantine",
+            "supabase/tests/.PGTAP-QUARANTINE",
+            "supabase/tests/.PgTap-Quarantine",
+        ],
+    )
+    def test_pgtap_quarantine_case_variants_still_classify_security(self, path: str):
+        assert validate_review._classify_file_facet(path) == "SECURITY"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "supabase/migrations/.Drift-Exceptions",
+            "supabase/migrations/.DRIFT-EXCEPTIONS",
+        ],
+    )
+    def test_drift_exceptions_case_variants_still_classify_security(self, path: str):
+        assert validate_review._classify_file_facet(path) == "SECURITY"
+
+
+@pytest.mark.security
+class TestSecurityBasenameSkipsVendoredPaths:
+    """BLOCKING (round 5, cold non-Claude reviewer catch -- CRS via
+    gemini). Moving the basename check to the FIRST position (correct, and
+    required to close the tests/-prefix shadowing hole from round 3) made
+    it fire on VENDORED copies of these basenames too -- a third-party
+    dependency tree checked into node_modules/ or vendor/ can legitimately
+    contain a file with one of these exact names with zero bearing on THIS
+    repo's security posture. A spurious TIER_3_CRITICAL/four-role demand
+    on every such vendored path in every consumer repo is exactly the kind
+    of gate noise that pushes operators toward bypassing the gate
+    altogether -- the failure mode this whole thread exists to prevent.
+
+    Fix, minimally, MIP-consistent with the basenames themselves: skip the
+    basename check for `node_modules/` anywhere in the path, or a leading
+    `vendor/` -- two entries, no configurable list. The check's FIRST
+    position ahead of the ^tests/ exemption is unchanged and remains
+    load-bearing (round 3 mutation-tested); this only narrows WHEN the
+    first-position check fires, not WHERE it sits."""
+
+    def test_node_modules_anywhere_in_path_is_not_forced_security(self):
+        assert (
+            validate_review._classify_file_facet("node_modules/x/.pgtap-quarantine")
+            == "ROUTINE_CODE"
+        )
+
+    def test_nested_vendor_node_modules_is_not_forced_security(self):
+        assert (
+            validate_review._classify_file_facet(
+                "vendor/node_modules/example/.drift-exceptions"
+            )
+            == "ROUTINE_CODE"
+        )
+
+    def test_leading_vendor_prefix_is_not_forced_security(self):
+        assert (
+            validate_review._classify_file_facet("vendor/some-dep/.pgtap-quarantine")
+            == "ROUTINE_CODE"
+        )
+
+    def test_non_vendored_quarantine_still_classifies_security_regression(self):
+        """Regression control: the vendor guard must not swallow the
+        legitimate, non-vendored case this whole fix exists for."""
+        assert (
+            validate_review._classify_file_facet("supabase/tests/.pgtap-quarantine")
+            == "SECURITY"
+        )
