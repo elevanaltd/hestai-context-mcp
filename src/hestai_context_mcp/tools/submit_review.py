@@ -34,7 +34,6 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_gr_approval,
     has_ho_review,
     has_pe_approval,
-    has_self_review,
     has_sr_approval,
     has_tmg_approval,
 )
@@ -143,6 +142,34 @@ def _validate_inputs(
     return None
 
 
+# IL-specific self-review matcher (elevana-studio#1851, round 5, BLOCKING
+# -- caught by cold non-Claude primary reviewers gemini/CRS and
+# codex/CIV). review_formats.has_self_review() is DELIBERATELY
+# role-agnostic (matches ANY word/name followed by "SELF-REVIEWED:"),
+# because CI's own TIER_1_SELF fallback branch correctly accepts a
+# self-review from anyone, not just a literal "IL" token -- that matcher
+# and that behaviour must NOT change. But _matches_role_gate()'s IL branch
+# previously called has_self_review() directly, as if it were
+# IL-SPECIFIC, so the Step 2a/2a-bis foreign-gate loops rejected ANY
+# assessment merely quoting someone else's legitimate self-review line
+# (e.g. "Shaun SELF-REVIEWED: all tests pass." posted under a different
+# role) as if it "cleared IL's gate" -- a false rejection of a legitimate
+# review, with nothing in the text naming IL at all. This regex mirrors
+# review_formats._SELF_REVIEW_RE's structure exactly, but pins the leading
+# token to the literal "IL" instead of accepting \w[\w-]* (any word),
+# so it is used ONLY for the foreign-gate-corruption purpose inside
+# _matches_role_gate() -- has_self_review() itself is untouched and still
+# used wherever role-agnostic self-review detection is actually correct.
+_IL_LITERAL_SELF_REVIEW_RE = re.compile(
+    r"(?:^|(?<=\|))\s*"  # Line-start or after pipe (consistent with approval matcher)
+    r"IL\b"  # Literal role token ONLY -- not any word/name
+    r"(?:\s*\([^)]*\))?"  # Optional parenthetical (e.g., (Claude))
+    r"[\s:—–\-]*"  # Separators (whitespace, colon, dashes)
+    r"SELF-REVIEWED\b",  # Keyword with word boundary
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
 def _matches_role_gate(comment: str, role: str) -> bool:
     """Run the role's REAL gate matcher over ``comment``, independent of verdict.
 
@@ -189,7 +216,7 @@ def _matches_role_gate(comment: str, role: str) -> bool:
     elif role == "SR":
         return has_sr_approval([comment]) or has_gr_approval([comment])
     elif role == "IL":
-        return has_self_review([comment])
+        return bool(_IL_LITERAL_SELF_REVIEW_RE.search(comment))
     elif role == "HO":
         return has_ho_review([comment])
 
