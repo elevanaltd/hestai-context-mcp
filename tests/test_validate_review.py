@@ -3115,9 +3115,7 @@ class TestSecurityBasenameSkipsVendoredPaths:
 
     def test_nested_vendor_node_modules_is_not_forced_security(self):
         assert (
-            validate_review._classify_file_facet(
-                "vendor/node_modules/example/.drift-exceptions"
-            )
+            validate_review._classify_file_facet("vendor/node_modules/example/.drift-exceptions")
             == "ROUTINE_CODE"
         )
 
@@ -3131,6 +3129,5 @@ class TestSecurityBasenameSkipsVendoredPaths:
         """Regression control: the vendor guard must not swallow the
         legitimate, non-vendored case this whole fix exists for."""
         assert (
-            validate_review._classify_file_facet("supabase/tests/.pgtap-quarantine")
-            == "SECURITY"
+            validate_review._classify_file_facet("supabase/tests/.pgtap-quarantine") == "SECURITY"
         )
