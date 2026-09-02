@@ -3028,3 +3028,106 @@ class TestReviewGateRetriggerGating:
         assert '"retrigger": retrigger,' in mutant_source
 
         assert _gating_reads_would_clear_not_literal_verdict(mutant_source) is False
+
+
+# ---------------------------------------------------------------------------
+# GR legacy-alias foreign-gate gap (elevana-studio#1851, second rework round,
+# BLOCKING -- CIV reproduction, coordinator-confirmed).
+#
+# _matches_role_gate() (submit_review.py) maps SR to has_sr_approval() ONLY.
+# scripts/validate_review.py's CI-side per-role checker maps SR to
+# has_sr_approval() OR has_gr_approval() -- "GR" was renamed to "SR", and
+# has_gr_approval() still matches both prefixes for backward compatibility
+# with pre-rename comments. Because the cross-role gate-corruption guard
+# (Step 2a) only tests submit_review's OWN matcher set, a body opening
+# "GR APPROVED: ..." submitted under a DIFFERENT role (e.g. role="CE") does
+# NOT trip has_sr_approval() -- so Step 2a sees no foreign-gate clear -- yet
+# CI's checker DOES accept it as an SR approval. A single CE-role comment
+# therefore silently satisfies CI's SR requirement.
+#
+# This matters more than its size suggests: SR is the sole required
+# reviewer for the GOVERNANCE facet, and SR could not bind at all during
+# this PR's own review cycle (Vault skill drift, elevana-studio#67) -- so
+# the scarcest, most bypass-pressured approval was also the one that was
+# spoofable.
+#
+# The earlier PR-body claim that the GR alias was "confirmed inert" was a
+# FALSE_RATIONALE of exactly the class this PR's own taxonomy warns against:
+# it is TRUE that "GR" cannot be a *submitted* role (absent from
+# VALID_ROLES, so it can never reach _matches_role_gate() as the `role`
+# argument) and FALSE that GR-shaped text cannot clear a *foreign* gate
+# (has_gr_approval() runs against arbitrary comment text regardless of
+# what role submitted it).
+#
+# FIX: add the has_gr_approval() disjunct to SR's branch in
+# _matches_role_gate(), matching validate_review.py's checker exactly, and
+# add a durable parity test (tests/test_validate_review.py::
+# TestSubmitReviewCiParity) that iterates every CI-checked role and would
+# have failed on this exact divergence before the fix existed.
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestGrAliasForeignGateGap:
+    """SR's real gate matcher must accept the GR legacy alias, matching
+    validate_review.py's CI-side checker exactly -- both directions."""
+
+    def test_gr_approval_on_foreign_role_body_is_rejected(self):
+        """role='CE' with a body containing 'GR APPROVED: ...' on its own
+        line must be rejected -- that text clears CI's SR requirement even
+        though has_sr_approval() alone does not see it."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_gr_approval,
+            has_sr_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation is sound.\nGR APPROVED: standards check clean."
+        finished = format_review_comment(role="CE", verdict="APPROVED", assessment=assessment)
+        # Pre-condition, proven against the real matchers rather than
+        # asserted on faith: has_sr_approval() alone misses this (the
+        # narrower matcher submit_review used before the fix), but
+        # has_gr_approval() -- the SAME function CI's checker ORs in --
+        # does clear on it.
+        assert has_sr_approval([finished]) is False
+        assert has_gr_approval([finished]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_sr_blocked_with_gr_approval_text_breaches_own_gate_invariant(self):
+        """Second path (CIV): role='SR', verdict='BLOCKED' with a body that
+        contains 'GR APPROVED: ...' clears SR's OWN real gate via the GR
+        alias -- a breach of the Step 2b symmetric fail-open invariant
+        (a non-approving verdict must never emit a comment that satisfies
+        the role's real gate matcher), same root cause as the foreign-role
+        case above."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_gr_approval,
+            has_sr_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "There are real issues.\nGR APPROVED: oops this reads as an approval."
+        finished = format_review_comment(role="SR", verdict="BLOCKED", assessment=assessment)
+        assert has_sr_approval([finished]) is False
+        assert has_gr_approval([finished]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="SR",
+            verdict="BLOCKED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
