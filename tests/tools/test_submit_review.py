@@ -3414,3 +3414,97 @@ class TestCrossLabellingRestored:
             dry_run=True,
         )
         assert result["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# False REJECTION of a legitimate review (elevana-studio#1851, round 5,
+# BLOCKING -- caught by cold non-Claude primary reviewers, gemini via CRS
+# and codex via CIV, reproduced by the coordinator; missed by four
+# Claude-led review passes across 792 new test lines).
+#
+# review_formats.has_self_review() is DELIBERATELY role-agnostic: it
+# matches ANY word/name immediately followed by "SELF-REVIEWED:", because
+# CI's own TIER_1_SELF fallback branch treats a self-review from anyone
+# (not just a literal "IL" token) as satisfying that tier. That is correct
+# behaviour for has_self_review() itself and must not change.
+#
+# But the Step 2a/2a-bis foreign-gate loops in submit_review.py dispatch
+# role=="IL" to _matches_role_gate(text, "IL"), which called
+# has_self_review([text]) -- the SAME role-agnostic matcher -- as if it
+# were IL-specific. So ANY assessment quoting someone else's legitimate
+# self-review line (e.g. "Shaun SELF-REVIEWED: all tests pass.", posted
+# under role="CRS" reporting on a prior self-review) was rejected as
+# "clears the IL approval pattern", even though nothing in the text names
+# IL at all. This is the fail-closed-worse-than-the-bug failure mode this
+# whole thread has warned about, materialising in code THIS PR introduced,
+# with zero coverage across 792 new test lines before this round.
+#
+# Fix: introduce an IL-SPECIFIC matcher (pins the leading token to the
+# literal "IL", mirroring review_formats._SELF_REVIEW_RE's structure but
+# without the role-agnostic \w[\w-]* word class) used ONLY inside
+# _matches_role_gate()'s IL branch. has_self_review() itself, and every
+# other role's matcher, are UNCHANGED.
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestIlForeignGateRequiresLiteralIlToken:
+    """The foreign-gate loop's IL branch must require the literal 'IL'
+    token, not accept any name/word followed by SELF-REVIEWED."""
+
+    def test_third_party_self_review_quote_under_crs_still_posts(self):
+        """Coordinator's exact reproduction: role='CRS' reporting that
+        someone named Shaun self-reviewed must NOT be rejected as if it
+        cleared IL's gate -- 'Shaun' is not 'IL'."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Looks good.\nShaun SELF-REVIEWED: all tests pass."
+        # Pre-condition, proven against the real (unchanged, deliberately
+        # role-agnostic) matcher: has_self_review() DOES match this text --
+        # that is correct behaviour for CI's own TIER_1_SELF fallback, and
+        # is exactly why using it as an IL-SPECIFIC check was the bug.
+        assert has_self_review([assessment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CRS",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_actual_il_header_under_crs_is_still_rejected(self):
+        """Control against under-blocking: a body whose original opening
+        line (or a later line, via the gate-corruption path) actually
+        opens with the literal 'IL' token must still be rejected under a
+        different submitted role -- the fix narrows the matcher to the
+        literal token, it does not remove the check."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CRS",
+            verdict="APPROVED",
+            assessment="Looks good.\nIL SELF-REVIEWED: fixed the typo myself.",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_il_role_submitted_with_own_literal_header_still_posts_regression(self):
+        """Regression: role='IL' submitting its own canonical
+        'IL SELF-REVIEWED: ...' header must still post -- the narrowed
+        matcher must not break IL's own legitimate self-submission."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="APPROVED",
+            assessment="IL SELF-REVIEWED: evidence checks out",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
