@@ -3131,3 +3131,87 @@ class TestGrAliasForeignGateGap:
         )
         assert result["status"] == "error"
         assert result["error_type"] == "validation"
+
+
+# ---------------------------------------------------------------------------
+# Offending-text quoting must name the MATCHED line, not always line 1
+# (elevana-studio#1851, final rework round, HIGH non-blocking -- found
+# independently by CE and CIV, coordinator-confirmed reproduction).
+#
+# Both the Step 2a cross-role-gate error and the Step 2b symmetric
+# fail-open error quoted `formatted_comment.split(chr(10), 1)[0]` --
+# unconditionally line 1 -- regardless of which line actually triggered
+# the match. On a body where the offending token is on line 2 (or, per the
+# coordinator's own reproduction, line 32 of a 60-line body), the error
+# names an innocent line (the submitted role's own header) while the real
+# offense is never shown. Misleading operator guidance on the org's merge
+# gate is a correctness bug, not cosmetic, and is fixed in this round
+# rather than deferred.
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestOffendingTextQuotesMatchedLine:
+    """The 'Offending text:' fragment in a rejection error must quote the
+    line that actually matched the foreign/own role's gate pattern, not
+    unconditionally the first line of the finished comment."""
+
+    def test_cross_role_error_quotes_offending_line_not_line_one(self):
+        """role='CE' with the TMG-clearing text on line 2 must quote line
+        2 (the actual offense), not line 1 (CE's own innocent header)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Implementation looks solid.\nTMG APPROVED: methodology verified",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        error = result["validation"]["error"]
+        assert "TMG APPROVED: methodology verified" in error
+        assert "CE APPROVED: Implementation looks solid." not in error
+
+    def test_cross_role_error_quotes_deep_offending_line_in_long_body(self):
+        """Coordinator's exact reproduction shape: a 60-line body with the
+        offending TMG token on line 32 must quote line 32, not line 1."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        lines = (
+            ["Implementation is sound."]
+            + [f"Line {i} of the assessment body." for i in range(2, 32)]
+            + ["TMG APPROVED: methodology verified"]
+            + [f"Line {i} of the assessment body." for i in range(33, 61)]
+        )
+        assessment = "\n".join(lines)
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        error = result["validation"]["error"]
+        assert "TMG APPROVED: methodology verified" in error
+        assert "CE APPROVED: Implementation is sound." not in error
+
+    def test_symmetric_own_gate_error_quotes_offending_line(self):
+        """Step 2b (own-role, non-approving verdict clears own gate) must
+        also quote the matched line, not unconditionally line 1."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="BLOCKED",
+            assessment="Summary of concerns.\nCE APPROVED: fine actually",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        error = result["validation"]["error"]
+        assert "CE APPROVED: fine actually" in error
+        assert "CE BLOCKED: Summary of concerns." not in error
