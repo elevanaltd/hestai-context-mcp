@@ -2876,3 +2876,29 @@ class TestSecurityLoadBearingExtensionlessDotfiles:
         assert "SECURITY" in facets
         assert "CIV" in required_roles
         assert tier_label == "TIER_3_CRITICAL"
+
+
+@pytest.mark.security
+class TestSecurityBasenameNotShadowedByExemptPatterns:
+    """REWORK (coordinator repro, blocking): the original placement of the
+    _SECURITY_BASENAMES check sat AFTER the exempt_patterns block, so the
+    pre-existing ``^tests/.*$`` exempt branch returned None for
+    ``tests/.pgtap-quarantine`` before the security check ever ran -- a
+    hole worse than the bug (full exemption instead of merely wrong tier).
+    This is also the non-shadowability regression: moving the basename
+    check to any later branch position reintroduces this exact failure,
+    which is why this path (top-level ``tests/``, not ``supabase/tests/``)
+    is asserted here explicitly and was NOT covered by the original three
+    #1833 tests (none of which used a path matching an earlier exempt
+    pattern).
+    """
+
+    def test_top_level_tests_prefixed_quarantine_is_not_exempt(self):
+        """tests/.pgtap-quarantine must classify SECURITY, not be exempted
+        by the earlier ``^tests/.*$`` branch."""
+        assert validate_review._classify_file_facet("tests/.pgtap-quarantine") == "SECURITY"
+
+    def test_top_level_tests_prefixed_drift_exceptions_is_not_exempt(self):
+        """tests/.drift-exceptions must classify SECURITY, not be exempted
+        by the earlier ``^tests/.*$`` branch."""
+        assert validate_review._classify_file_facet("tests/.drift-exceptions") == "SECURITY"
