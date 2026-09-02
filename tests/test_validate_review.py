@@ -3009,3 +3009,75 @@ class TestSecurityBasenameSkipsVendoredPaths:
         assert (
             validate_review._classify_file_facet("supabase/tests/.pgtap-quarantine") == "SECURITY"
         )
+
+
+@pytest.mark.security
+class TestVendorGuardSegmentAnchoringAndCasefold:
+    """BLOCKING 2 (round 6, found independently by gemini and codex).
+
+    The vendor guard added in round 5 tested membership with a bare
+    ``_VENDOR_PATH_MARKER in path`` substring check for
+    ``node_modules/`` -- unanchored to path segments. A directory that
+    merely CONTAINS "node_modules" as a substring of its own name (e.g.
+    "my_node_modules", a real, non-vendored directory with zero relation
+    to an actual node_modules/ dependency tree) silently matched too,
+    exempting a genuinely security-relevant path from classification --
+    a real security-classification bypass in the guard, not merely an
+    over-broad exemption. Separately, the ``vendor/`` marker used
+    ``path.startswith(_VENDOR_LEADING_PREFIX)`` -- root-anchored ONLY --
+    so a nested ``app/vendor/...`` path was NOT treated as vendored even
+    though a nested ``vendor/node_modules/...`` path already was (via the
+    substring marker), an inconsistent semantics between the two markers.
+    Neither marker was casefolded, so ``Vendor/`` and ``Node_Modules/``
+    (case variants a case-insensitive filesystem, e.g. macOS, can produce
+    for the same on-disk directory) evaded the guard entirely.
+
+    Fix: match both markers by PATH SEGMENT (an exact, casefolded segment
+    equal to "vendor" or "node_modules" anywhere in the path), not by
+    substring or by root-only prefix. One semantics for both markers.
+    """
+
+    def test_directory_name_merely_containing_node_modules_substring_is_not_vendored(
+        self,
+    ):
+        """BYPASS: 'src/my_node_modules/.pgtap-quarantine' must classify
+        SECURITY -- 'my_node_modules' is a real, non-vendored directory
+        name that happens to contain 'node_modules' as a substring; it is
+        not an actual vendored dependency tree and must not be exempted."""
+        assert (
+            validate_review._classify_file_facet("src/my_node_modules/.pgtap-quarantine")
+            == "SECURITY"
+        )
+
+    def test_nested_vendor_directory_is_treated_as_vendored_consistently(self):
+        """Consistency: 'app/vendor/.pgtap-quarantine' must be treated as
+        vendored the same way a nested node_modules/ path already is --
+        one segment-anywhere semantics for both markers, not root-only
+        for 'vendor/' and anywhere for 'node_modules/'."""
+        assert (
+            validate_review._classify_file_facet("app/vendor/.pgtap-quarantine")
+            == "ROUTINE_CODE"
+        )
+
+    def test_capitalized_vendor_segment_is_casefolded(self):
+        """'Vendor/.pgtap-quarantine' must be treated as vendored --
+        case-insensitive filesystems (macOS) can present the same
+        on-disk vendor/ directory under different casing."""
+        assert validate_review._classify_file_facet("Vendor/.pgtap-quarantine") == "ROUTINE_CODE"
+
+    def test_capitalized_node_modules_segment_is_casefolded(self):
+        """'Node_Modules/x/.drift-exceptions' must be treated as
+        vendored, consistent with the casefolded basename set."""
+        assert (
+            validate_review._classify_file_facet("Node_Modules/x/.drift-exceptions")
+            == "ROUTINE_CODE"
+        )
+
+    def test_exact_segment_match_required_not_substring(self):
+        """Companion control to the bypass test above: a segment that is
+        merely 'vendors' (plural, a different real directory name) must
+        not be treated as vendored either -- the fix requires an EXACT
+        casefolded segment match, not a segment-level substring test."""
+        assert (
+            validate_review._classify_file_facet("vendors/.pgtap-quarantine") == "SECURITY"
+        )
