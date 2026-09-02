@@ -2830,3 +2830,50 @@ class TestCommentEventFastPath:
         assert (
             get_changed_files_called
         ), "get_changed_files must be called when git rev-parse for base ref fails"
+
+
+@pytest.mark.security
+class TestSecurityLoadBearingExtensionlessDotfiles:
+    """SECURITY: extensionless leading-dot files that gate consumer-repo security
+    invariants must classify as SECURITY, not fall through to ROUTINE_CODE.
+
+    elevana-studio#1833: supabase/tests/.pgtap-quarantine and
+    supabase/migrations/.drift-exceptions are both leading-dot AND extensionless,
+    so no extension-based rule in _classify_file_facet matches them, and the
+    ``^tests/.*$`` exempt pattern does not match either (both paths start with
+    ``supabase/``, not ``tests/``). Both reach the default fall-through
+    (ROUTINE_CODE), so a PR rewriting quarantine-gate enforcement logic was
+    classified TIER_2 with no CIV in the required reviewer set.
+    """
+
+    def test_pgtap_quarantine_classifies_security(self):
+        """supabase/tests/.pgtap-quarantine must classify as SECURITY."""
+        assert (
+            validate_review._classify_file_facet("supabase/tests/.pgtap-quarantine")
+            == "SECURITY"
+        )
+
+    def test_drift_exceptions_classifies_security(self):
+        """supabase/migrations/.drift-exceptions must classify as SECURITY."""
+        assert (
+            validate_review._classify_file_facet("supabase/migrations/.drift-exceptions")
+            == "SECURITY"
+        )
+
+    def test_quarantine_only_pr_yields_civ_and_tier_3_critical(self):
+        """A quarantine-only changed-file list must yield SECURITY in facets,
+        CIV in required_roles, and tier_label TIER_3_CRITICAL — not the
+        ROUTINE_CODE -> TIER_2 misclassification that let CIV go absent."""
+        files = [
+            {
+                "path": "supabase/tests/.pgtap-quarantine",
+                "added": 3,
+                "deleted": 0,
+                "total_changed": 3,
+                "status": "M",
+            }
+        ]
+        facets, required_roles, tier_label, _reason = validate_review.classify_pr_facets(files)
+        assert "SECURITY" in facets
+        assert "CIV" in required_roles
+        assert tier_label == "TIER_3_CRITICAL"
