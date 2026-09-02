@@ -955,9 +955,7 @@ class TestCrossRoleHeaderRejection:
         ever called."""
         from hestai_context_mcp.tools.submit_review import submit_review
 
-        with patch(
-            "hestai_context_mcp.tools.submit_review._post_comment"
-        ) as mock_post:
+        with patch("hestai_context_mcp.tools.submit_review._post_comment") as mock_post:
             result = submit_review(
                 repo="owner/repo",
                 pr_number=1,
