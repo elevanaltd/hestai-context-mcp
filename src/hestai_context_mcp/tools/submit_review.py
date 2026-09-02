@@ -531,6 +531,65 @@ def submit_review(
                 "dry_run": dry_run,
             }
 
+    # Step 2a-bis: Cross-LABELLING guard, restored (elevana-studio#1851,
+    # third rework round -- CAPABILITY REGRESSION caught by cubic bot
+    # review, missed by four human-role reviewers and the coordinator
+    # during round 2).
+    #
+    # The gate-corruption loop above (Step 2a) checks the FINISHED
+    # comment, which is correct for its own purpose but is NOT a superset
+    # of a different, still-needed capability: cross-LABELLING, where the
+    # ASSESSMENT'S OWN ORIGINAL first line opens with a foreign role's
+    # header -- the author claiming to be a role they were not dispatched
+    # as. format_review_comment() prepends the submitted role's own header
+    # directly onto line 1 (see its "human_line = f'{prefix} {keyword}:
+    # {assessment}'" construction), so "CIV APPROVED: ..." submitted under
+    # role="CE" becomes "CE APPROVED: CIV APPROVED: ...": the "CIV" token
+    # is no longer at true line-start once prepended, so the Step 2a loop
+    # over the FINISHED comment does not see it and a CIV-remit body posted
+    # under a CE token -- the elevana-studio #1840 shape this entire
+    # thread exists for -- passed silently under the round-2-only rule.
+    #
+    # Fix: additionally test the assessment's own ORIGINAL first line
+    # (pre-formatting, pre-prepending) against every other role's real
+    # gate matcher. This is IN ADDITION to the Step 2a loop above, not a
+    # replacement for it -- the two guard different things:
+    #   - Step 2a (gate-corruption): the FINISHED comment clears a
+    #     foreign role's gate, regardless of where in the body the
+    #     offending text sits.
+    #   - Step 2a-bis (cross-labelling): the ORIGINAL assessment's own
+    #     opening line names a role other than the one submitted, before
+    #     any prepending can shift its position.
+    # Guarded for the empty-assessment case (assessment.splitlines() is
+    # simply [] for an empty string, so the loop body never executes --
+    # empty assessments are rejected earlier, at the pre-existing
+    # "Assessment must not be empty" check in this same function).
+    original_first_line = assessment.splitlines()[0] if assessment.splitlines() else ""
+    for other_role in VALID_ROLES:
+        if other_role == role:
+            continue
+        if _matches_role_gate(original_first_line, other_role):
+            return {
+                "status": "error",
+                "comment_url": None,
+                "commit_sha": sha,
+                "error_type": "validation",
+                "validation": {
+                    "error": (
+                        f"Assessment's own first line opens with a "
+                        f"'{other_role}' header, but the submitted role is "
+                        f"'{role}'. Offending text: {original_first_line!r}. "
+                        "A reviewer's assessment must not open by naming a "
+                        "role other than the one actually submitting this "
+                        "review -- edit the assessment text or correct the "
+                        "role."
+                    ),
+                    "would_clear_gate": True,
+                    "tier_requirements": _get_tier_requirements(role),
+                },
+                "dry_run": dry_run,
+            }
+
     # Step 2b: Symmetric fail-open guard (rework #3). The invariant is:
     # a non-approving verdict must NEVER emit a comment that satisfies the
     # role's real gate matcher. detect_header_verdict_conflict() (Step 1)
