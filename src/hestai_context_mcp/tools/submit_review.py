@@ -34,6 +34,7 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_gr_approval,
     has_ho_review,
     has_pe_approval,
+    has_self_review,
     has_sr_approval,
     has_tmg_approval,
 )
@@ -142,32 +143,28 @@ def _validate_inputs(
     return None
 
 
-# IL-specific self-review matcher (elevana-studio#1851, round 5, BLOCKING
-# -- caught by cold non-Claude primary reviewers gemini/CRS and
-# codex/CIV). review_formats.has_self_review() is DELIBERATELY
-# role-agnostic (matches ANY word/name followed by "SELF-REVIEWED:"),
-# because CI's own TIER_1_SELF fallback branch correctly accepts a
-# self-review from anyone, not just a literal "IL" token -- that matcher
-# and that behaviour must NOT change. But _matches_role_gate()'s IL branch
-# previously called has_self_review() directly, as if it were
-# IL-SPECIFIC, so the Step 2a/2a-bis foreign-gate loops rejected ANY
-# assessment merely quoting someone else's legitimate self-review line
-# (e.g. "Shaun SELF-REVIEWED: all tests pass." posted under a different
-# role) as if it "cleared IL's gate" -- a false rejection of a legitimate
-# review, with nothing in the text naming IL at all. This regex mirrors
-# review_formats._SELF_REVIEW_RE's structure exactly, but pins the leading
-# token to the literal "IL" instead of accepting \w[\w-]* (any word),
-# so it is used ONLY for the foreign-gate-corruption purpose inside
-# _matches_role_gate() -- has_self_review() itself is untouched and still
-# used wherever role-agnostic self-review detection is actually correct.
-_IL_LITERAL_SELF_REVIEW_RE = re.compile(
-    r"(?:^|(?<=\|))\s*"  # Line-start or after pipe (consistent with approval matcher)
-    r"IL\b"  # Literal role token ONLY -- not any word/name
-    r"(?:\s*\([^)]*\))?"  # Optional parenthetical (e.g., (Claude))
-    r"[\s:—–\-]*"  # Separators (whitespace, colon, dashes)
-    r"SELF-REVIEWED\b",  # Keyword with word boundary
-    re.MULTILINE | re.IGNORECASE,
-)
+# ROUND 6 REVERT (elevana-studio#1851): the round-5 IL-literal-token-only
+# regex that used to live here (_IL_LITERAL_SELF_REVIEW_RE) was a
+# coordinator-directed error, caught cold by non-Claude primary reviewers
+# CIV and CRS. Its premise -- that a third-party self-review quote (e.g.
+# "Shaun SELF-REVIEWED: all tests pass.") clearing IL's gate under a
+# different submitted role was a FALSE rejection -- was wrong.
+# review_formats.has_self_review() is DELIBERATELY role-agnostic (matches
+# ANY word/name followed by "SELF-REVIEWED:") because CI's own
+# TIER_1_SELF fallback branch calls it directly and accepts a self-review
+# from anyone, not just a literal "IL" token. Such text genuinely clears
+# a real CI gate, so refusing it here is CORRECT; the round-5 "fix" was
+# actually a FALSE APPROVAL hole: an IL/BLOCKED verdict, or any other
+# role's verdict, that merely quoted someone else's self-review line no
+# longer tripped the foreign-gate/symmetric guards below, even though
+# has_self_review() on the same finished comment is True.
+#
+# THE GOVERNING RULE: every branch of _matches_role_gate() MUST mirror
+# its corresponding CI matcher EXACTLY -- narrower than CI is a
+# false-approval hole (this defect); wider than CI is a false rejection.
+# Never narrow a gate matcher to relieve expressive friction. The IL
+# branch below therefore calls has_self_review() directly again, exactly
+# like every other role branch mirrors its own CI matcher.
 
 
 def _matches_role_gate(comment: str, role: str) -> bool:
@@ -216,7 +213,7 @@ def _matches_role_gate(comment: str, role: str) -> bool:
     elif role == "SR":
         return has_sr_approval([comment]) or has_gr_approval([comment])
     elif role == "IL":
-        return bool(_IL_LITERAL_SELF_REVIEW_RE.search(comment))
+        return has_self_review([comment])
     elif role == "HO":
         return has_ho_review([comment])
 
@@ -252,12 +249,23 @@ def _find_matching_line(comment: str, role: str) -> str:
     line independently (no cross-line lookaheads or state), testing each
     line of ``comment`` against ``_matches_role_gate()`` in isolation
     reproduces the exact same per-line matching the real check used to
-    decide the comment matches at all -- so the first line that matches
-    standalone IS the line responsible.
+    decide the comment matches at all -- so WHEN some single line matches
+    in isolation, that line is guaranteed to be A line the real matcher
+    would also accept on its own, making it an accurate "Offending text:"
+    quote.
 
-    Falls back to line 1 if (unexpectedly) no single line matches in
-    isolation, so a caller that already confirmed a match on the full
-    text always gets a usable, non-empty quote.
+    This function does NOT guarantee it identifies THE line responsible
+    for the real match in every case: if the real matcher's decision on
+    the full text arose only from a pattern spanning multiple lines (no
+    single line matches standalone), no line in this scan will match
+    either, and the fallback below quotes line 1 regardless of whether it
+    is actually implicated -- callers must not treat the returned line as
+    proof that line, and only that line, caused the match.
+
+    Falls back to line 1 if no single line matches in isolation (either
+    because the real match was genuinely cross-line, or unexpectedly),
+    so a caller that already confirmed a match on the full text always
+    gets a usable, non-empty quote.
 
     Uses str.splitlines() (elevana-studio#1851, third rework round, HIGH
     -- issue #154 overlap, splitlines() half fixed here) rather than
