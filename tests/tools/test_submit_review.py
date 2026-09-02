@@ -3417,52 +3417,113 @@ class TestCrossLabellingRestored:
 
 
 # ---------------------------------------------------------------------------
-# False REJECTION of a legitimate review (elevana-studio#1851, round 5,
-# BLOCKING -- caught by cold non-Claude primary reviewers, gemini via CRS
-# and codex via CIV, reproduced by the coordinator; missed by four
-# Claude-led review passes across 792 new test lines).
+# ROUND 6 CORRECTION (elevana-studio#1851): the round-5 "false REJECTION"
+# fix above was a COORDINATOR-DIRECTED ERROR, not a real defect fix. It
+# converted a correct refusal into a FALSE APPROVAL and is reverted here.
+# Caught cold by non-Claude primary reviewers CIV and CRS; reproduced by
+# the coordinator, who authored the wrong premise in round 5 and is
+# correcting it now -- NOT a misclassification by the reviewers who
+# reported the original (correct) rejection as a symptom.
 #
-# review_formats.has_self_review() is DELIBERATELY role-agnostic: it
-# matches ANY word/name immediately followed by "SELF-REVIEWED:", because
-# CI's own TIER_1_SELF fallback branch treats a self-review from anyone
-# (not just a literal "IL" token) as satisfying that tier. That is correct
-# behaviour for has_self_review() itself and must not change.
+# The round-5 premise was: "review_formats.has_self_review() being
+# role-agnostic is fine for CI, but _matches_role_gate()'s IL branch using
+# the SAME matcher over-rejects legitimate third-party quotes, so it needs
+# an IL-SPECIFIC, literal-token-only regex." That premise is WRONG. CI's
+# tier-1 branch calls has_self_review() DIRECTLY -- role-agnostic, matching
+# ANY word followed by "SELF-REVIEWED:". A comment like
+# "Shaun SELF-REVIEWED: all tests pass." genuinely clears CI's TIER_1_SELF
+# gate, regardless of whose comment carries it or what role submitted it.
+# The round-5 "false rejection" was the guard working CORRECTLY: rejecting
+# text that legitimately clears a real gate. Narrowing the IL branch to a
+# literal-"IL"-only regex opened exactly the hole this predicts:
 #
-# But the Step 2a/2a-bis foreign-gate loops in submit_review.py dispatch
-# role=="IL" to _matches_role_gate(text, "IL"), which called
-# has_self_review([text]) -- the SAME role-agnostic matcher -- as if it
-# were IL-specific. So ANY assessment quoting someone else's legitimate
-# self-review line (e.g. "Shaun SELF-REVIEWED: all tests pass.", posted
-# under role="CRS" reporting on a prior self-review) was rejected as
-# "clears the IL approval pattern", even though nothing in the text names
-# IL at all. This is the fail-closed-worse-than-the-bug failure mode this
-# whole thread has warned about, materialising in code THIS PR introduced,
-# with zero coverage across 792 new test lines before this round.
+#   submit_review(role="IL", verdict="BLOCKED",
+#                 assessment="Blocking: coverage regression.\n"
+#                            "Shaun SELF-REVIEWED: tests pass.")
+#     -> status "ok", but has_self_review(finished_comment) -> True.
+#     A BLOCKING verdict posts and CI credits a self-review, clearing the
+#     tier-1 gate that main's unmodified has_self_review() would have
+#     refused to let through under a non-APPROVED verdict.
 #
-# Fix: introduce an IL-SPECIFIC matcher (pins the leading token to the
-# literal "IL", mirroring review_formats._SELF_REVIEW_RE's structure but
-# without the role-agnostic \w[\w-]* word class) used ONLY inside
-# _matches_role_gate()'s IL branch. has_self_review() itself, and every
-# other role's matcher, are UNCHANGED.
+#   submit_review(role="CE", verdict="APPROVED",
+#                 assessment="Implementation is sound.\n"
+#                            "**IL** SELF-REVIEWED: all tests pass.")
+#     -> status "ok" (the literal-IL regex has no markdown-bold-stripping,
+#        unlike has_self_review(), so "**IL**" at line-start does not match
+#        it -- but has_self_review() DOES match it after stripping), while
+#        has_self_review(finished_comment) -> True. A CE approval posts
+#        while independently clearing what CI treats as an IL self-review.
+#
+# _matches_role_gate() backs BOTH the foreign-role check (Step 2a) and the
+# own-gate symmetric check (Step 2b), so the round-5 narrowing broke both
+# directions at once.
+#
+# THE GOVERNING RULE (made explicit here because round 5 failed to hold
+# it): every branch of _matches_role_gate() MUST mirror the corresponding
+# CI matcher EXACTLY -- not a model of it, not a role-scoped variant of it.
+# Narrower than CI = a false-approval hole (this defect). Wider than CI =
+# a false rejection (the round-5 non-problem). Never narrow a gate matcher
+# to relieve expressive friction; if a line's text genuinely clears a real
+# CI gate, refusing it is CORRECT, even when phrased as a third-party
+# quote or a status reference. The accepted cost: a line starting
+# "<anything> SELF-REVIEWED:" is refused for every submitted role. That is
+# the same expressive tax as the markdown-table-row case already
+# documented elsewhere in this module, and it is correct, because such
+# text clears a real gate.
+#
+# Fix: _IL_LITERAL_SELF_REVIEW_RE is deleted. _matches_role_gate()'s IL
+# branch calls has_self_review() directly again, identical to every other
+# role branch's real-matcher-mirroring contract.
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
-class TestIlForeignGateRequiresLiteralIlToken:
-    """The foreign-gate loop's IL branch must require the literal 'IL'
-    token, not accept any name/word followed by SELF-REVIEWED."""
+class TestIlSelfReviewGateMirrorsCiExactly:
+    """_matches_role_gate()'s IL branch must mirror CI's role-agnostic
+    has_self_review() exactly -- no IL-specific narrowing."""
 
-    def test_third_party_self_review_quote_under_crs_still_posts(self):
-        """Coordinator's exact reproduction: role='CRS' reporting that
-        someone named Shaun self-reviewed must NOT be rejected as if it
-        cleared IL's gate -- 'Shaun' is not 'IL'."""
+    def test_third_party_self_review_quote_is_correctly_rejected_not_a_false_approval(
+        self,
+    ):
+        """Inverse of the round-5 test this replaces. The round-5 test
+        asserted this exact text 'still posts' under role='CRS' and treated
+        that as the correct, desired behaviour. It is not: the text clears
+        CI's real has_self_review() gate, so submit_review must reject it
+        as a foreign-gate clear -- posting it would silently credit a
+        self-review to a CRS-labelled comment, exactly the class of defect
+        this module exists to prevent."""
         from hestai_context_mcp.tools.shared.review_formats import has_self_review
         from hestai_context_mcp.tools.submit_review import submit_review
 
         assessment = "Looks good.\nShaun SELF-REVIEWED: all tests pass."
-        # Pre-condition, proven against the real (unchanged, deliberately
-        # role-agnostic) matcher: has_self_review() DOES match this text --
-        # that is correct behaviour for CI's own TIER_1_SELF fallback, and
-        # is exactly why using it as an IL-SPECIFIC check was the bug.
+        # Ground truth: CI's real, role-agnostic matcher DOES treat this as
+        # a self-review -- which is exactly why it must be rejected here,
+        # not accepted.
         assert has_self_review([assessment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CRS",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_reworded_self_review_reference_that_does_not_clear_the_gate_still_posts(
+        self,
+    ):
+        """Positive control: a reference to someone's prior self-review
+        that is worded so it does NOT independently satisfy
+        has_self_review() (no '<token> SELF-REVIEWED:' shape) must still
+        post normally. This proves the fix is not a blanket ban on
+        mentioning self-review -- only on text that actually clears the
+        real gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Looks good.\nConfirmed: Shaun completed a self-review of all tests."
+        assert has_self_review([assessment]) is False
 
         result = submit_review(
             repo="owner/repo",
@@ -3478,8 +3539,7 @@ class TestIlForeignGateRequiresLiteralIlToken:
         """Control against under-blocking: a body whose original opening
         line (or a later line, via the gate-corruption path) actually
         opens with the literal 'IL' token must still be rejected under a
-        different submitted role -- the fix narrows the matcher to the
-        literal token, it does not remove the check."""
+        different submitted role."""
         from hestai_context_mcp.tools.submit_review import submit_review
 
         result = submit_review(
@@ -3495,8 +3555,7 @@ class TestIlForeignGateRequiresLiteralIlToken:
 
     def test_il_role_submitted_with_own_literal_header_still_posts_regression(self):
         """Regression: role='IL' submitting its own canonical
-        'IL SELF-REVIEWED: ...' header must still post -- the narrowed
-        matcher must not break IL's own legitimate self-submission."""
+        'IL SELF-REVIEWED: ...' header must still post."""
         from hestai_context_mcp.tools.submit_review import submit_review
 
         result = submit_review(
@@ -3505,6 +3564,104 @@ class TestIlForeignGateRequiresLiteralIlToken:
             role="IL",
             verdict="APPROVED",
             assessment="IL SELF-REVIEWED: evidence checks out",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+
+@pytest.mark.unit
+class TestIlSelfReviewFalseApprovalHoleClosed:
+    """BLOCKING 1 (round 6): concrete reproductions of the false-approval
+    hole opened by the round-5 IL-literal narrowing, now closed by the
+    revert. Each test demonstrates BOTH halves of the defect: CI's real
+    has_self_review() gate treats the text as a self-review (ground
+    truth), AND submit_review correctly refuses to let it through."""
+
+    def test_il_blocked_verdict_with_third_party_self_review_quote_is_rejected(self):
+        """Coordinator's exact reproduction #1: a BLOCKED verdict under
+        role='IL' whose assessment quotes a third party's self-review line
+        must be rejected by Step 2b (non-APPROVED-must-not-clear-gate) --
+        NOT posted as a 'BLOCKED' comment that CI's tier-1 branch reads as
+        a satisfied self-review."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import (
+            format_review_comment,
+            submit_review,
+        )
+
+        assessment = "Blocking: coverage regression.\nShaun SELF-REVIEWED: tests pass."
+        finished_comment = format_review_comment(
+            role="IL", verdict="BLOCKED", assessment=assessment
+        )
+        assert has_self_review([finished_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="BLOCKED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_ce_approved_with_bolded_il_self_review_quote_is_rejected(self):
+        """Coordinator's exact reproduction #2: a CE APPROVED verdict
+        whose assessment contains a markdown-bolded '**IL** SELF-REVIEWED:'
+        line must be rejected by Step 2a (cross-role gate-corruption guard)
+        as clearing the IL gate too -- the literal-token IL regex missed
+        this because it had no markdown-bold-stripping, unlike
+        has_self_review()."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import (
+            format_review_comment,
+            submit_review,
+        )
+
+        assessment = "Implementation is sound.\n**IL** SELF-REVIEWED: all tests pass."
+        finished_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_self_review([finished_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+
+@pytest.mark.unit
+class TestSelfReviewCrossNewlineSpanRegression:
+    """HIGH 3 (round 6): the round-5 regex's ``\\s*`` separator spanned
+    newlines, disagreeing with has_self_review()'s splitlines()-based
+    per-line scan. The revert removes the offending regex entirely, but
+    this guards against any future per-line-matcher divergence."""
+
+    def test_role_token_and_self_reviewed_keyword_on_separate_lines_do_not_match(self):
+        """A role token on one line and 'SELF-REVIEWED:' on a later,
+        unrelated line must NOT be treated as a self-review by either the
+        real gate matcher or _matches_role_gate()'s IL branch -- matching
+        across a newline would disagree with has_self_review()'s
+        splitlines()-based scan, which never joins lines together."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Gate status:\nIL\n- SELF-REVIEWED: absent for this PR."
+        assert has_self_review([assessment]) is False
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="BLOCKED",
+            assessment=assessment,
             dry_run=True,
         )
         assert result["status"] == "ok"
