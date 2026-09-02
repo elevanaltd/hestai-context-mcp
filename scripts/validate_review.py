@@ -255,6 +255,21 @@ def _classify_file_facet(path: str) -> str | None:
     Returns:
         Facet name string, or None if the file is exempt.
     """
+    # Security-load-bearing extensionless dotfiles (issue #1833, REWORK).
+    # Checked by exact basename FIRST -- before every other branch in this
+    # function, including the exempt-pattern block below. This placement is
+    # deliberate and was NOT the original placement: the check previously
+    # sat after the exempt_patterns block, and the pre-existing ^tests/.*$
+    # exempt pattern silently returned None for tests/.pgtap-quarantine
+    # before the security check ever ran (coordinator reproduction,
+    # rework BLOCKING 3) -- a hole worse than the original bug (full
+    # exemption, zero reviewers, rather than merely the wrong tier). Putting
+    # this check first, ahead of ALL other branches, is what actually
+    # guarantees it cannot be shadowed -- not a claim about what the later
+    # branches happen to match.
+    if path.rsplit("/", 1)[-1] in _SECURITY_BASENAMES:
+        return "SECURITY"
+
     # Bundled hub skill/pattern files (.md but NOT exempt — governance artifacts)
     # These define agent behavior and must be classified before exempt check
     if "/library/skills/" in path and path.endswith("/SKILL.md"):
@@ -272,14 +287,6 @@ def _classify_file_facet(path: str) -> str | None:
     # Check standard exempt patterns
     if any(re.match(pattern, path) for pattern in exempt_patterns):
         return None
-
-    # Security-load-bearing extensionless dotfiles (issue #1833): checked by
-    # exact basename immediately after the exempt-pattern check so it cannot
-    # be shadowed by any later extension-based or path-based branch (JSON,
-    # .oct.md, code-extension, or default fall-through all key off suffixes
-    # or directory segments these basenames don't have).
-    if path.rsplit("/", 1)[-1] in _SECURITY_BASENAMES:
-        return "SECURITY"
 
     # JSON: only generated ones are exempt
     if path.endswith(".json"):
