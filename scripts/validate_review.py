@@ -209,6 +209,18 @@ _SECURITY_PATTERNS = [
     r"(^|/)path_utils",
 ]
 
+# Security-load-bearing basenames (issue #1833): leading-dot, extensionless
+# files in consumer repos that gate a security invariant (pgtap quarantine
+# list, RLS drift-exception ledger). Neither the .md/tests/.lock exempt
+# patterns nor any extension-based rule below can match a leading-dot
+# extensionless file, so these are matched by exact basename instead.
+# MIP: two basenames, no configurable per-consumer-repo path list — add a
+# third only when a third real consumer exists.
+_SECURITY_BASENAMES = {
+    ".pgtap-quarantine",
+    ".drift-exceptions",
+}
+
 # OCTAVE types that classify as EXECUTABLE_SPEC
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
@@ -260,6 +272,14 @@ def _classify_file_facet(path: str) -> str | None:
     # Check standard exempt patterns
     if any(re.match(pattern, path) for pattern in exempt_patterns):
         return None
+
+    # Security-load-bearing extensionless dotfiles (issue #1833): checked by
+    # exact basename immediately after the exempt-pattern check so it cannot
+    # be shadowed by any later extension-based or path-based branch (JSON,
+    # .oct.md, code-extension, or default fall-through all key off suffixes
+    # or directory segments these basenames don't have).
+    if path.rsplit("/", 1)[-1] in _SECURITY_BASENAMES:
+        return "SECURITY"
 
     # JSON: only generated ones are exempt
     if path.endswith(".json"):
