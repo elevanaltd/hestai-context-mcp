@@ -3055,8 +3055,7 @@ class TestVendorGuardSegmentAnchoringAndCasefold:
         one segment-anywhere semantics for both markers, not root-only
         for 'vendor/' and anywhere for 'node_modules/'."""
         assert (
-            validate_review._classify_file_facet("app/vendor/.pgtap-quarantine")
-            == "ROUTINE_CODE"
+            validate_review._classify_file_facet("app/vendor/.pgtap-quarantine") == "ROUTINE_CODE"
         )
 
     def test_capitalized_vendor_segment_is_casefolded(self):
@@ -3078,6 +3077,4 @@ class TestVendorGuardSegmentAnchoringAndCasefold:
         merely 'vendors' (plural, a different real directory name) must
         not be treated as vendored either -- the fix requires an EXACT
         casefolded segment match, not a segment-level substring test."""
-        assert (
-            validate_review._classify_file_facet("vendors/.pgtap-quarantine") == "SECURITY"
-        )
+        assert validate_review._classify_file_facet("vendors/.pgtap-quarantine") == "SECURITY"

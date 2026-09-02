@@ -249,8 +249,36 @@ _SECURITY_BASENAMES_CASEFOLDED: frozenset[str] = frozenset(
 # guard narrows WHEN the FIRST-position check fires; it does not move
 # where the check sits (that ordering, ahead of ^tests/.*$, remains
 # load-bearing and mutation-tested from round 3).
-_VENDOR_LEADING_PREFIX = "vendor/"
-_VENDOR_PATH_MARKER = "node_modules/"
+#
+# ROUND 6 FIX (BLOCKING, found independently by gemini and codex): the
+# original round-5 implementation tested `"node_modules/" in path` -- an
+# UNANCHORED SUBSTRING check -- so a real, unrelated directory whose name
+# merely CONTAINS "node_modules" (e.g. "my_node_modules") silently
+# matched too, exempting a genuinely security-relevant path from
+# classification: a true security-classification bypass, not merely an
+# over-broad exemption. Meanwhile "vendor/" used a root-only
+# `path.startswith(...)` check, so a nested `app/vendor/...` path was NOT
+# treated as vendored even though a nested `vendor/node_modules/...` path
+# already was via the substring marker -- an inconsistent semantics
+# between the two markers. Neither marker was casefolded, so `Vendor/`
+# and `Node_Modules/` (case variants a case-insensitive filesystem, e.g.
+# macOS, can produce for the same on-disk directory) evaded the guard
+# entirely.
+#
+# Fixed by matching both markers on an EXACT, casefolded PATH SEGMENT
+# (split on "/"), anywhere in the path -- one semantics for both markers,
+# consistent with the casefolded basename set above.
+_VENDOR_PATH_SEGMENTS_CASEFOLDED = frozenset({"vendor", "node_modules"})
+
+
+def _is_vendored_path(path: str) -> bool:
+    """Return True if any path segment is exactly 'vendor' or
+    'node_modules' (casefolded), anywhere in the path -- not a substring
+    or root-only prefix match."""
+    return any(
+        segment.casefold() in _VENDOR_PATH_SEGMENTS_CASEFOLDED for segment in path.split("/")
+    )
+
 
 # OCTAVE types that classify as EXECUTABLE_SPEC
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
@@ -298,7 +326,7 @@ def _classify_file_facet(path: str) -> str | None:
     # this check first, ahead of ALL other branches, is what actually
     # guarantees it cannot be shadowed -- not a claim about what the later
     # branches happen to match.
-    is_vendored = path.startswith(_VENDOR_LEADING_PREFIX) or _VENDOR_PATH_MARKER in path
+    is_vendored = _is_vendored_path(path)
     if not is_vendored and path.rsplit("/", 1)[-1].casefold() in _SECURITY_BASENAMES_CASEFOLDED:
         return "SECURITY"
 
