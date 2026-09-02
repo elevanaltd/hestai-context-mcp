@@ -31,6 +31,7 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_ce_approval,
     has_civ_approval,
     has_crs_approval,
+    has_gr_approval,
     has_ho_review,
     has_pe_approval,
     has_self_review,
@@ -161,6 +162,19 @@ def _matches_role_gate(comment: str, role: str) -> bool:
     header case and for driving defect-B's dedup -- but it is NOT the safety
     boundary. This function, used symmetrically for BOTH directions in
     submit_review(), is.
+
+    SR also matches the legacy GR alias (elevana-studio#1851, final rework
+    round; CIV reproduction). GR was renamed to SR, and
+    review_formats.has_gr_approval() still matches BOTH the GR and SR
+    prefixes for backward compatibility with pre-rename comment text.
+    validate_review.py's CI-side SR checker already ORs in
+    has_gr_approval() (see its _role_checkers["SR"] lambda) -- omitting it
+    here meant a GR-prefixed foreign-role body cleared CI's SR gate while
+    this function saw nothing to reject. This one-role difference is
+    exactly the class of drift tests/test_validate_review.py::
+    TestSubmitReviewCiParity now guards against for every CI-checked role,
+    not just SR: it fails automatically the next time either file's
+    matcher set for any shared role diverges.
     """
     if role == "CRS":
         return has_crs_approval([comment])
@@ -173,7 +187,7 @@ def _matches_role_gate(comment: str, role: str) -> bool:
     elif role == "PE":
         return has_pe_approval([comment])
     elif role == "SR":
-        return has_sr_approval([comment])
+        return has_sr_approval([comment]) or has_gr_approval([comment])
     elif role == "IL":
         return has_self_review([comment])
     elif role == "HO":
