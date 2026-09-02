@@ -3216,7 +3216,6 @@ class TestOffendingTextQuotesMatchedLine:
         assert "CE APPROVED: fine actually" in error
         assert "CE BLOCKED: Summary of concerns." not in error
 
-
     def test_offending_line_isolated_across_cr_line_separator(self):
         """HIGH (elevana-studio#1851, third rework round): _find_matching_
         line() used comment.split("\n") for both the scan and the
