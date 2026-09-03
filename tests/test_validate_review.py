@@ -2979,11 +2979,12 @@ class TestSecurityBasenameSkipsVendoredPaths:
     altogether -- the failure mode this whole thread exists to prevent.
 
     Fix, minimally, MIP-consistent with the basenames themselves: skip the
-    basename check for `node_modules/` anywhere in the path, or a leading
-    `vendor/` -- two entries, no configurable list. The check's FIRST
-    position ahead of the ^tests/ exemption is unchanged and remains
-    load-bearing (round 3 mutation-tested); this only narrows WHEN the
-    first-position check fires, not WHERE it sits."""
+    basename check when `vendor` or `node_modules` appears as an exact,
+    casefolded path segment anywhere in the path (see `_is_vendored_path`,
+    segment-anchored per the round-6 fix) -- two entries, no configurable
+    list. The check's FIRST position ahead of the ^tests/ exemption is
+    unchanged and remains load-bearing (round 3 mutation-tested); this
+    only narrows WHEN the first-position check fires, not WHERE it sits."""
 
     def test_node_modules_anywhere_in_path_is_not_forced_security(self):
         assert (

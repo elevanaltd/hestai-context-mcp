@@ -211,9 +211,15 @@ _SECURITY_PATTERNS = [
 
 # Security-load-bearing basenames (issue #1833): leading-dot, extensionless
 # files in consumer repos that gate a security invariant (pgtap quarantine
-# list, RLS drift-exception ledger). Neither the .md/tests/.lock exempt
-# patterns nor any extension-based rule below can match a leading-dot
-# extensionless file, so these are matched by exact basename instead.
+# list, RLS drift-exception ledger). Extension-based rules -- the .md and
+# .lock exempt patterns, and every extension-based facet rule below --
+# cannot match a leading-dot extensionless file, since each requires a
+# literal extension; exact-basename matching is required instead. The
+# ^tests/.*$ exempt pattern is NOT extension-based and DOES match such
+# paths (e.g. tests/.pgtap-quarantine matches ^tests/.*$ perfectly well)
+# -- which is exactly why this basename check must run first, ahead of
+# the exempt block below, rather than relying on any pattern there to
+# leave these paths unmatched.
 # MIP: two basenames, no configurable per-consumer-repo path list — add a
 # third only when a third real consumer exists.
 _SECURITY_BASENAMES: frozenset[str] = frozenset(
