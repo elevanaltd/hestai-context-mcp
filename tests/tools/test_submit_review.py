@@ -3267,6 +3267,7 @@ class TestSubmitReviewCiParity:
             "probe(s) satisfy this role:\n" + "\n".join(mismatches)
         )
 
+
 # Offending-text quoting must name the MATCHED line, not always line 1
 # (elevana-studio#1851, final rework round, HIGH non-blocking -- found
 # independently by CE and CIV, coordinator-confirmed reproduction).
