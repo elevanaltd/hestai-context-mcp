@@ -2845,8 +2845,11 @@ class TestSecurityLoadBearingExtensionlessDotfiles:
     (ROUTINE_CODE), so a small quarantine-only PR rewriting quarantine-gate
     enforcement logic was classified TIER_1_SELF with zero required
     reviewers -- verified against main's copy of classify_pr_facets() for
-    this exact single-file, 3-line-changed shape -- rather than the
-    TIER_3_CRITICAL/CIV classification the SECURITY facet requires.
+    this exact single-file, 3-line-changed shape -- rather than what the
+    SECURITY facet guarantees: CIV present in required_roles and a tier
+    floor of TIER_3_CRITICAL. A declared escalation role such as PE can lift
+    the tier further, to TIER_4_STRATEGIC, but does not remove CIV or lower
+    the floor.
     """
 
     def test_pgtap_quarantine_classifies_security(self):
