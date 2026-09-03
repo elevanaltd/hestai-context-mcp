@@ -12,10 +12,23 @@ TDD RED phase: These tests are written before the implementation.
 """
 
 import io
+import json
+import subprocess
+import sys
 import tokenize
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Import validate_review.py (the CI-side gate script) as ground truth for
+# TestSubmitReviewCiParity below -- moved here from tests/test_validate_review.py
+# (elevana-studio#1851 PR split, round 6): the test verifies submit_review.py's
+# _matches_role_gate() agrees with validate_review.py's per-role checker, so it
+# tests THIS module's subject and belongs in THIS file, even though it also
+# imports validate_review.py as its independent ground truth.
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+import validate_review  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -3028,3 +3041,229 @@ class TestReviewGateRetriggerGating:
         assert '"retrigger": retrigger,' in mutant_source
 
         assert _gating_reads_would_clear_not_literal_verdict(mutant_source) is False
+
+
+# ---------------------------------------------------------------------------
+# GR legacy-alias foreign-gate gap (elevana-studio#1851, second rework round,
+# BLOCKING -- CIV reproduction, coordinator-confirmed).
+#
+# _matches_role_gate() (submit_review.py) maps SR to has_sr_approval() ONLY.
+# scripts/validate_review.py's CI-side per-role checker maps SR to
+# has_sr_approval() OR has_gr_approval() -- "GR" was renamed to "SR", and
+# has_gr_approval() still matches both prefixes for backward compatibility
+# with pre-rename comments. Because the cross-role gate-corruption guard
+# (Step 2a) only tests submit_review's OWN matcher set, a body opening
+# "GR APPROVED: ..." submitted under a DIFFERENT role (e.g. role="CE") does
+# NOT trip has_sr_approval() -- so Step 2a sees no foreign-gate clear -- yet
+# CI's checker DOES accept it as an SR approval. A single CE-role comment
+# therefore silently satisfies CI's SR requirement.
+#
+# This matters more than its size suggests: SR is the sole required
+# reviewer for the GOVERNANCE facet, and SR could not bind at all during
+# this PR's own review cycle (Vault skill drift, elevana-studio#67) -- so
+# the scarcest, most bypass-pressured approval was also the one that was
+# spoofable.
+#
+# The earlier PR-body claim that the GR alias was "confirmed inert" was a
+# FALSE_RATIONALE of exactly the class this PR's own taxonomy warns against:
+# it is TRUE that "GR" cannot be a *submitted* role (absent from
+# VALID_ROLES, so it can never reach _matches_role_gate() as the `role`
+# argument) and FALSE that GR-shaped text cannot clear a *foreign* gate
+# (has_gr_approval() runs against arbitrary comment text regardless of
+# what role submitted it).
+#
+# FIX: add the has_gr_approval() disjunct to SR's branch in
+# _matches_role_gate(), matching validate_review.py's checker exactly, and
+# add a durable parity test (tests/test_validate_review.py::
+# TestSubmitReviewCiParity) that iterates every CI-checked role and would
+# have failed on this exact divergence before the fix existed.
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestGrAliasForeignGateGap:
+    """SR's real gate matcher must accept the GR legacy alias, matching
+    validate_review.py's CI-side checker exactly -- both directions."""
+
+    def test_gr_approval_on_foreign_role_body_is_rejected(self):
+        """role='CE' with a body containing 'GR APPROVED: ...' on its own
+        line must be rejected -- that text clears CI's SR requirement even
+        though has_sr_approval() alone does not see it."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_gr_approval,
+            has_sr_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation is sound.\nGR APPROVED: standards check clean."
+        finished = format_review_comment(role="CE", verdict="APPROVED", assessment=assessment)
+        # Pre-condition, proven against the real matchers rather than
+        # asserted on faith: has_sr_approval() alone misses this (the
+        # narrower matcher submit_review used before the fix), but
+        # has_gr_approval() -- the SAME function CI's checker ORs in --
+        # does clear on it.
+        assert has_sr_approval([finished]) is False
+        assert has_gr_approval([finished]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_sr_blocked_with_gr_approval_text_breaches_own_gate_invariant(self):
+        """Second path (CIV): role='SR', verdict='BLOCKED' with a body that
+        contains 'GR APPROVED: ...' clears SR's OWN real gate via the GR
+        alias -- a breach of the Step 2b symmetric fail-open invariant
+        (a non-approving verdict must never emit a comment that satisfies
+        the role's real gate matcher), same root cause as the foreign-role
+        case above."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_gr_approval,
+            has_sr_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "There are real issues.\nGR APPROVED: oops this reads as an approval."
+        finished = format_review_comment(role="SR", verdict="BLOCKED", assessment=assessment)
+        assert has_sr_approval([finished]) is False
+        assert has_gr_approval([finished]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="SR",
+            verdict="BLOCKED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+
+# ---------------------------------------------------------------------------
+# submit_review <-> validate_review.py socket-pair parity (elevana-studio
+# #1851, second rework round, BLOCKING -- CIV reproduction).
+#
+# scripts/validate_review.py (this CI gate) and submit_review.py (the
+# posting tool) are a socket pair: submit_review's Step 2a cross-role
+# gate-corruption guard only protects the CI gate to the extent it uses
+# the SAME approval-matcher functions, for the SAME roles, as CI's own
+# per-role checker. Nothing currently holds the two in agreement except
+# manual discipline -- which already broke once: validate_review.py's SR
+# checker ORs in the legacy has_gr_approval() alias (GR was renamed to SR;
+# the alias still matches pre-rename comment text for backward
+# compatibility), but submit_review._matches_role_gate() mapped SR to
+# has_sr_approval() alone. A GR-shaped foreign-role body therefore cleared
+# CI's SR requirement while submit_review's own guard saw nothing to
+# reject.
+#
+# This test iterates every role validate_review.py's check_pr_comments()
+# actually verifies via its required_roles path (TMG, CRS, CE, CIV, PE,
+# SR) and, for each of the canonical positive-approval probes for every
+# role (including the GR legacy alias), asserts CI's real acceptance
+# and submit_review's real acceptance agree. It is intentionally scoped
+# to those six roles: IL and HO are verified through a STRUCTURALLY
+# DIFFERENT mechanism in validate_review.py -- the TIER_1_SELF self-review
+# branch (checked only when tier=="TIER_1_SELF" and required_roles is
+# empty), not the _role_checkers/required_roles dispatch this test
+# exercises -- so they are out of scope for this particular parity check
+# by design, not silently dropped from coverage.
+#
+# KNOWN LIMIT (recorded, not fixed): this test compares the copy of
+# validate_review.py and review_formats.py installed in THIS repo's
+# venv against the copy of review_formats.py submit_review.py imports
+# from the SAME repo -- i.e. it proves parity within one commit of this
+# repo. It does NOT, and cannot, prove parity against what a consumer
+# repo's CI actually runs, because review-gate.yml sparse-checks-out
+# scripts/validate_review.py and review_formats.py from `main` at
+# workflow-run time (see PR body deploy-path note), independent of
+# whatever version of submit_review.py posted the comment. Parity holds
+# only as far as version alignment between the poster and the CI gate's
+# main-branch snapshot does -- a pre-existing property of the unpinned
+# socket, not introduced or fixed by this test.
+# ---------------------------------------------------------------------------
+@pytest.mark.security
+class TestSubmitReviewCiParity:
+    """submit_review._matches_role_gate() and validate_review.py's CI-side
+    per-role checker must accept exactly the same approval-matcher
+    functions for every role CI actually gates on required_roles."""
+
+    # Canonical positive probe per underlying review_formats matcher
+    # function. Each probe is a single line naming ONE role/alias so a
+    # mismatch pinpoints exactly which matcher function diverges.
+    _PROBES: dict[str, str] = {
+        "TMG": "TMG APPROVED: probe text",
+        "CRS": "CRS APPROVED: probe text",
+        "CE": "CE APPROVED: probe text",
+        "CIV": "CIV APPROVED: probe text",
+        "PE": "PE APPROVED: probe text",
+        "SR": "SR APPROVED: probe text",
+        "GR": "GR APPROVED: probe text",  # legacy alias, not in VALID_ROLES
+    }
+
+    # Roles validate_review.py's check_pr_comments() actually verifies via
+    # its required_roles / _role_checkers dispatch. IL and HO are excluded
+    # deliberately -- see module-level comment above.
+    _CI_CHECKED_ROLES = ["TMG", "CRS", "CE", "CIV", "PE", "SR"]
+
+    @staticmethod
+    def _ci_accepts(monkeypatch, role: str, probe_text: str) -> bool:
+        """True if validate_review.check_pr_comments() would accept
+        ``probe_text`` as satisfying ``role``, mocking the ``gh pr view``
+        call it makes internally."""
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("PR_NUMBER", "999")
+
+        def mock_run(*args, **kwargs):
+            mock = MagicMock()
+            mock.stdout = json.dumps(
+                {
+                    "body": "",
+                    "comments": [{"author": {"login": "reviewer1"}, "body": probe_text}],
+                    "reviews": [],
+                }
+            )
+            return mock
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        approved, _message, _missing = validate_review.check_pr_comments(
+            required_roles={role}, tier="TIER_2_STANDARD"
+        )
+        return approved
+
+    @staticmethod
+    def _submit_review_accepts(role: str, probe_text: str) -> bool:
+        """True if submit_review._matches_role_gate() would accept
+        ``probe_text`` as satisfying ``role``."""
+        from hestai_context_mcp.tools.submit_review import _matches_role_gate
+
+        return _matches_role_gate(probe_text, role)
+
+    @pytest.mark.parametrize("role", _CI_CHECKED_ROLES)
+    def test_matcher_acceptance_agrees_for_every_probe(self, role: str, monkeypatch):
+        """For a fixed required role, every probe's CI-acceptance must
+        match submit_review's acceptance -- this is the assertion that
+        fails concretely on role='SR', probe='GR' before the fix (CI
+        accepts via the legacy alias; submit_review did not)."""
+        mismatches = []
+        for probe_name, probe_text in self._PROBES.items():
+            ci_result = self._ci_accepts(monkeypatch, role, probe_text)
+            submit_review_result = self._submit_review_accepts(role, probe_text)
+            if ci_result != submit_review_result:
+                mismatches.append(
+                    f"probe={probe_name!r} ({probe_text!r}): "
+                    f"CI={ci_result} submit_review={submit_review_result}"
+                )
+        assert not mismatches, (
+            f"Parity mismatch for required role={role!r} -- "
+            "validate_review.py (CI) and submit_review.py's "
+            "_matches_role_gate() disagree on whether the following "
+            "probe(s) satisfy this role:\n" + "\n".join(mismatches)
+        )
+
