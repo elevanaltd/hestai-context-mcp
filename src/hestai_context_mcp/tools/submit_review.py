@@ -566,15 +566,24 @@ def submit_review(
     # (validate_review.py's _role_checkers, e.g. the SR entry) -- a
     # SEPARATE, machine-readable metadata channel (the hidden
     # `<!-- review: {...} -->` JSON comment format_review_comment() emits)
-    # that this loop does NOT inspect at all. Reproduced: a comment whose
-    # VISIBLE text never claims any approval but whose metadata comment
-    # names a different role/verdict (e.g. an embedded
-    # `<!-- review: {"role":"X","verdict":"SELF-REVIEWED"} -->` alongside
-    # unrelated BLOCKED prose) still posts "ok" here, and CI's `_meta_has`
-    # half would read it as a satisfied approval for role X. This
-    # metadata-channel gap is PRE-EXISTING (not introduced by this PR) and
-    # is explicitly NOT fixed here -- it is tracked as a separate issue,
-    # filed by the coordinator. Do not chase it in this PR.
+    # that this loop does NOT inspect at all. Reproduced (round 8, PROSE
+    # item -- caught by CE, executing the real check_pr_comments): feeding
+    # a RECOGNIZED role name into that metadata channel does NOT produce a
+    # false approval -- a comment with `<!-- review: {"role":"CE",
+    # "verdict":"APPROVED"} -->` next to unrelated BLOCKED prose instead
+    # trips CI's metadata/visible-text cross-validation and returns a
+    # *rejection* ("Cross-validation failure ... Possible spoofing
+    # detected"), the opposite of a false approval. The actual gap is
+    # CI's TIER_1_SELF self-review branch: a ROLE-UNCHECKED loop that
+    # returns True the instant ANY metadata entry has
+    # `verdict == "SELF-REVIEWED"` -- no role-name validation, and it
+    # fires regardless of the comment's own visible verdict. A comment
+    # whose visible text says BLOCKED but which also carries
+    # `<!-- review: {"role":"X","verdict":"SELF-REVIEWED"} -->` (X need
+    # not be a recognized role) still satisfies TIER_1_SELF and posts
+    # "ok" here. This metadata-channel gap is PRE-EXISTING (not
+    # introduced by this PR) and is explicitly NOT fixed here -- it is
+    # tracked as issue #155. Do not chase it in this PR.
     for other_role in VALID_ROLES:
         if other_role == role:
             continue
