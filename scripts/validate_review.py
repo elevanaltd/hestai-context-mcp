@@ -209,6 +209,83 @@ _SECURITY_PATTERNS = [
     r"(^|/)path_utils",
 ]
 
+# Security-load-bearing basenames (issue #1833): leading-dot, extensionless
+# files in consumer repos that gate a security invariant (pgtap quarantine
+# list, RLS drift-exception ledger). Extension-based rules -- the .md and
+# .lock exempt patterns, and every extension-based facet rule below --
+# cannot match a leading-dot extensionless file, since each requires a
+# literal extension; exact-basename matching is required instead. The
+# ^tests/.*$ exempt pattern is NOT extension-based and DOES match such
+# paths (e.g. tests/.pgtap-quarantine matches ^tests/.*$ perfectly well)
+# -- which is exactly why this basename check must run first, ahead of
+# the exempt block below, rather than relying on any pattern there to
+# leave these paths unmatched.
+# MIP: two basenames, no configurable per-consumer-repo path list — add a
+# third only when a third real consumer exists.
+_SECURITY_BASENAMES: frozenset[str] = frozenset(
+    {
+        ".pgtap-quarantine",
+        ".drift-exceptions",
+    }
+)
+
+# Casefolded once at module load (round 5, BLOCKING -- codex/CIV catch):
+# the basename comparison must be case-INSENSITIVE. Matters more on
+# macOS, where the filesystem is case-insensitive, so the SAME on-disk
+# file can reach this classifier under a different casing than the set
+# above literally contains (e.g. supabase/tests/.pgTap-quarantine is the
+# SAME file as .pgtap-quarantine on a case-insensitive filesystem, but was
+# previously an exact-case string-membership miss -> silent ROUTINE_CODE
+# fall-through). Precomputed once here rather than casefolding the set on
+# every _classify_file_facet() call.
+_SECURITY_BASENAMES_CASEFOLDED: frozenset[str] = frozenset(
+    name.casefold() for name in _SECURITY_BASENAMES
+)
+
+# Vendored-path guard (round 5, BLOCKING -- gemini/CRS catch). Moving the
+# basename check to the FIRST position (round 3, correct and required to
+# close the ^tests/.*$ shadowing hole) made it also fire on VENDORED
+# copies of these exact basenames -- a third-party dependency tree
+# checked into node_modules/ or vendor/ can legitimately contain a
+# same-named file with zero bearing on THIS repo's security posture. A
+# spurious TIER_3_CRITICAL/four-role demand on every such vendored path in
+# every consumer repo is exactly the gate noise this thread has warned
+# pushes operators toward bypassing the gate. MIP: two entries, no
+# configurable list -- same posture as _SECURITY_BASENAMES itself. This
+# guard narrows WHEN the FIRST-position check fires; it does not move
+# where the check sits (that ordering, ahead of ^tests/.*$, remains
+# load-bearing and mutation-tested from round 3).
+#
+# ROUND 6 FIX (BLOCKING, found independently by gemini and codex): the
+# original round-5 implementation tested `"node_modules/" in path` -- an
+# UNANCHORED SUBSTRING check -- so a real, unrelated directory whose name
+# merely CONTAINS "node_modules" (e.g. "my_node_modules") silently
+# matched too, exempting a genuinely security-relevant path from
+# classification: a true security-classification bypass, not merely an
+# over-broad exemption. Meanwhile "vendor/" used a root-only
+# `path.startswith(...)` check, so a nested `app/vendor/...` path was NOT
+# treated as vendored even though a nested `vendor/node_modules/...` path
+# already was via the substring marker -- an inconsistent semantics
+# between the two markers. Neither marker was casefolded, so `Vendor/`
+# and `Node_Modules/` (case variants a case-insensitive filesystem, e.g.
+# macOS, can produce for the same on-disk directory) evaded the guard
+# entirely.
+#
+# Fixed by matching both markers on an EXACT, casefolded PATH SEGMENT
+# (split on "/"), anywhere in the path -- one semantics for both markers,
+# consistent with the casefolded basename set above.
+_VENDOR_PATH_SEGMENTS_CASEFOLDED = frozenset({"vendor", "node_modules"})
+
+
+def _is_vendored_path(path: str) -> bool:
+    """Return True if any path segment is exactly 'vendor' or
+    'node_modules' (casefolded), anywhere in the path -- not a substring
+    or root-only prefix match."""
+    return any(
+        segment.casefold() in _VENDOR_PATH_SEGMENTS_CASEFOLDED for segment in path.split("/")
+    )
+
+
 # OCTAVE types that classify as EXECUTABLE_SPEC
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
@@ -243,6 +320,22 @@ def _classify_file_facet(path: str) -> str | None:
     Returns:
         Facet name string, or None if the file is exempt.
     """
+    # Security-load-bearing extensionless dotfiles (issue #1833, REWORK).
+    # Checked by exact basename FIRST -- before every other branch in this
+    # function, including the exempt-pattern block below. This placement is
+    # deliberate and was NOT the original placement: the check previously
+    # sat after the exempt_patterns block, and the pre-existing ^tests/.*$
+    # exempt pattern silently returned None for tests/.pgtap-quarantine
+    # before the security check ever ran (coordinator reproduction,
+    # rework BLOCKING 3) -- a hole worse than the original bug (full
+    # exemption, zero reviewers, rather than merely the wrong tier). Putting
+    # this check first, ahead of ALL other branches, is what actually
+    # guarantees it cannot be shadowed -- not a claim about what the later
+    # branches happen to match.
+    is_vendored = _is_vendored_path(path)
+    if not is_vendored and path.rsplit("/", 1)[-1].casefold() in _SECURITY_BASENAMES_CASEFOLDED:
+        return "SECURITY"
+
     # Bundled hub skill/pattern files (.md but NOT exempt — governance artifacts)
     # These define agent behavior and must be classified before exempt check
     if "/library/skills/" in path and path.endswith("/SKILL.md"):
