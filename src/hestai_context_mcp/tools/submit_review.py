@@ -31,6 +31,7 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_ce_approval,
     has_civ_approval,
     has_crs_approval,
+    has_gr_approval,
     has_ho_review,
     has_pe_approval,
     has_self_review,
@@ -142,6 +143,30 @@ def _validate_inputs(
     return None
 
 
+# ROUND 6 REVERT (elevana-studio#1851): the round-5 IL-literal-token-only
+# regex that used to live here (_IL_LITERAL_SELF_REVIEW_RE) was a
+# coordinator-directed error, caught cold by non-Claude primary reviewers
+# CIV and CRS. Its premise -- that a third-party self-review quote (e.g.
+# "Shaun SELF-REVIEWED: all tests pass.") clearing IL's gate under a
+# different submitted role was a FALSE rejection -- was wrong.
+# review_formats.has_self_review() is DELIBERATELY role-agnostic (matches
+# ANY word/name followed by "SELF-REVIEWED:") because CI's own
+# TIER_1_SELF fallback branch calls it directly and accepts a self-review
+# from anyone, not just a literal "IL" token. Such text genuinely clears
+# a real CI gate, so refusing it here is CORRECT; the round-5 "fix" was
+# actually a FALSE APPROVAL hole: an IL/BLOCKED verdict, or any other
+# role's verdict, that merely quoted someone else's self-review line no
+# longer tripped the foreign-gate/symmetric guards below, even though
+# has_self_review() on the same finished comment is True.
+#
+# THE GOVERNING RULE: every branch of _matches_role_gate() MUST mirror
+# its corresponding CI matcher EXACTLY -- narrower than CI is a
+# false-approval hole (this defect); wider than CI is a false rejection.
+# Never narrow a gate matcher to relieve expressive friction. The IL
+# branch below therefore calls has_self_review() directly again, exactly
+# like every other role branch mirrors its own CI matcher.
+
+
 def _matches_role_gate(comment: str, role: str) -> bool:
     """Run the role's REAL gate matcher over ``comment``, independent of verdict.
 
@@ -161,6 +186,19 @@ def _matches_role_gate(comment: str, role: str) -> bool:
     header case and for driving defect-B's dedup -- but it is NOT the safety
     boundary. This function, used symmetrically for BOTH directions in
     submit_review(), is.
+
+    SR also matches the legacy GR alias (elevana-studio#1851, final rework
+    round; CIV reproduction). GR was renamed to SR, and
+    review_formats.has_gr_approval() still matches BOTH the GR and SR
+    prefixes for backward compatibility with pre-rename comment text.
+    validate_review.py's CI-side SR checker already ORs in
+    has_gr_approval() (see its _role_checkers["SR"] lambda) -- omitting it
+    here meant a GR-prefixed foreign-role body cleared CI's SR gate while
+    this function saw nothing to reject. This one-role difference is
+    exactly the class of drift tests/test_validate_review.py::
+    TestSubmitReviewCiParity now guards against for every CI-checked role,
+    not just SR: it fails automatically the next time either file's
+    matcher set for any shared role diverges.
     """
     if role == "CRS":
         return has_crs_approval([comment])
@@ -173,7 +211,7 @@ def _matches_role_gate(comment: str, role: str) -> bool:
     elif role == "PE":
         return has_pe_approval([comment])
     elif role == "SR":
-        return has_sr_approval([comment])
+        return has_sr_approval([comment]) or has_gr_approval([comment])
     elif role == "IL":
         return has_self_review([comment])
     elif role == "HO":
@@ -194,6 +232,61 @@ def _check_would_clear_gate(comment: str, role: str, verdict: str) -> bool:
         return False
 
     return _matches_role_gate(comment, role)
+
+
+def _find_matching_line(comment: str, role: str) -> str:
+    """Return the first line of ``comment`` that itself satisfies
+    ``role``'s real gate matcher, for use in an "Offending text:" error
+    fragment.
+
+    elevana-studio#1851, final rework round, HIGH non-blocking (found
+    independently by CE and CIV). Both rejection paths that quote
+    "Offending text:" previously always quoted
+    ``comment.split(chr(10), 1)[0]`` -- unconditionally line 1 -- even when
+    the actual match was on a later line, naming an innocent line (often
+    the submitted role's own header) instead of the real offense. Since
+    matches_approval_pattern() (review_formats.py) already evaluates each
+    line independently (no cross-line lookaheads or state), testing each
+    line of ``comment`` against ``_matches_role_gate()`` in isolation
+    reproduces the exact same per-line matching the real check used to
+    decide the comment matches at all -- so WHEN some single line matches
+    in isolation, that line is guaranteed to be A line the real matcher
+    would also accept on its own, making it an accurate "Offending text:"
+    quote.
+
+    This function does NOT guarantee it identifies THE line responsible
+    for the real match in every case: if the real matcher's decision on
+    the full text arose only from a pattern spanning multiple lines (no
+    single line matches standalone), no line in this scan will match
+    either, and the fallback below quotes line 1 regardless of whether it
+    is actually implicated -- callers must not treat the returned line as
+    proof that line, and only that line, caused the match.
+
+    Falls back to line 1 if no single line matches in isolation (either
+    because the real match was genuinely cross-line, or unexpectedly),
+    so a caller that already confirmed a match on the full text always
+    gets a usable, non-empty quote.
+
+    Uses str.splitlines() (elevana-studio#1851, third rework round, HIGH
+    -- issue #154 overlap, splitlines() half fixed here) rather than
+    ``comment.split("\n")`` for BOTH the scan and the fallback.
+    ``split("\n")`` only recognises a literal LF, so a CR (U+000D) or
+    Unicode line separator (U+2028/U+2029) between an innocent line and
+    the real offense was not treated as a line break -- the scan then
+    tested (and, on match, quoted) a multi-logical-line blob spanning
+    both, disagreeing with matches_approval_pattern() (review_formats.py),
+    which already uses splitlines() internally and therefore sees the
+    true per-line boundaries. splitlines() recognises \r, \r\n, \n, and
+    the Unicode separators, so the scan now agrees with the real matcher
+    on what a "line" is. (The sorted(VALID_ROLES) determinism half of
+    issue #154 is intentionally left there -- unrelated to this string-
+    splitting defect.)
+    """
+    for line in comment.splitlines():
+        if _matches_role_gate(line, role):
+            return line
+    lines = comment.splitlines()
+    return lines[0] if lines else comment
 
 
 def _get_tier_requirements(role: str) -> str:
@@ -427,6 +520,155 @@ def submit_review(
         commit_sha=sha,
     )
 
+    # Step 2a: Cross-role gate-corruption guard (elevana-studio#1851,
+    # PARTIAL; REWORK after four-reviewer rejection -- TMG CONDITIONAL, CE
+    # CONDITIONAL, CRS BLOCKED, CIV CONDITIONAL-blocking -- of an earlier
+    # position-0 header-SHAPE denylist). CIV independently reproduced nine
+    # distinct shapes -- leading space, the "(Model)" relay annotation, a
+    # BOM character, a tab separator, markdown bold markers, the APPROVES
+    # conjugation, the GO keyword, a Turkish dotless-i (U+0131) case-fold of
+    # "CIV" (Python's re.IGNORECASE maps U+0131 up to "I"), and this
+    # codebase's own documented markdown table-row format -- that ALL
+    # bypass a position-0-of-first-line shape check while still clearing
+    # the FINISHED comment's REAL gate matcher. A shape denylist guarding a
+    # matcher that is not shape-based is guaranteed to keep leaking (see
+    # _matches_role_gate()'s own docstring below, already in this codebase
+    # before this rework: shape checks are not the safety boundary, and
+    # there should be no shape-specific denylist to maintain).
+    #
+    # The correct invariant, stated directly and applied unconditionally:
+    # if the FINISHED comment would clear ANY role's gate other than the
+    # submitted role, it is gate-corrupting regardless of where the token
+    # sits or what shape it takes, and must be hard-rejected -- there is no
+    # abstain posture and no "legitimate quoting" exception. A body that
+    # clears a foreign gate is counted by the CI gate exactly as if that
+    # role had posted it themselves; every "legitimate quoting" example
+    # tried during rework also cleared the quoted role's gate, so that
+    # premise (behind an earlier, now-removed position-zero-only test) was
+    # withdrawn. Reviewers who want to reference another role's status
+    # still can -- in a form that does not independently satisfy that
+    # role's own matcher (see
+    # TestCrossRoleGateCorruptionRejection.test_legitimate_cross_role_
+    # reference_that_does_not_clear_foreign_gate_still_posts).
+    #
+    # Implemented by running every OTHER role's REAL has_*_approval()
+    # TEXT matcher (via the same _matches_role_gate() the CI gate itself
+    # uses) over the finished comment -- not a model of the matcher, the
+    # matcher itself -- so this closes all nine TEXT-SHAPE bypasses above,
+    # and any future text-shape variant, in a single rule with no
+    # shape-specific maintenance.
+    #
+    # SCOPE CORRECTION (round 5, PROSE item -- caught by the coordinator,
+    # the prior wording here was the fifth false claim in this PR): this
+    # closes only the TEXT-matcher half of what CI actually checks per
+    # role. validate_review.py's real per-role dispatch is
+    # `_meta_has(role, "APPROVED") or <text matcher>(...)`
+    # (validate_review.py's _role_checkers, e.g. the SR entry) -- a
+    # SEPARATE, machine-readable metadata channel (the hidden
+    # `<!-- review: {...} -->` JSON comment format_review_comment() emits)
+    # that this loop does NOT inspect at all. Reproduced (round 8, PROSE
+    # item -- caught by CE, executing the real check_pr_comments): feeding
+    # a RECOGNIZED role name into that metadata channel does NOT produce a
+    # false approval -- a comment with `<!-- review: {"role":"CE",
+    # "verdict":"APPROVED"} -->` next to unrelated BLOCKED prose instead
+    # trips CI's metadata/visible-text cross-validation and returns a
+    # *rejection* ("Cross-validation failure ... Possible spoofing
+    # detected"), the opposite of a false approval. The actual gap is
+    # CI's TIER_1_SELF self-review branch: a ROLE-UNCHECKED loop that
+    # returns True the instant ANY metadata entry has
+    # `verdict == "SELF-REVIEWED"` -- no role-name validation, and it
+    # fires regardless of the comment's own visible verdict. A comment
+    # whose visible text says BLOCKED but which also carries
+    # `<!-- review: {"role":"X","verdict":"SELF-REVIEWED"} -->` (X need
+    # not be a recognized role) still satisfies TIER_1_SELF and posts
+    # "ok" here. This metadata-channel gap is PRE-EXISTING (not
+    # introduced by this PR) and is explicitly NOT fixed here -- it is
+    # tracked as issue #155. Do not chase it in this PR.
+    for other_role in VALID_ROLES:
+        if other_role == role:
+            continue
+        if _matches_role_gate(formatted_comment, other_role):
+            return {
+                "status": "error",
+                "comment_url": None,
+                "commit_sha": sha,
+                "error_type": "validation",
+                "validation": {
+                    "error": (
+                        f"Format validation failed: assessment clears the "
+                        f"{other_role} approval pattern in addition to (or "
+                        f"instead of) the submitted role '{role}'. Offending "
+                        f"text: {_find_matching_line(formatted_comment, other_role)!r}. "
+                        "A review comment must never clear a role's gate "
+                        "other than the one it is submitted under -- reword "
+                        f"the assessment so it does not read as an approval "
+                        f"for the {other_role} role."
+                    ),
+                    "would_clear_gate": True,
+                    "tier_requirements": _get_tier_requirements(role),
+                },
+                "dry_run": dry_run,
+            }
+
+    # Step 2a-bis: Cross-LABELLING guard, restored (elevana-studio#1851,
+    # third rework round -- CAPABILITY REGRESSION caught by cubic bot
+    # review, missed by four human-role reviewers and the coordinator
+    # during round 2).
+    #
+    # The gate-corruption loop above (Step 2a) checks the FINISHED
+    # comment, which is correct for its own purpose but is NOT a superset
+    # of a different, still-needed capability: cross-LABELLING, where the
+    # ASSESSMENT'S OWN ORIGINAL first line opens with a foreign role's
+    # header -- the author claiming to be a role they were not dispatched
+    # as. format_review_comment() prepends the submitted role's own header
+    # directly onto line 1 (see its "human_line = f'{prefix} {keyword}:
+    # {assessment}'" construction), so "CIV APPROVED: ..." submitted under
+    # role="CE" becomes "CE APPROVED: CIV APPROVED: ...": the "CIV" token
+    # is no longer at true line-start once prepended, so the Step 2a loop
+    # over the FINISHED comment does not see it and a CIV-remit body posted
+    # under a CE token -- the elevana-studio #1840 shape this entire
+    # thread exists for -- passed silently under the round-2-only rule.
+    #
+    # Fix: additionally test the assessment's own ORIGINAL first line
+    # (pre-formatting, pre-prepending) against every other role's real
+    # gate matcher. This is IN ADDITION to the Step 2a loop above, not a
+    # replacement for it -- the two guard different things:
+    #   - Step 2a (gate-corruption): the FINISHED comment clears a
+    #     foreign role's gate, regardless of where in the body the
+    #     offending text sits.
+    #   - Step 2a-bis (cross-labelling): the ORIGINAL assessment's own
+    #     opening line names a role other than the one submitted, before
+    #     any prepending can shift its position.
+    # Guarded for the empty-assessment case (assessment.splitlines() is
+    # simply [] for an empty string, so the loop body never executes --
+    # empty assessments are rejected earlier, at the pre-existing
+    # "Assessment must not be empty" check in this same function).
+    original_first_line = assessment.splitlines()[0] if assessment.splitlines() else ""
+    for other_role in VALID_ROLES:
+        if other_role == role:
+            continue
+        if _matches_role_gate(original_first_line, other_role):
+            return {
+                "status": "error",
+                "comment_url": None,
+                "commit_sha": sha,
+                "error_type": "validation",
+                "validation": {
+                    "error": (
+                        f"Assessment's own first line opens with a "
+                        f"'{other_role}' header, but the submitted role is "
+                        f"'{role}'. Offending text: {original_first_line!r}. "
+                        "A reviewer's assessment must not open by naming a "
+                        "role other than the one actually submitting this "
+                        "review -- edit the assessment text or correct the "
+                        "role."
+                    ),
+                    "would_clear_gate": True,
+                    "tier_requirements": _get_tier_requirements(role),
+                },
+                "dry_run": dry_run,
+            }
+
     # Step 2b: Symmetric fail-open guard (rework #3). The invariant is:
     # a non-approving verdict must NEVER emit a comment that satisfies the
     # role's real gate matcher. detect_header_verdict_conflict() (Step 1)
@@ -451,7 +693,7 @@ def submit_review(
                     f"Format validation failed: '{verdict}' comment for role "
                     f"'{role}' matches the {role} approval pattern and would "
                     f"incorrectly clear the gate. Offending text: "
-                    f"{formatted_comment.split(chr(10), 1)[0]!r}. Reword the "
+                    f"{_find_matching_line(formatted_comment, role)!r}. Reword the "
                     f"assessment so it does not read as an approval for the "
                     f"{role} role."
                 ),

@@ -12,10 +12,23 @@ TDD RED phase: These tests are written before the implementation.
 """
 
 import io
+import json
+import subprocess
+import sys
 import tokenize
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Import validate_review.py (the CI-side gate script) as ground truth for
+# TestSubmitReviewCiParity below -- moved here from tests/test_validate_review.py
+# (elevana-studio#1851 PR split, round 6): the test verifies submit_review.py's
+# _matches_role_gate() agrees with validate_review.py's per-role checker, so it
+# tests THIS module's subject and belongs in THIS file, even though it also
+# imports validate_review.py as its independent ground truth.
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+import validate_review  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -866,6 +879,412 @@ class TestHeaderVerdictConflictValidation:
         )
         assert result["status"] == "error"
         assert result["error_type"] == "validation"
+
+
+# ---------------------------------------------------------------------------
+# Cross-role GATE-CORRUPTION rejection (elevana-studio#1851, PARTIAL; REWORK
+# after four-reviewer rejection of the position-0 header-shape approach).
+#
+# TMG/CE/CRS/CIV rejected the original position-0 header-shape denylist
+# (_detect_cross_role_header / _match_existing_header_token) with
+# independently reproduced false-approval evidence: CIV enumerated nine
+# distinct shapes -- leading space, the "(Model)" relay annotation, a BOM
+# character, a tab separator, markdown bold markers, the APPROVES
+# conjugation, the GO keyword, a dotless-i case-fold of "CIV" (Unicode
+# U+0131, which Python's re.IGNORECASE maps to "I"), and a markdown table
+# row -- ALL of which bypass the position-0-of-first-line shape check while
+# still clearing the FINISHED comment's REAL gate matcher (has_*_approval).
+# Four reviewers agreed: a shape denylist guarding a matcher that is not
+# shape-based is guaranteed to keep leaking. TMG additionally showed the
+# original position-zero-only control test was itself gate-corrupting: it
+# asserted status=="ok" for a body whose second line manufactures a TMG
+# approval that has_tmg_approval() actually recognises -- i.e. it ratified
+# the defect as intended behaviour. The "reviewers legitimately quote each
+# other" premise behind that test was WITHDRAWN by the coordinator after
+# CIV showed every "legitimate quoting" example CIV tried also cleared the
+# quoted role's gate.
+#
+# ROOT-CAUSE FIX (root-caused in the codebase's own prior art --
+# _matches_role_gate()'s docstring already states shape checks are not the
+# safety boundary and warns against maintaining a shape-specific denylist):
+# compose the FINISHED comment, then run every OTHER role's REAL
+# has_*_approval() matcher over it. If the finished comment would clear ANY
+# role's gate other than the submitted role, hard-reject -- unconditionally,
+# with no abstain posture, because a body that clears a foreign gate is
+# counted by the CI gate exactly as if that role had posted it. This closes
+# all nine shapes above (and any future one) in one rule, because it
+# consults the actual matcher rather than modelling it.
+#
+# NOT provenance validation: this closes the gate-CORRUPTION shape only
+# (a body that would clear an ADDITIONAL role's gate beyond the one it is
+# submitted under). It has NO ability to catch a body that self-labels with
+# the MATCHING (wrong) role and clears ONLY that role's own gate -- per
+# technical-architect deep-tier ruling, PR #1840's mislabelled verdict was
+# lexically self-consistent as CE at every layer (it never touched a second
+# role's gate), so this check would NOT have caught it. Establishing an
+# actual dispatched-reviewer identity requires a Workbench-issued dispatch
+# attestation, out of this repo's scope per North Star §4 ("agent identity
+# or governance (Vault owns)").
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestCrossRoleGateCorruptionRejection:
+    """submit_review() rejects a FINISHED comment that would clear any
+    role's gate other than the one it is submitted under -- matcher-based,
+    not shape-based. Each of CIV's nine reproduced bypass shapes is proven
+    individually (RATIFIED record ASSERTION_SCOPE: per-assertion evidence,
+    not file-level RED)."""
+
+    def test_leading_space_shape_is_rejected(self):
+        """A foreign role's approval on its own line, preceded by a space,
+        clears that role's gate and must be rejected."""
+        from hestai_context_mcp.tools.shared.review_formats import has_tmg_approval
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\n TMG APPROVED: methodology verified"
+        # Pre-condition: prove the finished comment WOULD clear TMG's real
+        # gate before asserting the tool rejects it -- this is what makes
+        # the shape a genuine bypass, not just cosmetic text.
+        from hestai_context_mcp.tools.shared.review_formats import format_review_comment
+
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_tmg_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+        assert result["comment_url"] is None
+
+    def test_model_annotation_relay_shape_is_rejected(self):
+        """The '(Model)' relay-annotation format -- the codebase's own
+        documented, tested format for relayed foreign-model verdicts --
+        clears the named role's gate and must be rejected when it names a
+        role other than the submitted one."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_tmg_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\nTMG (Codex): APPROVED methodology verified"
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_tmg_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_bom_shape_is_rejected(self):
+        """A leading BOM (Unicode format character, category Cf) before a
+        foreign role's header is stripped by the real matcher's
+        normalisation and still clears that role's gate."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_tmg_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\n\ufeffTMG APPROVED: methodology verified"
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_tmg_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_tab_separator_shape_is_rejected(self):
+        """A tab character between a foreign role's name and its verdict
+        keyword still clears that role's gate."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_tmg_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\nTMG\tAPPROVED: methodology verified"
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_tmg_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_bold_markers_shape_is_rejected(self):
+        """Markdown bold markers around a foreign role's header are
+        stripped by the real matcher before matching and still clear that
+        role's gate."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_tmg_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\n**TMG APPROVED**: methodology verified"
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_tmg_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_approves_conjugation_shape_is_rejected(self):
+        """The APPROVES conjugation (outside the header-shape token
+        allowlist) still clears the foreign role's real gate matcher, which
+        widens APPROVED to the APPROVE(D|S)? family."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_tmg_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\nTMG APPROVES: methodology verified"
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_tmg_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_go_keyword_shape_is_rejected(self):
+        """The GO keyword (outside the header-shape token allowlist) still
+        clears the foreign role's real gate matcher, which accepts GO as an
+        approval synonym."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_tmg_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\nTMG GO: methodology verified"
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_tmg_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_dotless_i_case_fold_shape_is_rejected(self):
+        """A Turkish dotless-i (U+0131) spelling of 'CIV' -- 'C\u0131V' --
+        still matches \bCIV\b under Python's re.IGNORECASE (which maps
+        U+0131 up to 'I'), so it still clears CIV's real gate matcher even
+        though it visually reads as a different token."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_civ_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\nC\u0131V APPROVED: architecture validates"
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_civ_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_markdown_table_row_shape_is_rejected(self):
+        """The markdown-table verdict-summary row -- the codebase's own
+        documented, tested format ('| CE | Gemini | **APPROVED** |') --
+        clears CE's gate when submitted under a different role. This is the
+        coordinator's original reproduction: role='SR' with a body opening
+        the table row clears CE's gate, not SR's."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_ce_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "| CE | Gemini | **APPROVED** |"
+        would_be_comment = format_review_comment(
+            role="SR", verdict="APPROVED", assessment=assessment
+        )
+        assert has_ce_approval([would_be_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="SR",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+
+    def test_cross_role_rejection_precedes_posting(self):
+        """The rejection must happen in validation, before _post_comment is
+        ever called -- regression carried over from the original (withdrawn)
+        position-0 implementation."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        with patch("hestai_context_mcp.tools.submit_review._post_comment") as mock_post:
+            result = submit_review(
+                repo="owner/repo",
+                pr_number=1,
+                role="CE",
+                verdict="APPROVED",
+                assessment="Implementation looks solid.\nTMG APPROVED: methodology verified",
+                dry_run=False,
+            )
+            assert result["status"] == "error"
+            mock_post.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "role",
+        ["CRS", "CE", "SR", "IL", "HO", "TMG", "CIV", "PE"],
+    )
+    def test_matching_role_header_still_posts_regression(self, role: str):
+        """Regression sweep: a header that AGREES with the submitted role
+        (and clears ONLY that role's own gate) must still post normally for
+        every VALID_ROLES member."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            resolve_verdict_keyword,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        keyword = resolve_verdict_keyword(role, "APPROVED")
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role=role,
+            verdict="APPROVED",
+            assessment=f"{role} {keyword}: evidence checks out",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_unknown_provenance_does_not_block(self):
+        """An assessment with NO role header at all proceeds with no block
+        and no flag -- deliberately no `role_provenance` field, since it
+        would be emitted on ~100% of calls and read as coverage nobody can
+        act on."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Architecture validates cleanly, no issues found.",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+        assert "role_provenance" not in result["validation"]
+        # Verified against the real return shape, not asserted on faith:
+        # format_review_comment() PREPENDS the role's own "CE APPROVED: "
+        # header when the assessment has none, so the FINISHED comment
+        # always carries a matching header and would_clear_gate is True
+        # here, exactly as expected.
+        assert result["validation"]["would_clear_gate"] is True
+
+    def test_legitimate_cross_role_reference_that_does_not_clear_foreign_gate_still_posts(self):
+        """INVERTED per coordinator addendum: the withdrawn premise was
+        that a body which clears a foreign role's gate should be tolerated
+        as "reviewers legitimately quoting each other" (see the removed
+        test_cross_role_scan_is_position_zero_only, which this test set
+        replaces). That premise was wrong -- if it clears the gate, the CI
+        gate counts it, so it must be rejected regardless of intent (see
+        the nine rejection tests above).
+
+        This is the positive control that protects against OVER-blocking:
+        a reviewer CAN still reference another role's verdict status in
+        prose, as long as that prose does NOT independently satisfy the
+        referenced role's own real gate matcher (e.g. no bare
+        "<ROLE> APPROVED"-shaped line). Confirmed the referenced role's
+        matcher is actually False on the finished comment, not assumed.
+        """
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_tmg_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = (
+            "Implementation is sound.\n"
+            "Test methodology (TMG) sign-off is tracked separately and is "
+            "not represented in this comment."
+        )
+        would_be_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        # Pre-condition: this phrasing does NOT clear TMG's gate -- "TMG"
+        # never appears at true line-start (it's inside a parenthetical
+        # mid-sentence), so has_tmg_approval's line-start-or-after-pipe
+        # anchor never fires.
+        assert has_tmg_approval([would_be_comment]) is False
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -2622,3 +3041,775 @@ class TestReviewGateRetriggerGating:
         assert '"retrigger": retrigger,' in mutant_source
 
         assert _gating_reads_would_clear_not_literal_verdict(mutant_source) is False
+
+
+# ---------------------------------------------------------------------------
+# GR legacy-alias foreign-gate gap (elevana-studio#1851, second rework round,
+# BLOCKING -- CIV reproduction, coordinator-confirmed).
+#
+# _matches_role_gate() (submit_review.py) maps SR to has_sr_approval() ONLY.
+# scripts/validate_review.py's CI-side per-role checker maps SR to
+# has_sr_approval() OR has_gr_approval() -- "GR" was renamed to "SR", and
+# has_gr_approval() still matches both prefixes for backward compatibility
+# with pre-rename comments. Because the cross-role gate-corruption guard
+# (Step 2a) only tests submit_review's OWN matcher set, a body opening
+# "GR APPROVED: ..." submitted under a DIFFERENT role (e.g. role="CE") does
+# NOT trip has_sr_approval() -- so Step 2a sees no foreign-gate clear -- yet
+# CI's checker DOES accept it as an SR approval. A single CE-role comment
+# therefore silently satisfies CI's SR requirement.
+#
+# This matters more than its size suggests: SR is the sole required
+# reviewer for the GOVERNANCE facet, and SR could not bind at all during
+# this PR's own review cycle (Vault skill drift, elevana-studio#67) -- so
+# the scarcest, most bypass-pressured approval was also the one that was
+# spoofable.
+#
+# The earlier PR-body claim that the GR alias was "confirmed inert" was a
+# FALSE_RATIONALE of exactly the class this PR's own taxonomy warns against:
+# it is TRUE that "GR" cannot be a *submitted* role (absent from
+# VALID_ROLES, so it can never reach _matches_role_gate() as the `role`
+# argument) and FALSE that GR-shaped text cannot clear a *foreign* gate
+# (has_gr_approval() runs against arbitrary comment text regardless of
+# what role submitted it).
+#
+# FIX: add the has_gr_approval() disjunct to SR's branch in
+# _matches_role_gate(), matching validate_review.py's checker exactly, and
+# add a durable parity test (tests/test_validate_review.py::
+# TestSubmitReviewCiParity) that iterates every CI-checked role and would
+# have failed on this exact divergence before the fix existed.
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestGrAliasForeignGateGap:
+    """SR's real gate matcher must accept the GR legacy alias, matching
+    validate_review.py's CI-side checker exactly -- both directions."""
+
+    def test_gr_approval_on_foreign_role_body_is_rejected(self):
+        """role='CE' with a body containing 'GR APPROVED: ...' on its own
+        line must be rejected -- that text clears CI's SR requirement even
+        though has_sr_approval() alone does not see it."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_gr_approval,
+            has_sr_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation is sound.\nGR APPROVED: standards check clean."
+        finished = format_review_comment(role="CE", verdict="APPROVED", assessment=assessment)
+        # Pre-condition, proven against the real matchers rather than
+        # asserted on faith: has_sr_approval() alone misses this (the
+        # narrower matcher submit_review used before the fix), but
+        # has_gr_approval() -- the SAME function CI's checker ORs in --
+        # does clear on it.
+        assert has_sr_approval([finished]) is False
+        assert has_gr_approval([finished]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_sr_blocked_with_gr_approval_text_breaches_own_gate_invariant(self):
+        """Second path (CIV): role='SR', verdict='BLOCKED' with a body that
+        contains 'GR APPROVED: ...' clears SR's OWN real gate via the GR
+        alias -- a breach of the Step 2b symmetric fail-open invariant
+        (a non-approving verdict must never emit a comment that satisfies
+        the role's real gate matcher), same root cause as the foreign-role
+        case above."""
+        from hestai_context_mcp.tools.shared.review_formats import (
+            format_review_comment,
+            has_gr_approval,
+            has_sr_approval,
+        )
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "There are real issues.\nGR APPROVED: oops this reads as an approval."
+        finished = format_review_comment(role="SR", verdict="BLOCKED", assessment=assessment)
+        assert has_sr_approval([finished]) is False
+        assert has_gr_approval([finished]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="SR",
+            verdict="BLOCKED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+
+# ---------------------------------------------------------------------------
+# submit_review <-> validate_review.py socket-pair parity (elevana-studio
+# #1851, second rework round, BLOCKING -- CIV reproduction).
+#
+# scripts/validate_review.py (this CI gate) and submit_review.py (the
+# posting tool) are a socket pair: submit_review's Step 2a cross-role
+# gate-corruption guard only protects the CI gate to the extent it uses
+# the SAME approval-matcher functions, for the SAME roles, as CI's own
+# per-role checker. Nothing currently holds the two in agreement except
+# manual discipline -- which already broke once: validate_review.py's SR
+# checker ORs in the legacy has_gr_approval() alias (GR was renamed to SR;
+# the alias still matches pre-rename comment text for backward
+# compatibility), but submit_review._matches_role_gate() mapped SR to
+# has_sr_approval() alone. A GR-shaped foreign-role body therefore cleared
+# CI's SR requirement while submit_review's own guard saw nothing to
+# reject.
+#
+# This test iterates every role validate_review.py's check_pr_comments()
+# actually verifies via its required_roles path (TMG, CRS, CE, CIV, PE,
+# SR) and, for each of the canonical positive-approval probes for every
+# role (including the GR legacy alias), asserts CI's real acceptance
+# and submit_review's real acceptance agree. It is intentionally scoped
+# to those six roles: IL and HO are verified through a STRUCTURALLY
+# DIFFERENT mechanism in validate_review.py -- the TIER_1_SELF self-review
+# branch (checked only when tier=="TIER_1_SELF" and required_roles is
+# empty), not the _role_checkers/required_roles dispatch this test
+# exercises -- so they are out of scope for this particular parity check
+# by design, not silently dropped from coverage.
+#
+# KNOWN LIMIT (recorded, not fixed): this test compares the copy of
+# validate_review.py and review_formats.py installed in THIS repo's
+# venv against the copy of review_formats.py submit_review.py imports
+# from the SAME repo -- i.e. it proves parity within one commit of this
+# repo. It does NOT, and cannot, prove parity against what a consumer
+# repo's CI actually runs, because review-gate.yml sparse-checks-out
+# scripts/validate_review.py and review_formats.py from `main` at
+# workflow-run time (see PR body deploy-path note), independent of
+# whatever version of submit_review.py posted the comment. Parity holds
+# only as far as version alignment between the poster and the CI gate's
+# main-branch snapshot does -- a pre-existing property of the unpinned
+# socket, not introduced or fixed by this test.
+# ---------------------------------------------------------------------------
+@pytest.mark.security
+class TestSubmitReviewCiParity:
+    """submit_review._matches_role_gate() and validate_review.py's CI-side
+    per-role checker must accept exactly the same approval-matcher
+    functions for every role CI actually gates on required_roles."""
+
+    # Canonical positive probe per underlying review_formats matcher
+    # function. Each probe is a single line naming ONE role/alias so a
+    # mismatch pinpoints exactly which matcher function diverges.
+    _PROBES: dict[str, str] = {
+        "TMG": "TMG APPROVED: probe text",
+        "CRS": "CRS APPROVED: probe text",
+        "CE": "CE APPROVED: probe text",
+        "CIV": "CIV APPROVED: probe text",
+        "PE": "PE APPROVED: probe text",
+        "SR": "SR APPROVED: probe text",
+        "GR": "GR APPROVED: probe text",  # legacy alias, not in VALID_ROLES
+    }
+
+    # Roles validate_review.py's check_pr_comments() actually verifies via
+    # its required_roles / _role_checkers dispatch. IL and HO are excluded
+    # deliberately -- see module-level comment above.
+    _CI_CHECKED_ROLES = ["TMG", "CRS", "CE", "CIV", "PE", "SR"]
+
+    @staticmethod
+    def _ci_accepts(monkeypatch, role: str, probe_text: str) -> bool:
+        """True if validate_review.check_pr_comments() would accept
+        ``probe_text`` as satisfying ``role``, mocking the ``gh pr view``
+        call it makes internally."""
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("PR_NUMBER", "999")
+
+        def mock_run(*args, **kwargs):
+            mock = MagicMock()
+            mock.stdout = json.dumps(
+                {
+                    "body": "",
+                    "comments": [{"author": {"login": "reviewer1"}, "body": probe_text}],
+                    "reviews": [],
+                }
+            )
+            return mock
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        approved, _message, _missing = validate_review.check_pr_comments(
+            required_roles={role}, tier="TIER_2_STANDARD"
+        )
+        return approved
+
+    @staticmethod
+    def _submit_review_accepts(role: str, probe_text: str) -> bool:
+        """True if submit_review._matches_role_gate() would accept
+        ``probe_text`` as satisfying ``role``."""
+        from hestai_context_mcp.tools.submit_review import _matches_role_gate
+
+        return _matches_role_gate(probe_text, role)
+
+    @pytest.mark.parametrize("role", _CI_CHECKED_ROLES)
+    def test_matcher_acceptance_agrees_for_every_probe(self, role: str, monkeypatch):
+        """For a fixed required role, every probe's CI-acceptance must
+        match submit_review's acceptance -- this is the assertion that
+        fails concretely on role='SR', probe='GR' before the fix (CI
+        accepts via the legacy alias; submit_review did not)."""
+        mismatches = []
+        for probe_name, probe_text in self._PROBES.items():
+            ci_result = self._ci_accepts(monkeypatch, role, probe_text)
+            submit_review_result = self._submit_review_accepts(role, probe_text)
+            if ci_result != submit_review_result:
+                mismatches.append(
+                    f"probe={probe_name!r} ({probe_text!r}): "
+                    f"CI={ci_result} submit_review={submit_review_result}"
+                )
+        assert not mismatches, (
+            f"Parity mismatch for required role={role!r} -- "
+            "validate_review.py (CI) and submit_review.py's "
+            "_matches_role_gate() disagree on whether the following "
+            "probe(s) satisfy this role:\n" + "\n".join(mismatches)
+        )
+
+
+# Offending-text quoting must name the MATCHED line, not always line 1
+# (elevana-studio#1851, final rework round, HIGH non-blocking -- found
+# independently by CE and CIV, coordinator-confirmed reproduction).
+#
+# Both the Step 2a cross-role-gate error and the Step 2b symmetric
+# fail-open error quoted `formatted_comment.split(chr(10), 1)[0]` --
+# unconditionally line 1 -- regardless of which line actually triggered
+# the match. On a body where the offending token is on line 2 (or, per the
+# coordinator's own reproduction, line 32 of a 60-line body), the error
+# names an innocent line (the submitted role's own header) while the real
+# offense is never shown. Misleading operator guidance on the org's merge
+# gate is a correctness bug, not cosmetic, and is fixed in this round
+# rather than deferred.
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestOffendingTextQuotesMatchedLine:
+    """The 'Offending text:' fragment in a rejection error must quote the
+    line that actually matched the foreign/own role's gate pattern, not
+    unconditionally the first line of the finished comment."""
+
+    def test_cross_role_error_quotes_offending_line_not_line_one(self):
+        """role='CE' with the TMG-clearing text on line 2 must quote line
+        2 (the actual offense), not line 1 (CE's own innocent header)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="Implementation looks solid.\nTMG APPROVED: methodology verified",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        error = result["validation"]["error"]
+        assert "TMG APPROVED: methodology verified" in error
+        assert "CE APPROVED: Implementation looks solid." not in error
+
+    def test_cross_role_error_quotes_deep_offending_line_in_long_body(self):
+        """Coordinator's exact reproduction shape: a 60-line body with the
+        offending TMG token on line 32 must quote line 32, not line 1."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        lines = (
+            ["Implementation is sound."]
+            + [f"Line {i} of the assessment body." for i in range(2, 32)]
+            + ["TMG APPROVED: methodology verified"]
+            + [f"Line {i} of the assessment body." for i in range(33, 61)]
+        )
+        assessment = "\n".join(lines)
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        error = result["validation"]["error"]
+        assert "TMG APPROVED: methodology verified" in error
+        assert "CE APPROVED: Implementation is sound." not in error
+
+    def test_symmetric_own_gate_error_quotes_offending_line(self):
+        """Step 2b (own-role, non-approving verdict clears own gate) must
+        also quote the matched line, not unconditionally line 1."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="BLOCKED",
+            assessment="Summary of concerns.\nCE APPROVED: fine actually",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        error = result["validation"]["error"]
+        assert "CE APPROVED: fine actually" in error
+        assert "CE BLOCKED: Summary of concerns." not in error
+
+    def test_offending_line_isolated_across_cr_line_separator(self):
+        """HIGH (elevana-studio#1851, third rework round): _find_matching_
+        line() used comment.split("\n") for both the scan and the
+        fallback, so a CR (U+000D) or Unicode line separator
+        (U+2028/U+2029) between the innocent header and the offending
+        token was not treated as a line break -- the quoted "Offending
+        text" then spanned BOTH the innocent line and the real offense
+        (or, worse, could return the wrong span entirely), disagreeing
+        with the gate matcher's own splitlines()-based per-line
+        evaluation. Using str.splitlines() (which recognises \r, \r\n,
+        \n, and the Unicode separators) for both the scan and the
+        fallback isolates exactly the offending line."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Implementation looks solid.\rTMG APPROVED: methodology verified"
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        error = result["validation"]["error"]
+        assert "Offending text: 'TMG APPROVED: methodology verified'" in error
+        assert "Implementation looks solid." not in error
+
+
+# ---------------------------------------------------------------------------
+# Cross-LABELLING detection, restored (elevana-studio#1851, third rework
+# round, BLOCKING -- CAPABILITY REGRESSION caught by cubic bot review,
+# missed by four human-role reviewers and the coordinator).
+#
+# The round-2 rewrite (TestCrossRoleGateCorruptionRejection) replaced the
+# round-1 position-0 header-shape check with a matcher-based rule over the
+# FINISHED comment. That rewrite was correct for what it targeted --
+# gate-corruption, where the finished comment clears an ADDITIONAL role's
+# gate -- but it silently LOST a different, still-needed capability:
+# cross-LABELLING, where the assessment's own ORIGINAL first line opens
+# with a foreign role's header, i.e. the author claims to be a role they
+# were not dispatched as. format_review_comment() prepends the submitted
+# role's own header to line 1, so "CIV APPROVED: ..." submitted under
+# role="CE" becomes "CE APPROVED: CIV APPROVED: ...", the "CIV" token is
+# no longer at line-start, no foreign matcher fires on the FINISHED
+# comment, and round 2's guard passed it silently.
+#
+# This is exactly the #1840 shape this entire thread exists for: a
+# CIV-remit body posted under a CE token. The two capabilities are
+# DIFFERENT and both are required:
+#   - gate-corruption (round 2, kept AS IS, four reviewers verified it):
+#     the FINISHED comment clears a foreign role's gate.
+#   - cross-labelling (restored here): the ORIGINAL assessment's own first
+#     line opens with a foreign role's header, before any prepending.
+#
+# Fix: additionally scan assessment.splitlines()[0] (guarded for the
+# empty-assessment case) against every other role's real gate matcher, in
+# ADDITION to the existing finished-comment loop -- not instead of it.
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestCrossLabellingRestored:
+    """The assessment's own original first line, pre-formatting, must also
+    be checked against every other role's gate matcher -- restoring the
+    round-1 capability the round-2 gate-corruption rewrite silently
+    dropped."""
+
+    def test_ce_role_with_civ_labelled_original_header_is_rejected(self):
+        """Coordinator's first reproduction: role='CE', assessment opens
+        'CIV APPROVED: production readiness confirmed.' -- a CIV-remit body
+        posted under a CE token (the #1840 shape) -- must be rejected, not
+        silently posted as 'CE APPROVED: CIV APPROVED: ...'."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="CIV APPROVED: production readiness confirmed.",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+        assert "CIV" in result["validation"]["error"]
+        assert result["comment_url"] is None
+
+    def test_sr_role_with_ce_labelled_original_header_is_rejected(self):
+        """Coordinator's second reproduction: role='SR', assessment opens
+        'CE APPROVED: architecture validates the spec.' must be rejected."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="SR",
+            verdict="APPROVED",
+            assessment="CE APPROVED: architecture validates the spec.",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+        assert "CE" in result["validation"]["error"]
+        assert result["comment_url"] is None
+
+    def test_resurrection_round1_cross_label_ce_over_civ_still_rejected(self):
+        """RESURRECTION TEST -- guards against re-dropping this capability.
+        This is the EXACT round-1 fixture (test_cross_role_leading_header_
+        is_rejected, commit 5a7f673) that was removed when round 2 replaced
+        the position-0 check with the gate-corruption-only matcher rule.
+        If this test is ever deleted or weakened again without an
+        equivalent replacement, the #1840 shape becomes postable again."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="CIV APPROVED: architecture validates...",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+        assert "CIV" in result["validation"]["error"]
+        assert result["comment_url"] is None
+
+    def test_empty_assessment_does_not_crash_the_new_scan(self):
+        """Guard the empty-assessment case explicitly: an empty or
+        whitespace-only assessment must not raise when the new first-line
+        scan runs (it fails validation earlier, on the pre-existing
+        'Assessment must not be empty' check, before this scan is ever
+        reached -- but the scan itself must also be safe in isolation)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_positive_control_gate_corruption_rule_still_rejects_finished_comment_shapes(self):
+        """Round 9 correction (TMG, PROSE item): the previous single-line
+        fixture here ("| CE | Gemini | **APPROVED** |" as the entire
+        assessment) did NOT isolate Step 2a from Step 2a-bis -- for a
+        single-line assessment, the assessment's own original first line
+        IS the only content, so Step 2a-bis (which scans only
+        assessment.splitlines()[0]) independently catches the exact same
+        shape even with Step 2a fully disabled. Verified by mutation:
+        gutting Step 2a's loop alone left the old fixture still rejected
+        (Step 2a-bis alone was sufficient), so the docstring's isolation
+        claim was false.
+
+        This fixture instead puts the foreign-role table-row shape on a
+        SECOND line, behind an innocuous same-role first line. Step 2a-bis
+        only inspects the original first line and does not see it; Step 2a
+        inspects the FINISHED comment as a whole and does. Verified by
+        mutation: disabling Step 2a alone turns this fixture GREEN->RED
+        (status flips to "ok"); disabling Step 2a-bis alone leaves it
+        unaffected (still rejected via Step 2a)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="SR",
+            verdict="APPROVED",
+            assessment="SR APPROVED: initial notes.\n| CE | Gemini | **APPROVED** |",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_positive_control_mid_line_reference_to_another_role_still_posts(self):
+        """Control against over-blocking: a body that merely REFERENCES
+        another role mid-sentence (not as its own opening header, and not
+        clearing that role's gate) must still post normally."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=(
+                "Implementation is sound. Test methodology (TMG) sign-off "
+                "is tracked separately and is not represented here."
+            ),
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_positive_control_correct_same_role_self_prefix_still_posts(self):
+        """Control against over-blocking: an assessment that correctly
+        opens with the SUBMITTED role's own header must still post
+        normally (dedup path, unaffected by the new first-line scan since
+        it never names a DIFFERENT role)."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment="CE APPROVED: evidence checks out",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# ROUND 6 CORRECTION (elevana-studio#1851): the round-5 "false REJECTION"
+# fix above was a COORDINATOR-DIRECTED ERROR, not a real defect fix. It
+# converted a correct refusal into a FALSE APPROVAL and is reverted here.
+# Caught cold by non-Claude primary reviewers CIV and CRS; reproduced by
+# the coordinator, who authored the wrong premise in round 5 and is
+# correcting it now -- NOT a misclassification by the reviewers who
+# reported the original (correct) rejection as a symptom.
+#
+# The round-5 premise was: "review_formats.has_self_review() being
+# role-agnostic is fine for CI, but _matches_role_gate()'s IL branch using
+# the SAME matcher over-rejects legitimate third-party quotes, so it needs
+# an IL-SPECIFIC, literal-token-only regex." That premise is WRONG. CI's
+# tier-1 branch calls has_self_review() DIRECTLY -- role-agnostic, matching
+# ANY word followed by "SELF-REVIEWED:". A comment like
+# "Shaun SELF-REVIEWED: all tests pass." genuinely clears CI's TIER_1_SELF
+# gate, regardless of whose comment carries it or what role submitted it.
+# The round-5 "false rejection" was the guard working CORRECTLY: rejecting
+# text that legitimately clears a real gate. Narrowing the IL branch to a
+# literal-"IL"-only regex opened exactly the hole this predicts:
+#
+#   submit_review(role="IL", verdict="BLOCKED",
+#                 assessment="Blocking: coverage regression.\n"
+#                            "Shaun SELF-REVIEWED: tests pass.")
+#     -> status "ok", but has_self_review(finished_comment) -> True.
+#     A BLOCKING verdict posts and CI credits a self-review, clearing the
+#     tier-1 gate that main's unmodified has_self_review() would have
+#     refused to let through under a non-APPROVED verdict.
+#
+#   submit_review(role="CE", verdict="APPROVED",
+#                 assessment="Implementation is sound.\n"
+#                            "**IL** SELF-REVIEWED: all tests pass.")
+#     -> status "ok" (the literal-IL regex has no markdown-bold-stripping,
+#        unlike has_self_review(), so "**IL**" at line-start does not match
+#        it -- but has_self_review() DOES match it after stripping), while
+#        has_self_review(finished_comment) -> True. A CE approval posts
+#        while independently clearing what CI treats as an IL self-review.
+#
+# _matches_role_gate() backs BOTH the foreign-role check (Step 2a) and the
+# own-gate symmetric check (Step 2b), so the round-5 narrowing broke both
+# directions at once.
+#
+# THE GOVERNING RULE (made explicit here because round 5 failed to hold
+# it): every branch of _matches_role_gate() MUST mirror the corresponding
+# CI matcher EXACTLY -- not a model of it, not a role-scoped variant of it.
+# Narrower than CI = a false-approval hole (this defect). Wider than CI =
+# a false rejection (the round-5 non-problem). Never narrow a gate matcher
+# to relieve expressive friction; if a line's text genuinely clears a real
+# CI gate, refusing it is CORRECT, even when phrased as a third-party
+# quote or a status reference. The accepted cost: a line starting
+# "<anything> SELF-REVIEWED:" is refused for every submitted role. That is
+# the same expressive tax as the markdown-table-row case already
+# documented elsewhere in this module, and it is correct, because such
+# text clears a real gate.
+#
+# Fix: _IL_LITERAL_SELF_REVIEW_RE is deleted. _matches_role_gate()'s IL
+# branch calls has_self_review() directly again, identical to every other
+# role branch's real-matcher-mirroring contract.
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestIlSelfReviewGateMirrorsCiExactly:
+    """_matches_role_gate()'s IL branch must mirror CI's role-agnostic
+    has_self_review() exactly -- no IL-specific narrowing."""
+
+    def test_third_party_self_review_quote_is_correctly_rejected_not_a_false_approval(
+        self,
+    ):
+        """Inverse of the round-5 test this replaces. The round-5 test
+        asserted this exact text 'still posts' under role='CRS' and treated
+        that as the correct, desired behaviour. It is not: the text clears
+        CI's real has_self_review() gate, so submit_review must reject it
+        as a foreign-gate clear -- posting it would silently credit a
+        self-review to a CRS-labelled comment, exactly the class of defect
+        this module exists to prevent."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Looks good.\nShaun SELF-REVIEWED: all tests pass."
+        # Ground truth: CI's real, role-agnostic matcher DOES treat this as
+        # a self-review -- which is exactly why it must be rejected here,
+        # not accepted.
+        assert has_self_review([assessment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CRS",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_reworded_self_review_reference_that_does_not_clear_the_gate_still_posts(
+        self,
+    ):
+        """Positive control: a reference to someone's prior self-review
+        that is worded so it does NOT independently satisfy
+        has_self_review() (no '<token> SELF-REVIEWED:' shape) must still
+        post normally. This proves the fix is not a blanket ban on
+        mentioning self-review -- only on text that actually clears the
+        real gate."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Looks good.\nConfirmed: Shaun completed a self-review of all tests."
+        assert has_self_review([assessment]) is False
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CRS",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+    def test_actual_il_header_under_crs_is_still_rejected(self):
+        """Control against under-blocking: a body whose original opening
+        line (or a later line, via the gate-corruption path) actually
+        opens with the literal 'IL' token must still be rejected under a
+        different submitted role."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CRS",
+            verdict="APPROVED",
+            assessment="Looks good.\nIL SELF-REVIEWED: fixed the typo myself.",
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_il_role_submitted_with_own_literal_header_still_posts_regression(self):
+        """Regression: role='IL' submitting its own canonical
+        'IL SELF-REVIEWED: ...' header must still post."""
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="APPROVED",
+            assessment="IL SELF-REVIEWED: evidence checks out",
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
+
+
+@pytest.mark.unit
+class TestIlSelfReviewFalseApprovalHoleClosed:
+    """BLOCKING 1 (round 6): concrete reproductions of the false-approval
+    hole opened by the round-5 IL-literal narrowing, now closed by the
+    revert. Each test demonstrates BOTH halves of the defect: CI's real
+    has_self_review() gate treats the text as a self-review (ground
+    truth), AND submit_review correctly refuses to let it through."""
+
+    def test_il_blocked_verdict_with_third_party_self_review_quote_is_rejected(self):
+        """Coordinator's exact reproduction #1: a BLOCKED verdict under
+        role='IL' whose assessment quotes a third party's self-review line
+        must be rejected by Step 2b (non-APPROVED-must-not-clear-gate) --
+        NOT posted as a 'BLOCKED' comment that CI's tier-1 branch reads as
+        a satisfied self-review."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import (
+            format_review_comment,
+            submit_review,
+        )
+
+        assessment = "Blocking: coverage regression.\nShaun SELF-REVIEWED: tests pass."
+        finished_comment = format_review_comment(
+            role="IL", verdict="BLOCKED", assessment=assessment
+        )
+        assert has_self_review([finished_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="IL",
+            verdict="BLOCKED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+    def test_ce_approved_with_bolded_il_self_review_quote_is_rejected(self):
+        """Coordinator's exact reproduction #2: a CE APPROVED verdict
+        whose assessment contains a markdown-bolded '**IL** SELF-REVIEWED:'
+        line must be rejected by Step 2a (cross-role gate-corruption guard)
+        as clearing the IL gate too -- the literal-token IL regex missed
+        this because it had no markdown-bold-stripping, unlike
+        has_self_review()."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import (
+            format_review_comment,
+            submit_review,
+        )
+
+        assessment = "Implementation is sound.\n**IL** SELF-REVIEWED: all tests pass."
+        finished_comment = format_review_comment(
+            role="CE", verdict="APPROVED", assessment=assessment
+        )
+        assert has_self_review([finished_comment]) is True
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="APPROVED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "error"
+        assert result["error_type"] == "validation"
+
+
+@pytest.mark.unit
+class TestSelfReviewCrossNewlineSpanRegression:
+    """HIGH 3 (round 6): the round-5 regex's ``\\s*`` separator spanned
+    newlines, disagreeing with has_self_review()'s splitlines()-based
+    per-line scan. The revert removes the offending regex entirely, but
+    this guards against any future per-line-matcher divergence."""
+
+    def test_role_token_and_self_reviewed_keyword_on_separate_lines_do_not_match(self):
+        """A role token on one line and 'SELF-REVIEWED:' on a later,
+        unrelated line must NOT be treated as a self-review by either the
+        real gate matcher or _matches_role_gate()'s IL branch -- matching
+        across a newline would disagree with has_self_review()'s
+        splitlines()-based scan, which never joins lines together."""
+        from hestai_context_mcp.tools.shared.review_formats import has_self_review
+        from hestai_context_mcp.tools.submit_review import submit_review
+
+        assessment = "Gate status:\nIL\n- SELF-REVIEWED: absent for this PR."
+        assert has_self_review([assessment]) is False
+
+        result = submit_review(
+            repo="owner/repo",
+            pr_number=1,
+            role="CE",
+            verdict="BLOCKED",
+            assessment=assessment,
+            dry_run=True,
+        )
+        assert result["status"] == "ok"
