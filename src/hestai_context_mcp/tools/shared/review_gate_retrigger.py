@@ -18,8 +18,9 @@ Scope guard: this module has authority to re-run an EXISTING workflow run
 ONLY. It must never merge, approve, dispatch arbitrary workflows, or touch
 rulesets/branch protection. Binding: HO-SUBMIT-REVIEW-GATE-RETRIGGER-20260810
 (.hestai/decisions/, RATIFIED), which inherits, not asserts, the abstain
-policy below. The workflow-scoped LISTING endpoint used for finding 4 below
-is still read-only -- it does not authorise workflow_dispatch.
+policy below. The run LISTING endpoint used below is read-only -- it does
+not authorise workflow_dispatch, and widening it was never necessary: the
+whole of rework #5 is a change of which read the module makes.
 
 Failure policy (HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724):
 re-triggering is best-effort and strictly additive to posting the verdict
@@ -41,12 +42,11 @@ Selection (rework #1, PR #148 cubic triage):
   * GitHub's rerun endpoint only accepts COMPLETED runs (a non-completed
     run 422s). Selection picks the most recent COMPLETED run among those
     matching the PR, SKIPPING OVER any newer matching run that is still
-    queued/in_progress in favour of an older completed one -- a run
-    already in flight will evaluate on its own, so there is no need to
-    wait for or abstain on it while a usable completed run exists. Only
-    when NONE of the matching runs are completed does this module abstain,
-    with a reason naming the newest matching run's non-completed state,
-    instead of attempting -- and failing -- a rerun call.
+    queued/in_progress in favour of an older completed one -- re-running a
+    completed run re-reads the comments live, so an older one serves. When
+    NONE of the matching runs are completed, this module never attempts --
+    and fails -- a rerun call; what it does instead is amended by rework
+    #5 below (it waits, rather than abstaining immediately).
 
 Selection & robustness (rework #2, all-four-reviewers CONDITIONAL triage):
   * Finding 3: a run with unverifiable ``pull_requests`` metadata no longer
@@ -55,12 +55,11 @@ Selection & robustness (rework #2, all-four-reviewers CONDITIONAL triage):
     write race this loop exists to win). "Unverifiable" only becomes the
     terminal reason once the retry budget is spent, exactly like the plain
     "not found yet" case.
-  * Finding 4: run listing is now scoped to the workflow's stable FILE name
-    via the workflow-scoped Actions endpoint
-    (``.../actions/workflows/{file}/runs``), not the mutable display name
-    a "Review Gate" -> renamed-workflow migration would silently break.
-    The page size is bounded and documented (``_MAX_PAGE_SIZE``) rather
-    than an unbounded/undocumented truncation risk.
+  * Finding 4 (SUPERSEDED by rework #5): run listing was moved off the
+    mutable display name onto the workflow's stable FILE name, via the
+    workflow-scoped Actions endpoint (``.../actions/workflows/{file}/runs``).
+    Rename-resistance was the right goal; that endpoint was the wrong
+    instrument -- see rework #5.
   * Finding 5: the ruleset's required-workflow feature enforces
     ``pull_request``, ``pull_request_target`` AND ``merge_group`` --
     selection accepts runs from any of the three rather than hardcoding
@@ -68,6 +67,38 @@ Selection & robustness (rework #2, all-four-reviewers CONDITIONAL triage):
   * Finding 2: an overall time budget (``DEFAULT_OVERALL_BUDGET_SECONDS``)
     now bounds the whole operation, checked BETWEEN steps via an
     injectable clock, with a reduced per-call timeout.
+
+Run location (rework #5): the module abstained "no completed run found"
+on EVERY ruleset-wired consuming repo. Two independent causes, one seam.
+
+  * Wrong workflow. The workflow-SCOPED endpoint from finding 4 resolves
+    ``review-gate.yml`` against the CONSUMING repo's own workflow entry.
+    A ruleset-wired repo has two entries named "Review Gate" at that same
+    path: its own caller file, and the ruleset-INJECTED required workflow
+    that actually runs. Verified on elevanaltd/elevana-studio PR #1945,
+    head 500ce6f8: the scoped listing returned ``total_count=0`` while the
+    unscoped one returned run 34159096298 (workflow id 299891129,
+    ``event=pull_request``, completed) -- an id absent from that repo's own
+    ``actions/workflows`` listing, so no amount of filename resolution can
+    reach it. The fix keeps finding 4's rename-resistance and drops only
+    its instrument: list runs UNSCOPED at the head SHA and identify the
+    gate's runs by the ``path`` each run REPORTS (``WORKFLOW_PATH``).
+    A path is as stable as a filename under a display-name rename, and
+    strictly more precise. Narrowing then sits in ``_select_run`` beside
+    the event and PR-association filters that were always client-side.
+    Cost: one page now shared with every workflow at that commit -- see
+    ``_MAX_PAGE_SIZE``, where that is bounded and made non-silent.
+  * Wrong terminal answer. A matched but not-yet-completed run was treated
+    as definitive on the reasoning that it "will evaluate on its own once
+    it finishes". False in exactly the case this module exists for: that
+    run was fired by an earlier push and PREDATES the verdict comment, so
+    self-evaluation reproduces the same red. (Observed: elevana-studio
+    #1930 posted its verdict 6s after the gate's status comment -- the run
+    was almost certainly still in flight.) The in-flight case is therefore
+    RETRYABLE: the existing bounded retry loop waits for completion and
+    then re-runs it, and a run that never completes within the budget
+    still abstains with a reason naming its state. No budget was raised;
+    the ceiling below is untouched.
 
 Budget enforcement (rework #4, CE + coordinator): the rework #2 budget
 check was NOT actually a ceiling -- it was checked BEFORE sleeping (never
@@ -95,7 +126,17 @@ from hestai_context_mcp.tools.shared.github_auth import resolve_github_token
 # Workflow FILE name (stable) as declared under .github/workflows/ -- NOT
 # the display ``name:`` field inside the workflow (rework #2 finding 4: a
 # rename of that display name must not silently break every consumer).
+# Used for human-readable abstain reasons; run IDENTIFICATION goes through
+# WORKFLOW_PATH below.
 WORKFLOW_FILE = "review-gate.yml"
+
+# The gate workflow's path, exactly as GitHub reports it in the ``path``
+# field of every workflow-run object -- including runs of a ruleset-INJECTED
+# required workflow, whose workflow id does not exist in the consuming repo's
+# own ``actions/workflows`` listing (rework #5, see module docstring). This
+# is what identifies the gate's runs, because it is reported BY the run
+# rather than resolved FROM a filename by the consuming repo.
+WORKFLOW_PATH = f".github/workflows/{WORKFLOW_FILE}"
 
 # The full set of events GitHub's ruleset required-workflow feature
 # actually enforces against (rework #2 finding 5) -- only runs attached to
@@ -110,13 +151,27 @@ _REQUIRED_EVENTS = frozenset({"pull_request", "pull_request_target", "merge_grou
 # The only run status the rerun endpoint accepts (a non-completed run 422s).
 _COMPLETED_STATUS = "completed"
 
-# GitHub's maximum page size. Combined with scoping the listing to ONE
-# workflow file AND one head SHA (rework #2 finding 4), more than 100 runs
-# sharing all three is not a realistic scenario -- it would require over
-# 100 reruns of the identical workflow at the identical commit. Documented
-# bound instead of implementing multi-page fetching, which would also eat
-# into the overall time budget for a truncation risk this combination of
-# filters already makes vanishingly small.
+# GitHub's maximum page size, and the ONLY page this module ever fetches.
+#
+# Rework #5 changes what shares it: the listing is now repo-wide at one head
+# SHA, so this single page holds every workflow's runs at that commit (CI,
+# deploy previews, bots, ...), not just the gate's. Truncation is therefore
+# conceivable where the workflow-scoped listing made it vanishingly unlikely.
+# It is handled deliberately rather than silently, on three grounds:
+#
+#   1. Consequence is bounded. Runs come back newest-first, and the gate run
+#      for a just-pushed head SHA is among the newest. If it were ever pushed
+#      off the page, selection finds nothing and this module ABSTAINS -- the
+#      failure mode is a missed re-trigger, never a wrong run re-run and never
+#      a fabricated gate outcome (see the failure policy above).
+#   2. It is not silent. A full page with no gate run found says so in the
+#      abstain reason (_select_run), so "truncated" is distinguishable from
+#      "genuinely absent" without reading code.
+#   3. Paginating instead would spend the overall time budget (one extra
+#      round-trip per page) on a case that requires 100+ runs at a SINGLE
+#      commit -- and would still need a bound. If real repos are ever
+#      observed hitting this, the honest fix is a narrower server-side
+#      filter, not deeper paging; that is a scope decision, not a diff.
 _MAX_PAGE_SIZE = 100
 
 # Bounded retry delays (seconds) for the read-after-write race: the verdict
@@ -128,9 +183,9 @@ _MAX_PAGE_SIZE = 100
 # Retries apply to the "no PR-matching run found yet" case (rework #2
 # finding 3: this INCLUDES runs that exist but have unverifiable PR
 # metadata -- that is a genuine listing-propagation race too, not a
-# definitive answer). A run that IS matched but not yet COMPLETED is a
-# definitive answer -- retrying would just burn the budget waiting on a
-# run that will evaluate on its own.
+# definitive answer) AND, as of rework #5, to a matched run that is not yet
+# COMPLETED: that run predates the verdict comment, so waiting for it to
+# finish and then re-running it is the point -- see the module docstring.
 DEFAULT_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
 
 # Maximum timeout offered to any single Actions API call. The ACTUAL
@@ -178,7 +233,7 @@ class ReviewGateClient(Protocol):
     def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str: ...
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
+        self, repo: str, head_sha: str, *, timeout: float
     ) -> list[dict[str, Any]]: ...
 
     def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None: ...
@@ -232,34 +287,33 @@ class _GhCliClient:
         return str(sha)
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
+        self, repo: str, head_sha: str, *, timeout: float
     ) -> list[dict[str, Any]]:
-        """List runs of ``workflow_file`` at ``head_sha``, newest first
-        (GitHub's default list order).
+        """List ALL of the repo's workflow runs at ``head_sha``, newest
+        first (GitHub's default list order).
 
-        Uses the workflow-SCOPED listing endpoint (rework #2 finding 4),
-        keyed on the stable file name rather than the mutable display
-        name, and bounded to ``_MAX_PAGE_SIZE`` (documented, not paginated
-        -- see module docstring). No event filter is passed server-side
-        (that endpoint's ``event`` parameter accepts only one value); event
-        membership across all three ruleset-enforced events (finding 5) is
-        checked client-side in ``_select_run``.
+        Deliberately the UNSCOPED runs endpoint (rework #5): the
+        workflow-scoped one resolves ``review-gate.yml`` against the
+        consuming repo's own workflow entry, which is the wrong entry in a
+        ruleset-wired repo (module docstring). Bounded to ``_MAX_PAGE_SIZE``
+        (documented, not paginated -- see that constant). No server-side
+        filters are available for what matters here: the ``event``
+        parameter accepts only one value, and there is no workflow-path
+        filter at all.
 
-        Returns the raw run dicts (including ``status``, ``event`` and
-        ``pull_requests``) -- selection happens in ``_select_run``, not
-        here, so tests can inject deterministic run listings without a
-        client implementation of their own.
+        Returns the raw run dicts (including ``path``, ``status``,
+        ``event`` and ``pull_requests``) -- ALL narrowing, workflow
+        identity included, happens in ``_select_run``, so tests can inject
+        deterministic run listings without a client implementation of
+        their own.
         """
-        path = (
-            f"repos/{repo}/actions/workflows/{workflow_file}/runs"
-            f"?head_sha={head_sha}&per_page={_MAX_PAGE_SIZE}"
-        )
+        path = f"repos/{repo}/actions/runs?head_sha={head_sha}&per_page={_MAX_PAGE_SIZE}"
         status, body = self._api(path, timeout=timeout)
         if not (200 <= status < 300):
             raise GhApiError(f"HTTP {status} listing workflow runs")
         try:
             data = json.loads(body)
-            runs = data.get("workflow_runs", [])
+            runs = data.get("workflow_runs", [])  # same key on both runs endpoints
         except (json.JSONDecodeError, AttributeError) as exc:
             raise GhApiError(f"malformed workflow runs response: {exc}") from exc
 
@@ -278,24 +332,35 @@ class _Selection(NamedTuple):
 
     run_id: int | None
     reason: str | None
-    # True iff the "not found" outcome could plausibly resolve on a later
-    # attempt (a listing-propagation race) -- False for definitive answers
-    # (in-flight run) that retrying cannot fix. Unverifiable PR metadata is
-    # ALSO retryable (rework #2 finding 3) -- it is folded into the plain
-    # "no match yet" case, not treated as its own definitive answer.
+    # True iff this outcome could plausibly resolve on a later attempt --
+    # either a listing-propagation race, or a matched run still in flight
+    # that may finish within the retry budget (rework #5). Unverifiable PR
+    # metadata is retryable too (rework #2 finding 3): it is folded into
+    # the plain "no match yet" case, not treated as its own definitive
+    # answer. False is reserved for outcomes retrying cannot change --
+    # currently only budget exhaustion, raised by the caller.
     retryable: bool
 
 
 def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
-    """Pick the most recent COMPLETED, ruleset-enforced-event run belonging
-    to ``pr_number``.
+    """Pick the most recent COMPLETED, ruleset-enforced-event Review Gate
+    run belonging to ``pr_number``.
 
-    ``runs`` is assumed newest-first (GitHub's default list order),
-    pre-filtered to the right head SHA and workflow file by the client.
+    ``runs`` is assumed newest-first (GitHub's default list order) and
+    pre-filtered to the right head SHA by the client -- but NOT to the
+    right workflow: the listing is repo-wide, so identifying the gate's
+    own runs by their reported ``path`` is this function's job, alongside
+    the event and PR-association filters it already applied.
     """
     matching: list[dict[str, Any]] = []
     saw_unverifiable = False
     for run in runs:
+        # Workflow identity comes from what the RUN reports, not from what
+        # the consuming repo resolves a filename to (module docstring). A
+        # run that reports no path cannot be identified as the gate's, so
+        # it is not selectable -- excluded, never guessed at.
+        if run.get("path") != WORKFLOW_PATH:
+            continue
         if run.get("event") not in _REQUIRED_EVENTS:
             continue
         pull_requests = run.get("pull_requests")
@@ -327,6 +392,17 @@ def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
                 "head SHA"
             )
         )
+        if len(runs) >= _MAX_PAGE_SIZE:
+            # Do not let a truncated page masquerade as a genuine absence
+            # (see _MAX_PAGE_SIZE): the listing is repo-wide, so a commit
+            # with a great many runs could in principle push the gate's own
+            # run off the single page this module fetches.
+            reason += (
+                f" -- NOTE: the listing came back full ({len(runs)} runs, the "
+                f"{_MAX_PAGE_SIZE}-run page bound this module fetches), so the "
+                "gate's run may have been truncated off the page by other "
+                "workflows' runs at the same commit rather than being absent"
+            )
         return _Selection(None, reason, True)
 
     for run in matching:
@@ -339,13 +415,14 @@ def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
     return _Selection(
         None,
         (
-            f"the most recent '{WORKFLOW_FILE}' run for PR #{pr_number} is "
-            f"still '{newest_status}' (not completed) -- GitHub only allows "
-            "re-running completed runs, and this run will evaluate on its "
-            "own once it finishes, so re-run is skipped rather than "
-            "attempted and failed"
+            f"the most recent '{WORKFLOW_FILE}' run for PR #{pr_number} was "
+            f"still '{newest_status}' (not completed) for the whole retry "
+            "budget -- GitHub only allows re-running completed runs, and "
+            "letting this one evaluate on its own is not sufficient: it was "
+            "fired before the verdict comment existed, so it would reproduce "
+            "the same result. Waited for it to finish, it did not in time"
         ),
-        False,
+        True,
     )
 
 
@@ -469,7 +546,7 @@ def retrigger_review_gate(
                 break
             try:
                 runs = _client.list_workflow_runs_for_head_sha(
-                    repo, WORKFLOW_FILE, head_sha, timeout=_call_timeout(remaining)
+                    repo, head_sha, timeout=_call_timeout(remaining)
                 )
             except Exception as exc:  # noqa: BLE001
                 return _skip(
