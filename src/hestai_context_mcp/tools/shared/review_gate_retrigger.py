@@ -332,14 +332,6 @@ class _Selection(NamedTuple):
 
     run_id: int | None
     reason: str | None
-    # True iff this outcome could plausibly resolve on a later attempt --
-    # either a listing-propagation race, or a matched run still in flight
-    # that may finish within the retry budget (rework #5). Unverifiable PR
-    # metadata is retryable too (rework #2 finding 3): it is folded into
-    # the plain "no match yet" case, not treated as its own definitive
-    # answer. False is reserved for outcomes retrying cannot change --
-    # currently only budget exhaustion, raised by the caller.
-    retryable: bool
 
 
 def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
@@ -375,7 +367,7 @@ def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
 
     if not matching:
         # Rework #2 finding 3: unverifiable metadata is folded into the
-        # SAME retryable "not found yet" bucket as a plain zero-match
+        # SAME retried "not found yet" bucket as a plain zero-match
         # listing -- it must not abort the retry loop on its own. Only the
         # REASON TEXT differs, so the eventual terminal message (once
         # retries are exhausted) still tells the two apart.
@@ -403,13 +395,13 @@ def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
                 "gate's run may have been truncated off the page by other "
                 "workflows' runs at the same commit rather than being absent"
             )
-        return _Selection(None, reason, True)
+        return _Selection(None, reason)
 
     for run in matching:
         if run.get("status") == _COMPLETED_STATUS:
             run_id = run.get("id")
             if isinstance(run_id, int):
-                return _Selection(run_id, None, False)
+                return _Selection(run_id, None)
 
     newest_status = matching[0].get("status", "unknown")
     return _Selection(
@@ -422,7 +414,6 @@ def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
             "fired before the verdict comment existed, so it would reproduce "
             "the same result. Waited for it to finish, it did not in time"
         ),
-        True,
     )
 
 
@@ -517,7 +508,7 @@ def retrigger_review_gate(
             return _skip(f"could not resolve PR head SHA: {exc}")
 
         # --- locate a completed, PR-matching run, with bounded retry -----
-        selection = _Selection(None, "no attempt made", True)
+        selection = _Selection(None, "no attempt made")
         attempt_delays: tuple[float, ...] = (0.0, *retry_delays)
         for delay in attempt_delays:
             if delay:
@@ -528,7 +519,6 @@ def retrigger_review_gate(
                         _budget_reason(
                             overall_budget, remaining, "to wait for the next retry attempt"
                         ),
-                        False,
                     )
                     break
                 # Cap the sleep itself, not just the call that follows it --
@@ -541,7 +531,6 @@ def retrigger_review_gate(
                 selection = _Selection(
                     None,
                     _budget_reason(overall_budget, remaining, "for a run-listing call"),
-                    False,
                 )
                 break
             try:
@@ -554,7 +543,7 @@ def retrigger_review_gate(
                     head_sha=head_sha,
                 )
             selection = _select_run(runs, pr_number)
-            if selection.run_id is not None or not selection.retryable:
+            if selection.run_id is not None:
                 break
 
         if selection.run_id is None:
