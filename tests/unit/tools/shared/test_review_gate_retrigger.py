@@ -410,6 +410,25 @@ class TestRulesetWiredRepo:
         assert result["run_id"] is None
         assert client.rerun_calls == []
 
+    def test_run_without_a_path_field_is_excluded_not_crashed_on(self) -> None:
+        """TMG gap: GitHub always reports ``path`` on run objects, but
+        selection must degrade to "not the gate's run" if it is ever absent
+        -- never raise, and never select a run whose workflow it could not
+        identify.
+        """
+        pathless = _run(70, pr_number=7)
+        del pathless["path"]
+        client = _FakeClient(runs_sequence=[[pathless]])
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 7, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert result["run_id"] is None
+        assert client.rerun_calls == []
+
 
 @pytest.mark.unit
 class TestPrNumberSelection:
@@ -915,6 +934,39 @@ class TestOverallTimeBudget:
         assert client.list_call_timeouts == [pytest.approx(8.0), pytest.approx(6.0)]
         assert client.list_call_timeouts[0] > client.list_call_timeouts[1]
         assert clock.now() <= 10.0
+
+    def test_in_flight_retrying_still_cannot_cross_the_deadline(self) -> None:
+        """TMG gap: an in-flight run is retryable as of this change, so it
+        now drives the retry loop. Waiting for it must remain bounded by the
+        SAME overall ceiling -- a run that never completes exhausts the
+        budget and abstains, it does not extend it.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(
+            clock,
+            head_sha_duration=0.5,
+            list_duration=0.5,
+            list_results=[[_run(50, pr_number=7, status="in_progress")]],
+        )
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                7,
+                client=client,
+                sleep=clock.sleep,
+                now=clock.now,
+                overall_budget=10.0,
+                retry_delays=(4.0, 4.0, 4.0),
+            )
+
+        assert clock.now() <= 10.0, "total simulated elapsed time exceeded the budget"
+        assert result["status"] == "skipped"
+        # It really did wait across more than the first attempt...
+        assert len(client.list_call_timeouts) > 1
+        # ...and stopped because the budget ran out, without ever attempting
+        # a rerun call GitHub would reject.
+        assert client.rerun_calls == []
 
     def test_completes_normally_well_within_budget(self) -> None:
         """A generous budget against fast simulated calls must not perturb
