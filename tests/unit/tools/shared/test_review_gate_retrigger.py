@@ -15,10 +15,11 @@ Rework #2 (all-four-reviewers CONDITIONAL triage on PR #148) fixed:
      ``pull_requests`` metadata no longer suppresses retry when no PR match
      was found -- it only becomes the terminal reason once the retry
      budget is spent.
-  4. Fragile run lookup (CE + CRS): listing is now scoped to the workflow
-     FILE name (stable) via the workflow-scoped endpoint, not the mutable
-     display name, with an explicit, tested page-size bound instead of an
-     unbounded/undocumented truncation risk.
+  4. Fragile run lookup (CE + CRS): listing was moved off the mutable
+     display name onto the workflow FILE name via the workflow-scoped
+     endpoint. SUPERSEDED by rework #5 below -- that endpoint resolves the
+     filename against the consuming repo's own workflow entry, which is the
+     wrong entry in a ruleset-wired repo. The page-size bound survives.
   5. Event filter too narrow (CRS/coordinator): the ruleset enforces
      pull_request, pull_request_target AND merge_group -- selection now
      accepts all three rather than hardcoding one.
@@ -26,6 +27,19 @@ Rework #2 (all-four-reviewers CONDITIONAL triage on PR #148) fixed:
      carries the observed HTTP signal, not just that status == "skipped".
   9/10. Additional coverage: a listing failure mid-retry-loop, the outer
      catch-all exception path, and more `_GhCliClient` edge cases.
+
+Rework #5 (this branch) fixed the two failure modes that made the module
+abstain on every ruleset-wired consuming repo:
+
+  * runs are listed UNSCOPED at the head SHA and identified by the ``path``
+    each run reports, so location no longer depends on the consuming repo
+    resolving ``review-gate.yml`` to the right workflow id (see
+    ``TestRulesetWiredRepo``). A full page is named as possible truncation
+    rather than reported as a bare "not found" (``TestPageSizeBound``).
+  * a matched run still in flight is retryable rather than terminal: it
+    predates the verdict comment, so it must be waited for and re-run,
+    within the unchanged overall budget (``TestRunStatusSelection``,
+    ``TestOverallTimeBudget``).
 """
 
 from __future__ import annotations
@@ -305,9 +319,19 @@ class TestHappyPath:
 
 
 class _RulesetWiredClient:
-    """Simulates a consuming repo wired by an org ruleset, reproduced from
-    live ``gh api`` output for elevanaltd/elevana-studio PR #1945 at head
-    500ce6f8c7c6db8ee3cc917c9057cfe0b544eefc:
+    """Simulates a consuming repo wired by an org ruleset.
+
+    The run's identifying fields -- id 34159096298, ``workflow_id``
+    299891129, ``path`` ``.github/workflows/review-gate.yml``,
+    ``event=pull_request``, ``status=completed`` -- are taken from live
+    ``gh api`` output for elevanaltd/elevana-studio PR #1945 at head
+    500ce6f8c7c6db8ee3cc917c9057cfe0b544eefc. Its ``pull_requests``
+    association is SYNTHESIZED, not copied: GitHub empties that array once
+    a PR is merged (as #1945 now is), while an open PR -- the only state in
+    which this module ever runs -- carries it. The unverifiable-association
+    path is covered separately by ``TestUnverifiableMetadataRetries``.
+
+    What the live output established, and what this fake reproduces:
 
       * ``repos/{repo}/actions/workflows`` lists ONE entry named "Review
         Gate" at ``.github/workflows/review-gate.yml`` -- the repo's OWN

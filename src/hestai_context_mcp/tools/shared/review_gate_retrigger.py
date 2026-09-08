@@ -19,8 +19,9 @@ ONLY. It must never merge, approve, dispatch arbitrary workflows, or touch
 rulesets/branch protection. Binding: HO-SUBMIT-REVIEW-GATE-RETRIGGER-20260810
 (.hestai/decisions/, RATIFIED), which inherits, not asserts, the abstain
 policy below. The run LISTING endpoint used below is read-only -- it does
-not authorise workflow_dispatch, and widening it was never necessary: the
-whole of rework #5 is a change of which read the module makes.
+not authorise workflow_dispatch. Rework #5 widened no API surface: it
+changes WHICH read the module makes and HOW LONG it is willing to wait,
+nothing more.
 
 Failure policy (HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724):
 re-triggering is best-effort and strictly additive to posting the verdict
@@ -481,16 +482,21 @@ def retrigger_review_gate(
 
     _sleep = sleep if sleep is not None else _time_module.sleep
     _now = now if now is not None else _time_module.monotonic
-    _client: ReviewGateClient = client if client is not None else _GhCliClient()
-    deadline = _now() + overall_budget
 
-    def _remaining() -> float:
+    def _remaining(deadline: float) -> float:
         return deadline - _now()
 
     def _call_timeout(remaining: float) -> float:
         return min(_GH_API_TIMEOUT_SECONDS, remaining)
 
+    # EVERYTHING that can raise lives inside this try, the very first clock
+    # read included (CRS): constructing the default client and reading the
+    # clock to set the deadline are themselves failure modes, and the
+    # abstain policy admits no escape hatch for the ones that happen early.
     try:
+        _client: ReviewGateClient = client if client is not None else _GhCliClient()
+        deadline = _now() + overall_budget
+
         if resolve_github_token() is None:
             return _skip(
                 "no GitHub token available for the Actions API "
@@ -499,7 +505,7 @@ def retrigger_review_gate(
             )
 
         # --- resolve the PR's real head SHA -------------------------------
-        remaining = _remaining()
+        remaining = _remaining(deadline)
         if remaining < _MIN_USEFUL_CALL_SECONDS:
             return _skip(_budget_reason(overall_budget, remaining, "to resolve the PR head SHA"))
         try:
@@ -512,7 +518,7 @@ def retrigger_review_gate(
         attempt_delays: tuple[float, ...] = (0.0, *retry_delays)
         for delay in attempt_delays:
             if delay:
-                remaining = _remaining()
+                remaining = _remaining(deadline)
                 if remaining < _MIN_USEFUL_CALL_SECONDS:
                     selection = _Selection(
                         None,
@@ -526,7 +532,7 @@ def retrigger_review_gate(
                 # full nominal delay regardless of budget (rework #4 hole a).
                 _sleep(min(delay, remaining))
 
-            remaining = _remaining()
+            remaining = _remaining(deadline)
             if remaining < _MIN_USEFUL_CALL_SECONDS:
                 selection = _Selection(
                     None,
@@ -552,7 +558,7 @@ def retrigger_review_gate(
         run_id = selection.run_id
 
         # --- re-run the located run ---------------------------------------
-        remaining = _remaining()
+        remaining = _remaining(deadline)
         if remaining < _MIN_USEFUL_CALL_SECONDS:
             return _skip(
                 _budget_reason(overall_budget, remaining, f"to re-run run {run_id}"),
