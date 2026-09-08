@@ -726,6 +726,28 @@ class TestAbstainPaths:
         assert client.list_calls == 2
         assert client.rerun_calls == []
 
+    def test_a_throwing_clock_never_propagates(self) -> None:
+        """CRS: the injected clock's FIRST read (computing the deadline) sat
+        outside the outer catch-all, so a clock that raises escaped the
+        "NEVER raises" contract entirely -- before any Actions call, and
+        before the token check. Every failure mode must collapse to an
+        abstain, the clock included.
+        """
+
+        def broken_clock() -> float:
+            raise RuntimeError("clock failed")
+
+        client = _FakeClient()
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 1, client=client, sleep=lambda _: None, now=broken_clock
+            )
+
+        assert result["status"] == "skipped"
+        assert "clock failed" in result["reason"]
+        assert client.head_sha_calls == 0
+        assert client.rerun_calls == []
+
     def test_outer_catch_all_never_propagates_unexpected_token_resolution_failure(self) -> None:
         """Finding 10: cover the OUTER catch-all (wrapping the whole
         function body), not just the inner per-step try/excepts. Force an
