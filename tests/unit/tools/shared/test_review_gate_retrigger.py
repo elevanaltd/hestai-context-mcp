@@ -44,12 +44,20 @@ from hestai_context_mcp.tools.shared.review_gate_retrigger import (
 
 _MOD = "hestai_context_mcp.tools.shared.review_gate_retrigger"
 
+# The gate workflow's path as GitHub reports it on every run object. Stated
+# as a literal here (not imported from the module under test) so these tests
+# assert an independent expectation rather than tautologically agreeing with
+# whatever the module happens to define.
+_GATE_WORKFLOW_PATH = ".github/workflows/review-gate.yml"
+
 
 def _run(
     run_id: int,
     pr_number: int | None,
     status: str = "completed",
     event: str = "pull_request",
+    path: str = _GATE_WORKFLOW_PATH,
+    workflow_id: int = 224758050,
 ) -> dict[str, Any]:
     """Build a workflow-run dict shaped like GitHub's list-runs response.
 
@@ -62,6 +70,8 @@ def _run(
         "id": run_id,
         "status": status,
         "event": event,
+        "path": path,
+        "workflow_id": workflow_id,
         "pull_requests": [] if pr_number is None else [{"number": pr_number}],
     }
 
@@ -89,7 +99,7 @@ class _FakeClient:
         self._runs_sequence = list(runs_sequence) if runs_sequence is not None else [[]]
         self._rerun_result = rerun_result
         self.list_calls = 0
-        self.list_call_args: list[tuple[str, str, str]] = []
+        self.list_call_args: list[tuple[str, ...]] = []
         self.list_call_timeouts: list[float] = []
         self.rerun_calls: list[tuple[str, int]] = []
         self.rerun_timeouts: list[float] = []
@@ -104,9 +114,18 @@ class _FakeClient:
         return self._head_sha
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
+        self, repo: str, *args: str, timeout: float
     ) -> list[dict[str, Any]]:
-        self.list_call_args.append((repo, workflow_file, head_sha))
+        """Accepts BOTH listing shapes, so one test body can state the
+        contract across the endpoint change instead of the fake dictating it:
+
+          * workflow-SCOPED (old): ``(repo, workflow_file, head_sha)``
+          * UNSCOPED        (new): ``(repo, head_sha)``
+
+        Which shape was actually used is recorded in ``list_call_args`` and
+        asserted directly by the tests that care.
+        """
+        self.list_call_args.append((repo, *args))
         self.list_call_timeouts.append(timeout)
         idx = self.list_calls
         self.list_calls += 1
@@ -203,7 +222,7 @@ class _SimTimingClient:
         return self._head_sha
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
+        self, repo: str, *args: str, timeout: float
     ) -> list[dict[str, Any]]:
         self.list_call_timeouts.append(timeout)
         self._consume(self._list_duration, timeout, label="run-listing")
@@ -266,16 +285,130 @@ class TestHappyPath:
         assert client.head_sha_calls == 1
         assert result["head_sha"] == "freshly-resolved-sha"
 
-    def test_lists_runs_via_the_stable_workflow_file_not_display_name(self) -> None:
-        """Finding 4: the listing must be scoped by the workflow's FILE name
-        (stable) rather than its mutable display name.
+    def test_lists_runs_unscoped_at_the_head_sha_not_scoped_to_the_workflow_file(
+        self,
+    ) -> None:
+        """The listing must NOT be keyed on the gate's workflow FILE name.
+
+        The workflow-scoped endpoint resolves ``review-gate.yml`` against the
+        CONSUMING repo's own workflow entry, which in a ruleset-wired repo is
+        not the entry that actually ran (see ``TestRulesetWiredRepo``). Every
+        run object reports its own ``path`` regardless of which workflow
+        entry owns it, so the listing is taken unscoped at the head SHA and
+        narrowed on that path during selection instead.
         """
         client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
             retrigger_review_gate("owner/repo", 1, client=client, sleep=lambda _: None)
 
-        assert client.list_call_args == [("owner/repo", WORKFLOW_FILE, "abc123headsha")]
-        assert WORKFLOW_FILE == "review-gate.yml"
+        assert client.list_call_args == [("owner/repo", "abc123headsha")]
+
+
+class _RulesetWiredClient:
+    """Simulates a consuming repo wired by an org ruleset, reproduced from
+    live ``gh api`` output for elevanaltd/elevana-studio PR #1945 at head
+    500ce6f8c7c6db8ee3cc917c9057cfe0b544eefc:
+
+      * ``repos/{repo}/actions/workflows`` lists ONE entry named "Review
+        Gate" at ``.github/workflows/review-gate.yml`` -- the repo's OWN
+        caller file, id 224758050, with zero runs at that SHA.
+      * the run that actually executed belongs to the ruleset-INJECTED
+        required workflow, id 299891129. It is invisible to the
+        workflow-scoped endpoint (``.../actions/workflows/review-gate.yml/
+        runs?head_sha=...`` returned ``total_count=0``) yet reports the very
+        same ``path``.
+
+    Hence: the workflow-SCOPED call shape yields nothing, while the UNSCOPED
+    call shape yields every run at the SHA, the injected one included.
+    """
+
+    OWN_WORKFLOW_ID = 224758050
+    INJECTED_WORKFLOW_ID = 299891129
+
+    def __init__(self, runs: list[dict[str, Any]]) -> None:
+        self._runs = runs
+        self.scoped_calls = 0
+        self.unscoped_calls = 0
+        self.rerun_calls: list[tuple[str, int]] = []
+
+    def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str:
+        return "500ce6f8c7c6db8ee3cc917c9057cfe0b544eefc"
+
+    def list_workflow_runs_for_head_sha(
+        self, repo: str, *args: str, timeout: float
+    ) -> list[dict[str, Any]]:
+        if len(args) == 2:  # (workflow_file, head_sha) -- the scoped endpoint
+            self.scoped_calls += 1
+            return [r for r in self._runs if r["workflow_id"] == self.OWN_WORKFLOW_ID]
+        self.unscoped_calls += 1
+        return list(self._runs)
+
+    def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None:
+        self.rerun_calls.append((repo, run_id))
+
+
+@pytest.mark.unit
+class TestRulesetWiredRepo:
+    """The primary case this module exists for: a repo whose Review Gate is
+    injected by an org ruleset. Two workflow entries share the name "Review
+    Gate" at the same path -- the repo's own caller file and the injected
+    required workflow -- and only the latter ever runs.
+    """
+
+    def test_locates_the_ruleset_injected_run_the_scoped_endpoint_cannot_see(
+        self,
+    ) -> None:
+        injected = _run(
+            34159096298,
+            pr_number=1945,
+            workflow_id=_RulesetWiredClient.INJECTED_WORKFLOW_ID,
+        )
+        client = _RulesetWiredClient([injected])
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "elevanaltd/elevana-studio",
+                1945,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(),
+            )
+
+        assert result["status"] == "re-triggered"
+        assert result["run_id"] == 34159096298
+        assert client.rerun_calls == [("elevanaltd/elevana-studio", 34159096298)]
+        # Run location must not depend on the consuming repo resolving
+        # `review-gate.yml` to the right workflow id at all.
+        assert client.scoped_calls == 0
+        assert client.unscoped_calls == 1
+
+    def test_ignores_other_workflows_runs_returned_by_the_unscoped_listing(
+        self,
+    ) -> None:
+        """The unscoped listing returns EVERY workflow's runs at the SHA, so
+        selection must narrow on the gate's own workflow path -- a completed
+        CI run for the same PR at the same SHA is not the required check.
+        """
+        client = _FakeClient(
+            runs_sequence=[
+                [
+                    _run(
+                        60,
+                        pr_number=7,
+                        path=".github/workflows/ci.yml",
+                        workflow_id=987654,
+                    )
+                ]
+            ]
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 7, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert result["run_id"] is None
+        assert client.rerun_calls == []
 
 
 @pytest.mark.unit
@@ -395,18 +528,60 @@ class TestRunStatusSelection:
         assert result["run_id"] == 40
         assert client.rerun_calls == [("owner/repo", 40)]
 
-    def test_abstains_when_only_matching_run_is_in_progress(self) -> None:
+    def test_waits_for_an_in_flight_run_and_reruns_it_once_completed(self) -> None:
+        """An in-flight run is NOT a definitive answer.
+
+        The run in flight when a verdict lands was fired by an earlier push
+        (``pull_request: opened``) and therefore PREDATES the verdict comment
+        -- letting it "evaluate on its own once it finishes" reproduces
+        exactly the red the re-trigger exists to clear. So the in-flight case
+        must be retryable: the existing bounded retry loop waits for
+        completion and then re-runs it.
+        """
+        client = _FakeClient(
+            runs_sequence=[
+                [_run(50, pr_number=7, status="queued")],
+                [_run(50, pr_number=7, status="in_progress")],
+                [_run(50, pr_number=7, status="completed")],
+            ]
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                7,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(1.0, 2.0),
+            )
+
+        assert result["status"] == "re-triggered"
+        assert result["run_id"] == 50
+        assert client.list_calls == 3
+        assert client.rerun_calls == [("owner/repo", 50)]
+
+    def test_abstains_naming_the_in_flight_state_once_retries_are_exhausted(
+        self,
+    ) -> None:
+        """Waiting is bounded: a run that never completes within the retry
+        budget still abstains, with a reason naming its non-completed state
+        -- never a rerun call GitHub would 422, and never a fabricated
+        outcome.
+        """
         client = _FakeClient(runs_sequence=[[_run(50, pr_number=7, status="in_progress")]])
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
-            result = retrigger_review_gate("owner/repo", 7, client=client, sleep=lambda _: None)
+            result = retrigger_review_gate(
+                "owner/repo",
+                7,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(1.0, 2.0),
+            )
 
         assert result["status"] == "skipped"
         assert "in_progress" in result["reason"]
         assert result["run_id"] is None
         assert client.rerun_calls == []
-        # An in-flight run is a definitive answer (it will evaluate on its
-        # own) -- must not retry waiting for it to complete.
-        assert client.list_calls == 1
+        assert client.list_calls == 3  # initial attempt + 2 retries
 
 
 @pytest.mark.unit
@@ -766,12 +941,46 @@ class TestOverallTimeBudget:
 
 @pytest.mark.unit
 class TestPageSizeBound:
-    """Finding 4 (CE + CRS): the run listing must be scoped to the stable
-    workflow FILE name via the workflow-scoped endpoint (fixing the
-    mutable-display-name fragility), and its page-size bound must be
-    explicit and tested at the boundary rather than an undocumented
-    truncation risk.
+    """The run listing is taken from the repo-wide (unscoped) runs endpoint
+    at one head SHA, with an explicit, tested page bound. Because that page
+    is now shared with every other workflow that fired at the same commit,
+    truncation must be NAMED in the abstain reason rather than silently
+    reported as "not found".
     """
+
+    def test_truncated_listing_is_named_in_the_abstain_reason(self) -> None:
+        """A full page of other workflows' runs can, in principle, push the
+        gate's own run off the single bounded page. That degrades to an
+        abstain (never a wrong rerun), but the reason must say the page was
+        full so an operator can tell truncation from a genuine absence.
+        """
+        crowd = [
+            _run(i, pr_number=999, path=".github/workflows/ci.yml", workflow_id=987654)
+            for i in range(100)
+        ]
+        client = _FakeClient(runs_sequence=[crowd])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 7, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert "100" in result["reason"]
+        assert "truncat" in result["reason"].lower()
+        assert client.rerun_calls == []
+
+    def test_untruncated_listing_does_not_claim_truncation(self) -> None:
+        """The truncation note must be conditional on a FULL page, not
+        appended to every not-found abstain.
+        """
+        client = _FakeClient(runs_sequence=[[]])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 7, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert "truncat" not in result["reason"].lower()
 
     def test_default_client_requests_the_documented_max_page_size(self) -> None:
         with (
@@ -787,7 +996,11 @@ class TestPageSizeBound:
         # Second call is the runs listing (first is the PR head-SHA lookup).
         list_call_args = mock_run.call_args_list[1].args[0]
         joined = " ".join(list_call_args)
-        assert f"repos/owner/repo/actions/workflows/{WORKFLOW_FILE}/runs" in joined
+        assert "repos/owner/repo/actions/runs" in joined
+        # The workflow-SCOPED endpoint resolves the filename against the
+        # consuming repo's own workflow entry, which is the wrong one in a
+        # ruleset-wired repo -- it must not be used.
+        assert f"actions/workflows/{WORKFLOW_FILE}" not in joined
         assert "per_page=100" in joined
         assert "head_sha=abc123" in joined
 
