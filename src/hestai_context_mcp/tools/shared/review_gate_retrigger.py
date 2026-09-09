@@ -95,11 +95,17 @@ on EVERY ruleset-wired consuming repo. Two independent causes, one seam.
     run was fired by an earlier push and PREDATES the verdict comment, so
     self-evaluation reproduces the same red. (Observed: elevana-studio
     #1930 posted its verdict 6s after the gate's status comment -- the run
-    was almost certainly still in flight.) The in-flight case is therefore
-    RETRYABLE: the existing bounded retry loop waits for completion and
-    then re-runs it, and a run that never completes within the budget
-    still abstains with a reason naming its state. No budget was raised;
-    the ceiling below is untouched.
+    was almost certainly still in flight.) The in-flight case now shares
+    the SAME bounded retry loop already used for "not found yet": a
+    handful of short, listing-propagation-race retries -- NOT a mechanism
+    that outwaits a still-running gate job. With the default retry delays
+    this is 4 attempts totalling ~7s, far short of a typical 13-40s gate
+    run, so it wins only the read-after-write race on a run that is
+    already near completion; a run genuinely still executing exhausts
+    those retry attempts (the overall time budget is a separate, much
+    larger ceiling and is not what bounds this case in practice) and
+    abstains, naming its observed state. No budget was raised; the
+    ceiling below is untouched.
 
 Budget enforcement (rework #4, CE + coordinator): the rework #2 budget
 check was NOT actually a ceiling -- it was checked BEFORE sleeping (never
@@ -185,8 +191,12 @@ _MAX_PAGE_SIZE = 100
 # finding 3: this INCLUDES runs that exist but have unverifiable PR
 # metadata -- that is a genuine listing-propagation race too, not a
 # definitive answer) AND, as of rework #5, to a matched run that is not yet
-# COMPLETED: that run predates the verdict comment, so waiting for it to
-# finish and then re-running it is the point -- see the module docstring.
+# COMPLETED: that run predates the verdict comment, so a short re-check for
+# it to have finished is worthwhile before re-running it. This is the SAME
+# brief, bounded retry as the listing-propagation race above -- 4 attempts
+# totalling ~7s with these defaults -- not a mechanism that outwaits a
+# still-running gate job (real gate runs take 13-40s); see the module
+# docstring.
 DEFAULT_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
 
 # Maximum timeout offered to any single Actions API call. The ACTUAL
@@ -380,7 +390,11 @@ def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
             "than guessing"
             if saw_unverifiable
             else (
-                f"no completed {'/'.join(sorted(_REQUIRED_EVENTS))}-attached "
+                # "matching" now groups in-flight runs alongside completed
+                # ones (rework #5) -- an empty "matching" therefore means NO
+                # run of this workflow/event/PR was found at all, not merely
+                # "none of them happened to be completed". Say that.
+                f"no {'/'.join(sorted(_REQUIRED_EVENTS))}-attached "
                 f"'{WORKFLOW_FILE}' run found for PR #{pr_number} at this "
                 "head SHA"
             )
@@ -404,16 +418,22 @@ def _select_run(runs: list[dict[str, Any]], pr_number: int) -> _Selection:
             if isinstance(run_id, int):
                 return _Selection(run_id, None)
 
+    # This reason describes only what THIS listing observed -- the run's
+    # current status -- and nothing about the retry loop's timing or budget.
+    # Whether (and how) that observation becomes a terminal abstain reason,
+    # and any framing about attempts or elapsed time, is the retry loop's
+    # job (retrigger_review_gate), not this function's: _select_run has no
+    # visibility into how many attempts preceded this call or how many
+    # remain.
     newest_status = matching[0].get("status", "unknown")
     return _Selection(
         None,
         (
-            f"the most recent '{WORKFLOW_FILE}' run for PR #{pr_number} was "
-            f"still '{newest_status}' (not completed) for the whole retry "
-            "budget -- GitHub only allows re-running completed runs, and "
-            "letting this one evaluate on its own is not sufficient: it was "
-            "fired before the verdict comment existed, so it would reproduce "
-            "the same result. Waited for it to finish, it did not in time"
+            f"the most recent '{WORKFLOW_FILE}' run for PR #{pr_number} is "
+            f"still '{newest_status}' (not completed) -- GitHub only allows "
+            "re-running completed runs, and letting this one evaluate on its "
+            "own is not sufficient: it was fired before the verdict comment "
+            "existed, so it would reproduce the same result"
         ),
     )
 
@@ -551,6 +571,25 @@ def retrigger_review_gate(
             selection = _select_run(runs, pr_number)
             if selection.run_id is not None:
                 break
+        else:
+            # The loop ran every attempt without a match AND without a
+            # budget abort (both of those always ``break`` above) -- so
+            # this is RETRY-COUNT exhaustion, not the overall time budget.
+            # With the production defaults that is 4 attempts totalling
+            # ~7s against a 25s budget: most of the budget is typically
+            # still unused when this fires, and the reason must say so
+            # rather than let a bare "not completed"/"not found" message
+            # read as though the full budget were spent waiting.
+            if selection.reason:
+                attempts_made = len(attempt_delays)
+                used = overall_budget - _remaining(deadline)
+                selection = _Selection(
+                    None,
+                    f"{selection.reason} -- retry attempts exhausted after "
+                    f"{attempts_made} attempt{'s' if attempts_made != 1 else ''}, "
+                    f"not the overall time budget (used {used:.1f}s of the "
+                    f"{overall_budget:.0f}s budget)",
+                )
 
         if selection.run_id is None:
             return _skip(selection.reason or "no matching run found", head_sha=head_sha)
