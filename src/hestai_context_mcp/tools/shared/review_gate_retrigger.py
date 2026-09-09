@@ -624,8 +624,7 @@ def retrigger_review_gate(
                     # flooring can only pull the displayed value FURTHER
                     # below the threshold, never across it -- unlike
                     # rounding, which can push a sub-threshold value up to
-                    # (or, with different constants, past) the threshold's
-                    # own printed form.
+                    # the threshold's own printed form.
                     floored_remaining = math.floor(max(remaining_after, 0.0) * 1000) / 1000
                     budget_clause = (
                         "the overall time budget also had too little left "
