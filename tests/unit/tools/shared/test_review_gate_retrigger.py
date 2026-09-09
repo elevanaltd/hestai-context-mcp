@@ -44,6 +44,7 @@ abstain on every ruleset-wired consuming repo:
 
 from __future__ import annotations
 
+import math
 import traceback
 from typing import Any
 from unittest.mock import patch
@@ -1337,8 +1338,23 @@ class TestOverallTimeBudget:
         # It must still tell a reader retries were exhausted...
         assert "attempts exhausted" in reason
         # ...AND that the budget coincided with that exhaustion, honestly,
-        # rather than silently dropping the budget detail.
-        assert "also exhausted" in reason or "budget" in reason
+        # rather than silently dropping the budget detail. round-4 FINDING
+        # 1 (CE): the previous form of this assertion --
+        # `"also exhausted" in reason or "budget" in reason` -- was an
+        # unconditional truth, not a pin: "also exhausted" had already been
+        # reworded out of the module in round 3 (making the first disjunct
+        # always False), and the word "budget" appears in BOTH branches'
+        # wording (making the second disjunct always True regardless of
+        # which branch fired). This must instead assert the BUDGET-SHORT
+        # branch's own distinguishing phrase, AND that the other branch's
+        # distinguishing phrase is absent -- so a future rewording of
+        # either branch that drifts them together (or swaps them) is
+        # caught, not silently absorbed by an `or`. (The
+        # "not the overall time budget" absence is already pinned above;
+        # this is the BUDGET-SHORT branch's own positive, distinguishing
+        # phrase -- the two together mean this test fails if either
+        # branch's wording drifts toward the other.)
+        assert "too little left for another useful attempt" in reason
 
     @pytest.mark.parametrize(
         ("list_duration", "expect_budget_also_short"),
@@ -1346,6 +1362,10 @@ class TestOverallTimeBudget:
             (4.001, True),  # remaining_after ~= 0.999s -- BELOW the 1.0s minimum
             (4.000, False),  # remaining_after == 1.000s -- AT the minimum, still useful
             (3.999, False),  # remaining_after == 1.001s -- comfortably above the minimum
+            (4.0003, True),  # remaining_after ~= 0.9997s -- round-4 CE finding 2's
+            # OWN narrow window: ROUNDING (not flooring) 0.9997 to 3
+            # decimals produces "1.000", displaying EQUAL TO the 1.000s
+            # threshold despite genuinely being in the budget-short branch.
         ],
     )
     def test_budget_wording_never_contradicts_its_own_reported_remaining_time(
@@ -1356,15 +1376,19 @@ class TestOverallTimeBudget:
         displaying a 1-DECIMAL-ROUNDED "s left" figure -- a true 0.999s
         remainder rounds to a displayed "1.0s left", so a reader sees a
         sentence asserting exhaustion right next to a number that says
-        otherwise. ``_MIN_USEFUL_CALL_SECONDS`` means "too little
-        remaining for a useful call", NOT "deadline reached" -- the
-        wording must say that, and must report enough precision that the
-        words and the number can never disagree.
+        otherwise. round-4 CE finding 2: reporting at 3-decimal ROUNDED
+        precision narrowed but did not close the gap -- a remaining_after
+        in [0.9995, 1.0) still rounds to a displayed "1.000s", equal to
+        the (also 3-decimal) threshold text. ``_MIN_USEFUL_CALL_SECONDS``
+        means "too little remaining for a useful call", NOT "deadline
+        reached" -- the wording must say that, and the displayed remainder
+        must be FLOORED (not rounded) so it is always printed strictly
+        less than the printed threshold whenever this branch fires.
 
         CE independently pinned 0.999/1.000/1.001s and confirmed the
         round-2 boundary CONDITION itself (``<``, not ``<=``) already held
-        at all three; this test pins the WORDING at that same boundary,
-        parametrized across exactly those three values.
+        at all three; this test pins the WORDING (and, via the fourth
+        case, the ROUNDING-VS-FLOORING choice) at that same boundary.
         """
         clock = _SimClock()
         client = _SimTimingClient(
@@ -1390,12 +1414,16 @@ class TestOverallTimeBudget:
 
         if expect_budget_also_short:
             assert remaining_after < 1.0
-            # The number and the words must agree: enough precision that
-            # a sub-1.0s remainder can never display rounded up to "1.0".
-            assert f"{remaining_after:.3f}s remained" in reason
+            # The number and the words must agree: FLOORED (not rounded)
+            # to 3 decimals, so a sub-1.0s remainder can never display
+            # equal to -- let alone above -- the printed 1.000s threshold.
+            floored_remaining = math.floor(max(remaining_after, 0.0) * 1000) / 1000
+            assert floored_remaining < 1.0
+            assert f"{floored_remaining:.3f}s remained" in reason
             assert "too little left for another useful attempt" in reason
             assert "ALSO exhausted" not in reason
             assert "1.0s left" not in reason
+            assert "1.000s remained, below the 1.000s minimum" not in reason
         else:
             assert remaining_after >= 1.0
             assert "not the overall time budget" in reason
