@@ -590,19 +590,31 @@ def retrigger_review_gate(
                 attempts_made = len(attempt_delays)
                 remaining_after = _remaining(deadline)
                 used = overall_budget - remaining_after
-                budget_also_exhausted = remaining_after < _MIN_USEFUL_CALL_SECONDS
+                # ``_MIN_USEFUL_CALL_SECONDS`` means "too little remaining
+                # for another useful attempt" -- NOT "deadline reached".
+                # round-3 FINDING 2 (CE): the previous wording said
+                # "ALSO exhausted" next to a 1-decimal-rounded "s left"
+                # figure, so a true 0.999s remainder displayed as "1.0s
+                # left" -- the words and the number visibly disagreed.
+                # Report enough precision (3 decimals) that a value on
+                # either side of the threshold can never round across it
+                # in the text, and describe the threshold itself rather
+                # than implying the clock hit zero.
+                budget_also_short = remaining_after < _MIN_USEFUL_CALL_SECONDS
                 attempt_clause = (
                     f"retry attempts exhausted after {attempts_made} "
                     f"attempt{'s' if attempts_made != 1 else ''}"
                 )
-                if budget_also_exhausted:
+                if budget_also_short:
                     # Both constraints coincide at this boundary -- say so
                     # plainly rather than claiming either one alone.
                     budget_clause = (
-                        f"the overall time budget was ALSO exhausted at "
-                        f"essentially the same moment (used {used:.1f}s of "
-                        f"the {overall_budget:.0f}s budget, "
-                        f"{max(remaining_after, 0.0):.1f}s left)"
+                        "the overall time budget also had too little left "
+                        "for another useful attempt at essentially the "
+                        f"same moment ({max(remaining_after, 0.0):.3f}s "
+                        f"remained, below the {_MIN_USEFUL_CALL_SECONDS:.3f}s "
+                        f"minimum for a useful attempt; used {used:.1f}s of "
+                        f"the {overall_budget:.0f}s budget)"
                     )
                 else:
                     budget_clause = (
