@@ -44,6 +44,7 @@ abstain on every ruleset-wired consuming repo:
 
 from __future__ import annotations
 
+import traceback
 from typing import Any
 from unittest.mock import patch
 
@@ -331,6 +332,81 @@ class _NthCallThrowingClock:
         value = self._t
         self._t += self._step
         return value
+
+
+class _CallSiteRecordingClock:
+    """Never raises. Records, for every ``now()`` read, the SOURCE LINE
+    TEXT of the call site inside ``retrigger_review_gate`` that invoked
+    ``_remaining(deadline)`` -- via ``traceback.extract_stack()`` -- so a
+    test can determine EMPIRICALLY which call number corresponds to a
+    specific line of source, rather than hand-counting or guessing an
+    index (round-3 CE finding 1: a hand-picked index silently missed the
+    intended branch entirely and nothing caught it, because the previous
+    test's assertions were satisfied by the outer catch-all regardless of
+    WHERE the exception was raised).
+
+    Call-stack shape when this clock is invoked: this ``__call__`` frame
+    is on top; one frame below is ``_remaining``'s own
+    ``return deadline - _now()``; two frames below is the actual call
+    site inside ``retrigger_review_gate`` (e.g.
+    ``remaining_after = _remaining(deadline)``).
+    """
+
+    def __init__(self) -> None:
+        self.call_site_lines: list[str] = []
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        stack = traceback.extract_stack()
+        self.call_site_lines.append((stack[-3].line or "").strip())
+        return self.t
+
+
+# The exact source line of the retry loop's ``else``-branch final
+# diagnostic read (round-2/round-3 FINDING 1/2's home). Matched by TEXT,
+# not by a hand-counted call index or line number, so calibration stays
+# correct even if the surrounding code is refactored or reordered.
+_FINAL_DIAGNOSTIC_READ_LINE = "remaining_after = _remaining(deadline)"
+
+
+def _calibrate_final_diagnostic_call_number(
+    *,
+    repo: str,
+    pr_number: int,
+    retry_delays: tuple[float, ...],
+    list_results: list[Any],
+) -> int:
+    """Empirically determine which ``now()`` call number is the retry
+    loop's ``else``-branch final diagnostic read, by running the REAL
+    function once with a non-raising, call-site-recording clock and
+    locating the single call whose source line matches
+    ``_FINAL_DIAGNOSTIC_READ_LINE`` -- never a hand-counted or guessed
+    index (round-3 CE finding 1).
+    """
+    clock = _CallSiteRecordingClock()
+    client = _FakeClient(runs_sequence=list_results)
+    with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+        retrigger_review_gate(
+            repo,
+            pr_number,
+            client=client,
+            sleep=lambda _: None,
+            now=clock,
+            retry_delays=retry_delays,
+        )
+
+    matches = [
+        i
+        for i, line in enumerate(clock.call_site_lines, start=1)
+        if line == _FINAL_DIAGNOSTIC_READ_LINE
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one clock call site matching "
+        f"{_FINAL_DIAGNOSTIC_READ_LINE!r}, found {matches} in "
+        f"{clock.call_site_lines!r} -- calibration itself is unreliable, "
+        "which is itself worth reporting rather than guessing an index"
+    )
+    return matches[0]
 
 
 @pytest.mark.unit
@@ -857,24 +933,60 @@ class TestAbstainPaths:
         assert client.rerun_calls == []
 
     def test_a_throwing_clock_on_the_final_diagnostic_read_never_propagates(self) -> None:
-        """FINDING 2 (CE, round 2): the throwing-clock coverage above only
-        exercises deadline CONSTRUCTION -- the clock's very FIRST read. The
-        retry loop's ``else`` branch (round-2 FINDING 1) takes its OWN,
-        LATER clock read to build the retry-vs-budget diagnostic, and that
-        read had no direct test of its own. A clock that raises there must
-        be just as contained by the outer catch-all as one that raises up
-        front -- never propagating, always collapsing to a sensible
-        abstain.
+        """round-3 CE finding 1: this test PREVIOUSLY claimed to make the
+        clock throw on the retry loop's ``else``-branch final diagnostic
+        read, but did not. With the DEFAULT retry delays, a hand-picked
+        ``fail_at=4`` lands on the SECOND attempt's PRE-SLEEP budget check
+        (``remaining = _remaining(deadline)`` before the retry delay) --
+        several calls before the actual final diagnostic read, which
+        (verified empirically -- see below) is call #10 with those delays.
+        The test passed anyway, because the outer catch-all contains an
+        exception raised ANYWHERE in the function, so a wrong exception
+        site was indistinguishable from the right one by its assertions
+        alone. A test whose NAME claims coverage it does not provide is
+        worse than no test (this module has prior history with exactly
+        this failure mode: commit 15697643, "assurance-theatre test fix").
+
+        This version never hand-counts or guesses the index: it CALIBRATES
+        it first by running the real function with a non-raising,
+        call-site-recording clock (``_CallSiteRecordingClock``) and finding
+        the unique call whose source line IS the final diagnostic read
+        (matched by text, not line number), then reruns with a clock
+        configured to raise exactly there.
         """
-        # Calls 1-3 (deadline construction, pre-head-SHA remaining check,
-        # pre-listing remaining check) succeed; call 4 -- the retry loop's
-        # ``else``-branch diagnostic read -- raises.
-        clock = _NthCallThrowingClock(fail_at=4)
-        client = _FakeClient(runs_sequence=[[]])
+        retry_delays: tuple[float, ...] = ()  # single attempt -- keeps the
+        # calibration trivial to reason about; the target read is
+        # identified by matching its SOURCE LINE, not a hardcoded call
+        # position, so this stays correct regardless of attempt count.
+        list_results: list[Any] = [[]]  # no run ever found -> the loop
+        # runs to exhaustion and reaches the `else` branch, both during
+        # calibration and during the real (throwing) run below.
+
+        final_read_call_number = _calibrate_final_diagnostic_call_number(
+            repo="owner/repo",
+            pr_number=1,
+            retry_delays=retry_delays,
+            list_results=list_results,
+        )
+        # Calibration evidence (round-3 CE finding 1's own demand): with a
+        # single attempt, the calls are (1) deadline construction, (2) the
+        # pre-head-SHA-lookup remaining check, (3) the pre-listing-call
+        # remaining check, and ONLY THEN (4) the final diagnostic read --
+        # never 4 with the default multi-attempt delays the old version
+        # silently assumed.
+        assert final_read_call_number == 4
+
+        clock = _NthCallThrowingClock(fail_at=final_read_call_number)
+        client = _FakeClient(runs_sequence=list_results)
 
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
             result = retrigger_review_gate(
-                "owner/repo", 1, client=client, sleep=lambda _: None, now=clock
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock,
+                retry_delays=retry_delays,
             )
 
         assert result["status"] == "skipped"
@@ -1227,6 +1339,67 @@ class TestOverallTimeBudget:
         # ...AND that the budget coincided with that exhaustion, honestly,
         # rather than silently dropping the budget detail.
         assert "also exhausted" in reason or "budget" in reason
+
+    @pytest.mark.parametrize(
+        ("list_duration", "expect_budget_also_short"),
+        [
+            (4.001, True),  # remaining_after ~= 0.999s -- BELOW the 1.0s minimum
+            (4.000, False),  # remaining_after == 1.000s -- AT the minimum, still useful
+            (3.999, False),  # remaining_after == 1.001s -- comfortably above the minimum
+        ],
+    )
+    def test_budget_wording_never_contradicts_its_own_reported_remaining_time(
+        self, list_duration: float, expect_budget_also_short: bool
+    ) -> None:
+        """round-3 CE finding 2: just below the minimum-useful threshold,
+        the round-2 wording called the budget "ALSO exhausted" while
+        displaying a 1-DECIMAL-ROUNDED "s left" figure -- a true 0.999s
+        remainder rounds to a displayed "1.0s left", so a reader sees a
+        sentence asserting exhaustion right next to a number that says
+        otherwise. ``_MIN_USEFUL_CALL_SECONDS`` means "too little
+        remaining for a useful call", NOT "deadline reached" -- the
+        wording must say that, and must report enough precision that the
+        words and the number can never disagree.
+
+        CE independently pinned 0.999/1.000/1.001s and confirmed the
+        round-2 boundary CONDITION itself (``<``, not ``<=``) already held
+        at all three; this test pins the WORDING at that same boundary,
+        parametrized across exactly those three values.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(
+            clock,
+            head_sha_duration=5.0,
+            list_duration=list_duration,
+            list_results=[[]],
+        )
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock.now,
+                retry_delays=(),
+                overall_budget=10.0,
+            )
+
+        reason = result["reason"]
+        remaining_after = 10.0 - clock.now()
+
+        if expect_budget_also_short:
+            assert remaining_after < 1.0
+            # The number and the words must agree: enough precision that
+            # a sub-1.0s remainder can never display rounded up to "1.0".
+            assert f"{remaining_after:.3f}s remained" in reason
+            assert "too little left for another useful attempt" in reason
+            assert "ALSO exhausted" not in reason
+            assert "1.0s left" not in reason
+        else:
+            assert remaining_after >= 1.0
+            assert "not the overall time budget" in reason
+            assert "too little left for another useful attempt" not in reason
 
     def test_completes_normally_well_within_budget(self) -> None:
         """A generous budget against fast simulated calls must not perturb
