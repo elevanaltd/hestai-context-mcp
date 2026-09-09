@@ -574,21 +574,44 @@ def retrigger_review_gate(
         else:
             # The loop ran every attempt without a match AND without a
             # budget abort (both of those always ``break`` above) -- so
-            # this is RETRY-COUNT exhaustion, not the overall time budget.
-            # With the production defaults that is 4 attempts totalling
-            # ~7s against a 25s budget: most of the budget is typically
-            # still unused when this fires, and the reason must say so
-            # rather than let a bare "not completed"/"not found" message
-            # read as though the full budget were spent waiting.
+            # the STOPPING condition was retry-count exhaustion. That does
+            # NOT, on its own, tell us whether the overall time budget was
+            # also nearly spent by the time the last (successful, non-
+            # timing-out) call landed -- a call can consume exactly its
+            # budget-capped timeout and still return normally (round-2
+            # FINDING 1, CE), landing this exact branch with ~0 remaining.
+            # So the two halves of the diagnostic -- "retries ran out" and
+            # "was the budget also gone?" -- are measured and reported
+            # independently, never asserting one while the numbers show
+            # the other: with the production defaults (4 attempts, ~7s)
+            # the budget is normally nowhere close to spent, but that is
+            # verified here each time rather than assumed.
             if selection.reason:
                 attempts_made = len(attempt_delays)
-                used = overall_budget - _remaining(deadline)
+                remaining_after = _remaining(deadline)
+                used = overall_budget - remaining_after
+                budget_also_exhausted = remaining_after < _MIN_USEFUL_CALL_SECONDS
+                attempt_clause = (
+                    f"retry attempts exhausted after {attempts_made} "
+                    f"attempt{'s' if attempts_made != 1 else ''}"
+                )
+                if budget_also_exhausted:
+                    # Both constraints coincide at this boundary -- say so
+                    # plainly rather than claiming either one alone.
+                    budget_clause = (
+                        f"the overall time budget was ALSO exhausted at "
+                        f"essentially the same moment (used {used:.1f}s of "
+                        f"the {overall_budget:.0f}s budget, "
+                        f"{max(remaining_after, 0.0):.1f}s left)"
+                    )
+                else:
+                    budget_clause = (
+                        f"not the overall time budget (used {used:.1f}s of "
+                        f"the {overall_budget:.0f}s budget)"
+                    )
                 selection = _Selection(
                     None,
-                    f"{selection.reason} -- retry attempts exhausted after "
-                    f"{attempts_made} attempt{'s' if attempts_made != 1 else ''}, "
-                    f"not the overall time budget (used {used:.1f}s of the "
-                    f"{overall_budget:.0f}s budget)",
+                    f"{selection.reason} -- {attempt_clause}, {budget_clause}",
                 )
 
         if selection.run_id is None:
