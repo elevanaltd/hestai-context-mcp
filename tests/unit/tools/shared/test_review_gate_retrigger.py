@@ -250,6 +250,89 @@ class _SimTimingClient:
         self.rerun_calls.append((repo, run_id))
 
 
+class _BoundaryTimingClient:
+    """Fake ``ReviewGateClient`` for pinning round-2 FINDING 1: a listing
+    call can consume EXACTLY the (budget-capped) timeout it was given and
+    still return successfully -- a real subprocess finishing right at its
+    timeout ceiling without erroring is not a timeout. That lands the
+    clock exactly at the deadline (remaining ~= 0) via the loop's normal
+    success path, never via a budget-abort ``break`` -- so the retry
+    loop's ``else`` branch must not then claim the abstain was "not the
+    overall time budget" while its own numbers show the whole budget was
+    spent getting there.
+
+    Unlike ``_SimTimingClient``, only the LAST configured listing result
+    consumes its full passed-in timeout; every earlier one consumes a
+    small fixed duration, so a test can control precisely how much budget
+    remains when the FINAL call lands.
+    """
+
+    def __init__(
+        self,
+        clock: _SimClock,
+        *,
+        head_sha_duration: float,
+        early_list_duration: float,
+        list_results: list[Any],
+    ) -> None:
+        self._clock = clock
+        self._head_sha_duration = head_sha_duration
+        self._early_list_duration = early_list_duration
+        self._list_results = list(list_results)
+        self._list_call_count = 0
+        self.list_call_timeouts: list[float] = []
+        self.rerun_calls: list[tuple[str, int]] = []
+
+    def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str:
+        self._clock.advance(self._head_sha_duration)
+        return "abc123headsha"
+
+    def list_workflow_runs_for_head_sha(
+        self, repo: str, *args: str, timeout: float
+    ) -> list[dict[str, Any]]:
+        self.list_call_timeouts.append(timeout)
+        idx = self._list_call_count
+        self._list_call_count += 1
+        is_last = idx == len(self._list_results) - 1
+        if is_last:
+            # Consumes exactly the timeout it was handed and still
+            # succeeds -- the boundary case FINDING 1 pins.
+            self._clock.advance(timeout)
+        else:
+            self._clock.advance(self._early_list_duration)
+        return self._list_results[idx] if idx < len(self._list_results) else self._list_results[-1]
+
+    def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None:
+        self.rerun_calls.append((repo, run_id))
+
+
+class _NthCallThrowingClock:
+    """Deterministic clock that returns a valid, monotonically-advancing
+    time for its first ``fail_at - 1`` calls, then raises on call number
+    ``fail_at`` -- and never again after (a real clock does not un-break).
+
+    Pins an exception at ONE SPECIFIC clock read (round-2 FINDING 2: the
+    retry loop's ``else`` branch takes its own LATER clock read, distinct
+    from the deadline-construction read the existing throwing-clock test
+    covers) without disturbing every earlier read the way an always-raise
+    clock would.
+    """
+
+    def __init__(self, fail_at: int, step: float = 0.1) -> None:
+        self._call_count = 0
+        self._fail_at = fail_at
+        self._t = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        self._call_count += 1
+        if self._call_count == self._fail_at:
+            raise RuntimeError("clock failed on the final diagnostic read")
+        value = self._t
+        self._t += self._step
+        return value
+
+
 @pytest.mark.unit
 class TestNoToken:
     def test_no_token_skips_without_touching_client(self) -> None:
@@ -773,6 +856,31 @@ class TestAbstainPaths:
         assert client.head_sha_calls == 0
         assert client.rerun_calls == []
 
+    def test_a_throwing_clock_on_the_final_diagnostic_read_never_propagates(self) -> None:
+        """FINDING 2 (CE, round 2): the throwing-clock coverage above only
+        exercises deadline CONSTRUCTION -- the clock's very FIRST read. The
+        retry loop's ``else`` branch (round-2 FINDING 1) takes its OWN,
+        LATER clock read to build the retry-vs-budget diagnostic, and that
+        read had no direct test of its own. A clock that raises there must
+        be just as contained by the outer catch-all as one that raises up
+        front -- never propagating, always collapsing to a sensible
+        abstain.
+        """
+        # Calls 1-3 (deadline construction, pre-head-SHA remaining check,
+        # pre-listing remaining check) succeed; call 4 -- the retry loop's
+        # ``else``-branch diagnostic read -- raises.
+        clock = _NthCallThrowingClock(fail_at=4)
+        client = _FakeClient(runs_sequence=[[]])
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 1, client=client, sleep=lambda _: None, now=clock
+            )
+
+        assert result["status"] == "skipped"
+        assert "clock failed on the final diagnostic read" in result["reason"]
+        assert client.rerun_calls == []
+
     def test_outer_catch_all_never_propagates_unexpected_token_resolution_failure(self) -> None:
         """Finding 10: cover the OUTER catch-all (wrapping the whole
         function body), not just the inner per-step try/excepts. Force an
@@ -1070,6 +1178,55 @@ class TestOverallTimeBudget:
         # to the overall time budget running out.
         assert "attempts exhausted" in reason.lower()
         assert "not the overall time budget" in reason.lower()
+
+    def test_reason_does_not_contradict_itself_when_the_final_call_exhausts_the_budget(
+        self,
+    ) -> None:
+        """FINDING 1 (CE, round 2): a listing call can consume exactly the
+        remaining (budget-capped) timeout it was given and still return
+        successfully -- landing the loop's natural, no-match exit right at
+        the deadline WITHOUT ever going through a budget-abort ``break``.
+        The retry-vs-budget diagnostic must not then claim the abstain was
+        "not the overall time budget" while its own reported numbers show
+        the whole budget was spent getting there -- both halves of that
+        sentence cannot be true at once. When the two genuinely coincide,
+        the reason must say so plainly instead of picking one.
+        """
+        clock = _SimClock()
+        client = _BoundaryTimingClient(
+            clock,
+            head_sha_duration=8.0,
+            early_list_duration=0.5,
+            list_results=[[], []],
+        )
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock.now,
+                retry_delays=(0.0,),
+                overall_budget=10.0,
+            )
+
+        # The whole 10s budget really was consumed reaching this abstain.
+        assert clock.now() == pytest.approx(10.0)
+        assert result["status"] == "skipped"
+        assert result["run_id"] is None
+        assert client.rerun_calls == []
+
+        reason = result["reason"].lower()
+        # The contradiction this test pins against: the old wording always
+        # claimed "not the overall time budget" regardless of what the
+        # numbers showed.
+        assert "not the overall time budget" not in reason
+        # It must still tell a reader retries were exhausted...
+        assert "attempts exhausted" in reason
+        # ...AND that the budget coincided with that exhaustion, honestly,
+        # rather than silently dropping the budget detail.
+        assert "also exhausted" in reason or "budget" in reason
 
     def test_completes_normally_well_within_budget(self) -> None:
         """A generous budget against fast simulated calls must not perturb
