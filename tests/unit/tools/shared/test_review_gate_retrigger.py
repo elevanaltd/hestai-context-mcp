@@ -51,6 +51,7 @@ import pytest
 
 from hestai_context_mcp.tools.shared.review_gate_retrigger import (
     DEFAULT_OVERALL_BUDGET_SECONDS,
+    DEFAULT_RETRY_DELAYS,
     WORKFLOW_FILE,
     GhApiError,
     retrigger_review_gate,
@@ -1013,6 +1014,62 @@ class TestOverallTimeBudget:
         # ...and stopped because the budget ran out, without ever attempting
         # a rerun call GitHub would reject.
         assert client.rerun_calls == []
+
+    def test_production_defaults_exhaust_retries_long_before_the_budget(self) -> None:
+        """With the PRODUCTION configuration (default retry delays and
+        default overall budget) a run that never completes is abandoned by
+        RETRY-COUNT exhaustion, not by the overall time budget -- the two
+        are not interchangeable, and the earlier version of this test suite
+        only exercised the inverse (delays that exceed the budget), which
+        is not how this module actually ships.
+
+        Default delays (1.0, 2.0, 4.0) give 4 attempts totalling ~7s against
+        a 25s default budget -- vastly less than a real gate run's observed
+        13-40s. So the loop must stop once its 4 attempts are spent, with
+        most of the 25s budget left unused, and the abstain reason must say
+        so honestly: it must name retry-count exhaustion, not claim the
+        budget was consumed, and it must not misrepresent an in-flight run
+        as merely "not completed" without saying attempts ran out.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(
+            clock,
+            head_sha_duration=0.1,
+            list_duration=0.1,
+            list_results=[[_run(50, pr_number=7, status="in_progress")]],
+        )
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                7,
+                client=client,
+                sleep=clock.sleep,
+                now=clock.now,
+                retry_delays=DEFAULT_RETRY_DELAYS,
+                overall_budget=DEFAULT_OVERALL_BUDGET_SECONDS,
+            )
+
+        # 4 attempts (initial + 3 retries): head lookup + 4 listing calls
+        # (0.1s each) + delays summing to 7.0s = 7.5s total -- nowhere near
+        # the 25s budget.
+        assert clock.now() == pytest.approx(7.5)
+        assert clock.now() < DEFAULT_OVERALL_BUDGET_SECONDS - 10.0
+        assert result["status"] == "skipped"
+        assert result["run_id"] is None
+        assert len(client.list_call_timeouts) == 4
+        assert client.rerun_calls == []
+
+        reason = result["reason"]
+        # The stale claim this test pins against: the wait was NOT actually
+        # "for the whole retry budget" -- it was 4 attempts, ~7s, with 17.5s
+        # of the 25s budget never touched.
+        assert "for the whole retry budget" not in reason
+        assert "in_progress" in reason
+        # The reason must attribute the stop to retry-count exhaustion, not
+        # to the overall time budget running out.
+        assert "attempts exhausted" in reason.lower()
+        assert "not the overall time budget" in reason.lower()
 
     def test_completes_normally_well_within_budget(self) -> None:
         """A generous budget against fast simulated calls must not perturb
