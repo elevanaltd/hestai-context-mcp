@@ -15,10 +15,11 @@ Rework #2 (all-four-reviewers CONDITIONAL triage on PR #148) fixed:
      ``pull_requests`` metadata no longer suppresses retry when no PR match
      was found -- it only becomes the terminal reason once the retry
      budget is spent.
-  4. Fragile run lookup (CE + CRS): listing is now scoped to the workflow
-     FILE name (stable) via the workflow-scoped endpoint, not the mutable
-     display name, with an explicit, tested page-size bound instead of an
-     unbounded/undocumented truncation risk.
+  4. Fragile run lookup (CE + CRS): listing was moved off the mutable
+     display name onto the workflow FILE name via the workflow-scoped
+     endpoint. SUPERSEDED by rework #5 below -- that endpoint resolves the
+     filename against the consuming repo's own workflow entry, which is the
+     wrong entry in a ruleset-wired repo. The page-size bound survives.
   5. Event filter too narrow (CRS/coordinator): the ruleset enforces
      pull_request, pull_request_target AND merge_group -- selection now
      accepts all three rather than hardcoding one.
@@ -26,10 +27,25 @@ Rework #2 (all-four-reviewers CONDITIONAL triage on PR #148) fixed:
      carries the observed HTTP signal, not just that status == "skipped".
   9/10. Additional coverage: a listing failure mid-retry-loop, the outer
      catch-all exception path, and more `_GhCliClient` edge cases.
+
+Rework #5 (this branch) fixed the two failure modes that made the module
+abstain on every ruleset-wired consuming repo:
+
+  * runs are listed UNSCOPED at the head SHA and identified by the ``path``
+    each run reports, so location no longer depends on the consuming repo
+    resolving ``review-gate.yml`` to the right workflow id (see
+    ``TestRulesetWiredRepo``). A full page is named as possible truncation
+    rather than reported as a bare "not found" (``TestPageSizeBound``).
+  * a matched run still in flight is retryable rather than terminal: it
+    predates the verdict comment, so it must be waited for and re-run,
+    within the unchanged overall budget (``TestRunStatusSelection``,
+    ``TestOverallTimeBudget``).
 """
 
 from __future__ import annotations
 
+import math
+import traceback
 from typing import Any
 from unittest.mock import patch
 
@@ -37,6 +53,7 @@ import pytest
 
 from hestai_context_mcp.tools.shared.review_gate_retrigger import (
     DEFAULT_OVERALL_BUDGET_SECONDS,
+    DEFAULT_RETRY_DELAYS,
     WORKFLOW_FILE,
     GhApiError,
     retrigger_review_gate,
@@ -44,12 +61,20 @@ from hestai_context_mcp.tools.shared.review_gate_retrigger import (
 
 _MOD = "hestai_context_mcp.tools.shared.review_gate_retrigger"
 
+# The gate workflow's path as GitHub reports it on every run object. Stated
+# as a literal here (not imported from the module under test) so these tests
+# assert an independent expectation rather than tautologically agreeing with
+# whatever the module happens to define.
+_GATE_WORKFLOW_PATH = ".github/workflows/review-gate.yml"
+
 
 def _run(
     run_id: int,
     pr_number: int | None,
     status: str = "completed",
     event: str = "pull_request",
+    path: str = _GATE_WORKFLOW_PATH,
+    workflow_id: int = 224758050,
 ) -> dict[str, Any]:
     """Build a workflow-run dict shaped like GitHub's list-runs response.
 
@@ -62,6 +87,8 @@ def _run(
         "id": run_id,
         "status": status,
         "event": event,
+        "path": path,
+        "workflow_id": workflow_id,
         "pull_requests": [] if pr_number is None else [{"number": pr_number}],
     }
 
@@ -89,7 +116,7 @@ class _FakeClient:
         self._runs_sequence = list(runs_sequence) if runs_sequence is not None else [[]]
         self._rerun_result = rerun_result
         self.list_calls = 0
-        self.list_call_args: list[tuple[str, str, str]] = []
+        self.list_call_args: list[tuple[str, ...]] = []
         self.list_call_timeouts: list[float] = []
         self.rerun_calls: list[tuple[str, int]] = []
         self.rerun_timeouts: list[float] = []
@@ -104,9 +131,18 @@ class _FakeClient:
         return self._head_sha
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
+        self, repo: str, *args: str, timeout: float
     ) -> list[dict[str, Any]]:
-        self.list_call_args.append((repo, workflow_file, head_sha))
+        """Accepts BOTH listing shapes, so one test body can state the
+        contract across the endpoint change instead of the fake dictating it:
+
+          * workflow-SCOPED (old): ``(repo, workflow_file, head_sha)``
+          * UNSCOPED        (new): ``(repo, head_sha)``
+
+        Which shape was actually used is recorded in ``list_call_args`` and
+        asserted directly by the tests that care.
+        """
+        self.list_call_args.append((repo, *args))
         self.list_call_timeouts.append(timeout)
         idx = self.list_calls
         self.list_calls += 1
@@ -203,7 +239,7 @@ class _SimTimingClient:
         return self._head_sha
 
     def list_workflow_runs_for_head_sha(
-        self, repo: str, workflow_file: str, head_sha: str, *, timeout: float
+        self, repo: str, *args: str, timeout: float
     ) -> list[dict[str, Any]]:
         self.list_call_timeouts.append(timeout)
         self._consume(self._list_duration, timeout, label="run-listing")
@@ -214,6 +250,164 @@ class _SimTimingClient:
     def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None:
         self._consume(self._rerun_duration, timeout, label="rerun")
         self.rerun_calls.append((repo, run_id))
+
+
+class _BoundaryTimingClient:
+    """Fake ``ReviewGateClient`` for pinning round-2 FINDING 1: a listing
+    call can consume EXACTLY the (budget-capped) timeout it was given and
+    still return successfully -- a real subprocess finishing right at its
+    timeout ceiling without erroring is not a timeout. That lands the
+    clock exactly at the deadline (remaining ~= 0) via the loop's normal
+    success path, never via a budget-abort ``break`` -- so the retry
+    loop's ``else`` branch must not then claim the abstain was "not the
+    overall time budget" while its own numbers show the whole budget was
+    spent getting there.
+
+    Unlike ``_SimTimingClient``, only the LAST configured listing result
+    consumes its full passed-in timeout; every earlier one consumes a
+    small fixed duration, so a test can control precisely how much budget
+    remains when the FINAL call lands.
+    """
+
+    def __init__(
+        self,
+        clock: _SimClock,
+        *,
+        head_sha_duration: float,
+        early_list_duration: float,
+        list_results: list[Any],
+    ) -> None:
+        self._clock = clock
+        self._head_sha_duration = head_sha_duration
+        self._early_list_duration = early_list_duration
+        self._list_results = list(list_results)
+        self._list_call_count = 0
+        self.list_call_timeouts: list[float] = []
+        self.rerun_calls: list[tuple[str, int]] = []
+
+    def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str:
+        self._clock.advance(self._head_sha_duration)
+        return "abc123headsha"
+
+    def list_workflow_runs_for_head_sha(
+        self, repo: str, *args: str, timeout: float
+    ) -> list[dict[str, Any]]:
+        self.list_call_timeouts.append(timeout)
+        idx = self._list_call_count
+        self._list_call_count += 1
+        is_last = idx == len(self._list_results) - 1
+        if is_last:
+            # Consumes exactly the timeout it was handed and still
+            # succeeds -- the boundary case FINDING 1 pins.
+            self._clock.advance(timeout)
+        else:
+            self._clock.advance(self._early_list_duration)
+        return self._list_results[idx] if idx < len(self._list_results) else self._list_results[-1]
+
+    def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None:
+        self.rerun_calls.append((repo, run_id))
+
+
+class _NthCallThrowingClock:
+    """Deterministic clock that returns a valid, monotonically-advancing
+    time for its first ``fail_at - 1`` calls, then raises on call number
+    ``fail_at`` -- and never again after (a real clock does not un-break).
+
+    Pins an exception at ONE SPECIFIC clock read (round-2 FINDING 2: the
+    retry loop's ``else`` branch takes its own LATER clock read, distinct
+    from the deadline-construction read the existing throwing-clock test
+    covers) without disturbing every earlier read the way an always-raise
+    clock would.
+    """
+
+    def __init__(self, fail_at: int, step: float = 0.1) -> None:
+        self._call_count = 0
+        self._fail_at = fail_at
+        self._t = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        self._call_count += 1
+        if self._call_count == self._fail_at:
+            raise RuntimeError("clock failed on the final diagnostic read")
+        value = self._t
+        self._t += self._step
+        return value
+
+
+class _CallSiteRecordingClock:
+    """Never raises. Records, for every ``now()`` read, the SOURCE LINE
+    TEXT of the call site inside ``retrigger_review_gate`` that invoked
+    ``_remaining(deadline)`` -- via ``traceback.extract_stack()`` -- so a
+    test can determine EMPIRICALLY which call number corresponds to a
+    specific line of source, rather than hand-counting or guessing an
+    index (round-3 CE finding 1: a hand-picked index silently missed the
+    intended branch entirely and nothing caught it, because the previous
+    test's assertions were satisfied by the outer catch-all regardless of
+    WHERE the exception was raised).
+
+    Call-stack shape when this clock is invoked: this ``__call__`` frame
+    is on top; one frame below is ``_remaining``'s own
+    ``return deadline - _now()``; two frames below is the actual call
+    site inside ``retrigger_review_gate`` (e.g.
+    ``remaining_after = _remaining(deadline)``).
+    """
+
+    def __init__(self) -> None:
+        self.call_site_lines: list[str] = []
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        stack = traceback.extract_stack()
+        self.call_site_lines.append((stack[-3].line or "").strip())
+        return self.t
+
+
+# The exact source line of the retry loop's ``else``-branch final
+# diagnostic read (round-2/round-3 FINDING 1/2's home). Matched by TEXT,
+# not by a hand-counted call index or line number, so calibration stays
+# correct even if the surrounding code is refactored or reordered.
+_FINAL_DIAGNOSTIC_READ_LINE = "remaining_after = _remaining(deadline)"
+
+
+def _calibrate_final_diagnostic_call_number(
+    *,
+    repo: str,
+    pr_number: int,
+    retry_delays: tuple[float, ...],
+    list_results: list[Any],
+) -> int:
+    """Empirically determine which ``now()`` call number is the retry
+    loop's ``else``-branch final diagnostic read, by running the REAL
+    function once with a non-raising, call-site-recording clock and
+    locating the single call whose source line matches
+    ``_FINAL_DIAGNOSTIC_READ_LINE`` -- never a hand-counted or guessed
+    index (round-3 CE finding 1).
+    """
+    clock = _CallSiteRecordingClock()
+    client = _FakeClient(runs_sequence=list_results)
+    with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+        retrigger_review_gate(
+            repo,
+            pr_number,
+            client=client,
+            sleep=lambda _: None,
+            now=clock,
+            retry_delays=retry_delays,
+        )
+
+    matches = [
+        i
+        for i, line in enumerate(clock.call_site_lines, start=1)
+        if line == _FINAL_DIAGNOSTIC_READ_LINE
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one clock call site matching "
+        f"{_FINAL_DIAGNOSTIC_READ_LINE!r}, found {matches} in "
+        f"{clock.call_site_lines!r} -- calibration itself is unreliable, "
+        "which is itself worth reporting rather than guessing an index"
+    )
+    return matches[0]
 
 
 @pytest.mark.unit
@@ -266,16 +460,159 @@ class TestHappyPath:
         assert client.head_sha_calls == 1
         assert result["head_sha"] == "freshly-resolved-sha"
 
-    def test_lists_runs_via_the_stable_workflow_file_not_display_name(self) -> None:
-        """Finding 4: the listing must be scoped by the workflow's FILE name
-        (stable) rather than its mutable display name.
+    def test_lists_runs_unscoped_at_the_head_sha_not_scoped_to_the_workflow_file(
+        self,
+    ) -> None:
+        """The listing must NOT be keyed on the gate's workflow FILE name.
+
+        The workflow-scoped endpoint resolves ``review-gate.yml`` against the
+        CONSUMING repo's own workflow entry, which in a ruleset-wired repo is
+        not the entry that actually ran (see ``TestRulesetWiredRepo``). Every
+        run object reports its own ``path`` regardless of which workflow
+        entry owns it, so the listing is taken unscoped at the head SHA and
+        narrowed on that path during selection instead.
         """
         client = _FakeClient(runs_sequence=[[_run(1, pr_number=1)]])
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
             retrigger_review_gate("owner/repo", 1, client=client, sleep=lambda _: None)
 
-        assert client.list_call_args == [("owner/repo", WORKFLOW_FILE, "abc123headsha")]
-        assert WORKFLOW_FILE == "review-gate.yml"
+        assert client.list_call_args == [("owner/repo", "abc123headsha")]
+
+
+class _RulesetWiredClient:
+    """Simulates a consuming repo wired by an org ruleset.
+
+    The run's identifying fields -- id 34159096298, ``workflow_id``
+    299891129, ``path`` ``.github/workflows/review-gate.yml``,
+    ``event=pull_request``, ``status=completed`` -- are taken from live
+    ``gh api`` output for elevanaltd/elevana-studio PR #1945 at head
+    500ce6f8c7c6db8ee3cc917c9057cfe0b544eefc. Its ``pull_requests``
+    association is SYNTHESIZED, not copied: GitHub empties that array once
+    a PR is merged (as #1945 now is), while an open PR -- the only state in
+    which this module ever runs -- carries it. The unverifiable-association
+    path is covered separately by ``TestUnverifiableMetadataRetries``.
+
+    What the live output established, and what this fake reproduces:
+
+      * ``repos/{repo}/actions/workflows`` lists ONE entry named "Review
+        Gate" at ``.github/workflows/review-gate.yml`` -- the repo's OWN
+        caller file, id 224758050, with zero runs at that SHA.
+      * the run that actually executed belongs to the ruleset-INJECTED
+        required workflow, id 299891129. It is invisible to the
+        workflow-scoped endpoint (``.../actions/workflows/review-gate.yml/
+        runs?head_sha=...`` returned ``total_count=0``) yet reports the very
+        same ``path``.
+
+    Hence: the workflow-SCOPED call shape yields nothing, while the UNSCOPED
+    call shape yields every run at the SHA, the injected one included.
+    """
+
+    OWN_WORKFLOW_ID = 224758050
+    INJECTED_WORKFLOW_ID = 299891129
+
+    def __init__(self, runs: list[dict[str, Any]]) -> None:
+        self._runs = runs
+        self.scoped_calls = 0
+        self.unscoped_calls = 0
+        self.rerun_calls: list[tuple[str, int]] = []
+
+    def get_pr_head_sha(self, repo: str, pr_number: int, *, timeout: float) -> str:
+        return "500ce6f8c7c6db8ee3cc917c9057cfe0b544eefc"
+
+    def list_workflow_runs_for_head_sha(
+        self, repo: str, *args: str, timeout: float
+    ) -> list[dict[str, Any]]:
+        if len(args) == 2:  # (workflow_file, head_sha) -- the scoped endpoint
+            self.scoped_calls += 1
+            return [r for r in self._runs if r["workflow_id"] == self.OWN_WORKFLOW_ID]
+        self.unscoped_calls += 1
+        return list(self._runs)
+
+    def rerun_workflow_run(self, repo: str, run_id: int, *, timeout: float) -> None:
+        self.rerun_calls.append((repo, run_id))
+
+
+@pytest.mark.unit
+class TestRulesetWiredRepo:
+    """The primary case this module exists for: a repo whose Review Gate is
+    injected by an org ruleset. Two workflow entries share the name "Review
+    Gate" at the same path -- the repo's own caller file and the injected
+    required workflow -- and only the latter ever runs.
+    """
+
+    def test_locates_the_ruleset_injected_run_the_scoped_endpoint_cannot_see(
+        self,
+    ) -> None:
+        injected = _run(
+            34159096298,
+            pr_number=1945,
+            workflow_id=_RulesetWiredClient.INJECTED_WORKFLOW_ID,
+        )
+        client = _RulesetWiredClient([injected])
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "elevanaltd/elevana-studio",
+                1945,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(),
+            )
+
+        assert result["status"] == "re-triggered"
+        assert result["run_id"] == 34159096298
+        assert client.rerun_calls == [("elevanaltd/elevana-studio", 34159096298)]
+        # Run location must not depend on the consuming repo resolving
+        # `review-gate.yml` to the right workflow id at all.
+        assert client.scoped_calls == 0
+        assert client.unscoped_calls == 1
+
+    def test_ignores_other_workflows_runs_returned_by_the_unscoped_listing(
+        self,
+    ) -> None:
+        """The unscoped listing returns EVERY workflow's runs at the SHA, so
+        selection must narrow on the gate's own workflow path -- a completed
+        CI run for the same PR at the same SHA is not the required check.
+        """
+        client = _FakeClient(
+            runs_sequence=[
+                [
+                    _run(
+                        60,
+                        pr_number=7,
+                        path=".github/workflows/ci.yml",
+                        workflow_id=987654,
+                    )
+                ]
+            ]
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 7, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert result["run_id"] is None
+        assert client.rerun_calls == []
+
+    def test_run_without_a_path_field_is_excluded_not_crashed_on(self) -> None:
+        """TMG gap: GitHub always reports ``path`` on run objects, but
+        selection must degrade to "not the gate's run" if it is ever absent
+        -- never raise, and never select a run whose workflow it could not
+        identify.
+        """
+        pathless = _run(70, pr_number=7)
+        del pathless["path"]
+        client = _FakeClient(runs_sequence=[[pathless]])
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 7, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert result["run_id"] is None
+        assert client.rerun_calls == []
 
 
 @pytest.mark.unit
@@ -395,18 +732,60 @@ class TestRunStatusSelection:
         assert result["run_id"] == 40
         assert client.rerun_calls == [("owner/repo", 40)]
 
-    def test_abstains_when_only_matching_run_is_in_progress(self) -> None:
+    def test_waits_for_an_in_flight_run_and_reruns_it_once_completed(self) -> None:
+        """An in-flight run is NOT a definitive answer.
+
+        The run in flight when a verdict lands was fired by an earlier push
+        (``pull_request: opened``) and therefore PREDATES the verdict comment
+        -- letting it "evaluate on its own once it finishes" reproduces
+        exactly the red the re-trigger exists to clear. So the in-flight case
+        must be retryable: the existing bounded retry loop waits for
+        completion and then re-runs it.
+        """
+        client = _FakeClient(
+            runs_sequence=[
+                [_run(50, pr_number=7, status="queued")],
+                [_run(50, pr_number=7, status="in_progress")],
+                [_run(50, pr_number=7, status="completed")],
+            ]
+        )
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                7,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(1.0, 2.0),
+            )
+
+        assert result["status"] == "re-triggered"
+        assert result["run_id"] == 50
+        assert client.list_calls == 3
+        assert client.rerun_calls == [("owner/repo", 50)]
+
+    def test_abstains_naming_the_in_flight_state_once_retries_are_exhausted(
+        self,
+    ) -> None:
+        """Waiting is bounded: a run that never completes within the retry
+        budget still abstains, with a reason naming its non-completed state
+        -- never a rerun call GitHub would 422, and never a fabricated
+        outcome.
+        """
         client = _FakeClient(runs_sequence=[[_run(50, pr_number=7, status="in_progress")]])
         with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
-            result = retrigger_review_gate("owner/repo", 7, client=client, sleep=lambda _: None)
+            result = retrigger_review_gate(
+                "owner/repo",
+                7,
+                client=client,
+                sleep=lambda _: None,
+                retry_delays=(1.0, 2.0),
+            )
 
         assert result["status"] == "skipped"
         assert "in_progress" in result["reason"]
         assert result["run_id"] is None
         assert client.rerun_calls == []
-        # An in-flight run is a definitive answer (it will evaluate on its
-        # own) -- must not retry waiting for it to complete.
-        assert client.list_calls == 1
+        assert client.list_calls == 3  # initial attempt + 2 retries
 
 
 @pytest.mark.unit
@@ -530,6 +909,89 @@ class TestAbstainPaths:
         assert result["status"] == "skipped"
         assert "502" in result["reason"]
         assert client.list_calls == 2
+        assert client.rerun_calls == []
+
+    def test_a_throwing_clock_never_propagates(self) -> None:
+        """CRS: the injected clock's FIRST read (computing the deadline) sat
+        outside the outer catch-all, so a clock that raises escaped the
+        "NEVER raises" contract entirely -- before any Actions call, and
+        before the token check. Every failure mode must collapse to an
+        abstain, the clock included.
+        """
+
+        def broken_clock() -> float:
+            raise RuntimeError("clock failed")
+
+        client = _FakeClient()
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 1, client=client, sleep=lambda _: None, now=broken_clock
+            )
+
+        assert result["status"] == "skipped"
+        assert "clock failed" in result["reason"]
+        assert client.head_sha_calls == 0
+        assert client.rerun_calls == []
+
+    def test_a_throwing_clock_on_the_final_diagnostic_read_never_propagates(self) -> None:
+        """round-3 CE finding 1: this test PREVIOUSLY claimed to make the
+        clock throw on the retry loop's ``else``-branch final diagnostic
+        read, but did not. With the DEFAULT retry delays, a hand-picked
+        ``fail_at=4`` lands on the SECOND attempt's PRE-SLEEP budget check
+        (``remaining = _remaining(deadline)`` before the retry delay) --
+        several calls before the actual final diagnostic read, which
+        (verified empirically -- see below) is call #10 with those delays.
+        The test passed anyway, because the outer catch-all contains an
+        exception raised ANYWHERE in the function, so a wrong exception
+        site was indistinguishable from the right one by its assertions
+        alone. A test whose NAME claims coverage it does not provide is
+        worse than no test (this module has prior history with exactly
+        this failure mode: commit 15697643, "assurance-theatre test fix").
+
+        This version never hand-counts or guesses the index: it CALIBRATES
+        it first by running the real function with a non-raising,
+        call-site-recording clock (``_CallSiteRecordingClock``) and finding
+        the unique call whose source line IS the final diagnostic read
+        (matched by text, not line number), then reruns with a clock
+        configured to raise exactly there.
+        """
+        retry_delays: tuple[float, ...] = ()  # single attempt -- keeps the
+        # calibration trivial to reason about; the target read is
+        # identified by matching its SOURCE LINE, not a hardcoded call
+        # position, so this stays correct regardless of attempt count.
+        list_results: list[Any] = [[]]  # no run ever found -> the loop
+        # runs to exhaustion and reaches the `else` branch, both during
+        # calibration and during the real (throwing) run below.
+
+        final_read_call_number = _calibrate_final_diagnostic_call_number(
+            repo="owner/repo",
+            pr_number=1,
+            retry_delays=retry_delays,
+            list_results=list_results,
+        )
+        # Calibration evidence (round-3 CE finding 1's own demand): with a
+        # single attempt, the calls are (1) deadline construction, (2) the
+        # pre-head-SHA-lookup remaining check, (3) the pre-listing-call
+        # remaining check, and ONLY THEN (4) the final diagnostic read --
+        # never 4 with the default multi-attempt delays the old version
+        # silently assumed.
+        assert final_read_call_number == 4
+
+        clock = _NthCallThrowingClock(fail_at=final_read_call_number)
+        client = _FakeClient(runs_sequence=list_results)
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock,
+                retry_delays=retry_delays,
+            )
+
+        assert result["status"] == "skipped"
+        assert "clock failed on the final diagnostic read" in result["reason"]
         assert client.rerun_calls == []
 
     def test_outer_catch_all_never_propagates_unexpected_token_resolution_failure(self) -> None:
@@ -741,6 +1203,232 @@ class TestOverallTimeBudget:
         assert client.list_call_timeouts[0] > client.list_call_timeouts[1]
         assert clock.now() <= 10.0
 
+    def test_in_flight_retrying_still_cannot_cross_the_deadline(self) -> None:
+        """TMG gap: an in-flight run is retryable as of this change, so it
+        now drives the retry loop. Waiting for it must remain bounded by the
+        SAME overall ceiling -- a run that never completes exhausts the
+        budget and abstains, it does not extend it.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(
+            clock,
+            head_sha_duration=0.5,
+            list_duration=0.5,
+            list_results=[[_run(50, pr_number=7, status="in_progress")]],
+        )
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                7,
+                client=client,
+                sleep=clock.sleep,
+                now=clock.now,
+                overall_budget=10.0,
+                retry_delays=(4.0, 4.0, 4.0),
+            )
+
+        assert clock.now() <= 10.0, "total simulated elapsed time exceeded the budget"
+        assert result["status"] == "skipped"
+        # It really did wait across more than the first attempt...
+        assert len(client.list_call_timeouts) > 1
+        # ...and stopped because the budget ran out, without ever attempting
+        # a rerun call GitHub would reject.
+        assert client.rerun_calls == []
+
+    def test_production_defaults_exhaust_retries_long_before_the_budget(self) -> None:
+        """With the PRODUCTION configuration (default retry delays and
+        default overall budget) a run that never completes is abandoned by
+        RETRY-COUNT exhaustion, not by the overall time budget -- the two
+        are not interchangeable, and the earlier version of this test suite
+        only exercised the inverse (delays that exceed the budget), which
+        is not how this module actually ships.
+
+        Default delays (1.0, 2.0, 4.0) give 4 attempts totalling ~7s against
+        a 25s default budget -- vastly less than a real gate run's observed
+        13-40s. So the loop must stop once its 4 attempts are spent, with
+        most of the 25s budget left unused, and the abstain reason must say
+        so honestly: it must name retry-count exhaustion, not claim the
+        budget was consumed, and it must not misrepresent an in-flight run
+        as merely "not completed" without saying attempts ran out.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(
+            clock,
+            head_sha_duration=0.1,
+            list_duration=0.1,
+            list_results=[[_run(50, pr_number=7, status="in_progress")]],
+        )
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                7,
+                client=client,
+                sleep=clock.sleep,
+                now=clock.now,
+                retry_delays=DEFAULT_RETRY_DELAYS,
+                overall_budget=DEFAULT_OVERALL_BUDGET_SECONDS,
+            )
+
+        # 4 attempts (initial + 3 retries): head lookup + 4 listing calls
+        # (0.1s each) + delays summing to 7.0s = 7.5s total -- nowhere near
+        # the 25s budget.
+        assert clock.now() == pytest.approx(7.5)
+        assert clock.now() < DEFAULT_OVERALL_BUDGET_SECONDS - 10.0
+        assert result["status"] == "skipped"
+        assert result["run_id"] is None
+        assert len(client.list_call_timeouts) == 4
+        assert client.rerun_calls == []
+
+        reason = result["reason"]
+        # The stale claim this test pins against: the wait was NOT actually
+        # "for the whole retry budget" -- it was 4 attempts, ~7s, with 17.5s
+        # of the 25s budget never touched.
+        assert "for the whole retry budget" not in reason
+        assert "in_progress" in reason
+        # The reason must attribute the stop to retry-count exhaustion, not
+        # to the overall time budget running out.
+        assert "attempts exhausted" in reason.lower()
+        assert "not the overall time budget" in reason.lower()
+
+    def test_reason_does_not_contradict_itself_when_the_final_call_exhausts_the_budget(
+        self,
+    ) -> None:
+        """FINDING 1 (CE, round 2): a listing call can consume exactly the
+        remaining (budget-capped) timeout it was given and still return
+        successfully -- landing the loop's natural, no-match exit right at
+        the deadline WITHOUT ever going through a budget-abort ``break``.
+        The retry-vs-budget diagnostic must not then claim the abstain was
+        "not the overall time budget" while its own reported numbers show
+        the whole budget was spent getting there -- both halves of that
+        sentence cannot be true at once. When the two genuinely coincide,
+        the reason must say so plainly instead of picking one.
+        """
+        clock = _SimClock()
+        client = _BoundaryTimingClient(
+            clock,
+            head_sha_duration=8.0,
+            early_list_duration=0.5,
+            list_results=[[], []],
+        )
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock.now,
+                retry_delays=(0.0,),
+                overall_budget=10.0,
+            )
+
+        # The whole 10s budget really was consumed reaching this abstain.
+        assert clock.now() == pytest.approx(10.0)
+        assert result["status"] == "skipped"
+        assert result["run_id"] is None
+        assert client.rerun_calls == []
+
+        reason = result["reason"].lower()
+        # The contradiction this test pins against: the old wording always
+        # claimed "not the overall time budget" regardless of what the
+        # numbers showed.
+        assert "not the overall time budget" not in reason
+        # It must still tell a reader retries were exhausted...
+        assert "attempts exhausted" in reason
+        # ...AND that the budget coincided with that exhaustion, honestly,
+        # rather than silently dropping the budget detail. round-4 FINDING
+        # 1 (CE): the previous form of this assertion --
+        # `"also exhausted" in reason or "budget" in reason` -- was an
+        # unconditional truth, not a pin: "also exhausted" had already been
+        # reworded out of the module in round 3 (making the first disjunct
+        # always False), and the word "budget" appears in BOTH branches'
+        # wording (making the second disjunct always True regardless of
+        # which branch fired). This must instead assert the BUDGET-SHORT
+        # branch's own distinguishing phrase, AND that the other branch's
+        # distinguishing phrase is absent -- so a future rewording of
+        # either branch that drifts them together (or swaps them) is
+        # caught, not silently absorbed by an `or`. (The
+        # "not the overall time budget" absence is already pinned above;
+        # this is the BUDGET-SHORT branch's own positive, distinguishing
+        # phrase -- the two together mean this test fails if either
+        # branch's wording drifts toward the other.)
+        assert "too little left for another useful attempt" in reason
+
+    @pytest.mark.parametrize(
+        ("list_duration", "expect_budget_also_short"),
+        [
+            (4.001, True),  # remaining_after ~= 0.999s -- BELOW the 1.0s minimum
+            (4.000, False),  # remaining_after == 1.000s -- AT the minimum, still useful
+            (3.999, False),  # remaining_after == 1.001s -- comfortably above the minimum
+            (4.0003, True),  # remaining_after ~= 0.9997s -- round-4 CE finding 2's
+            # OWN narrow window: ROUNDING (not flooring) 0.9997 to 3
+            # decimals produces "1.000", displaying EQUAL TO the 1.000s
+            # threshold despite genuinely being in the budget-short branch.
+        ],
+    )
+    def test_budget_wording_never_contradicts_its_own_reported_remaining_time(
+        self, list_duration: float, expect_budget_also_short: bool
+    ) -> None:
+        """round-3 CE finding 2: just below the minimum-useful threshold,
+        the round-2 wording called the budget "ALSO exhausted" while
+        displaying a 1-DECIMAL-ROUNDED "s left" figure -- a true 0.999s
+        remainder rounds to a displayed "1.0s left", so a reader sees a
+        sentence asserting exhaustion right next to a number that says
+        otherwise. round-4 CE finding 2: reporting at 3-decimal ROUNDED
+        precision narrowed but did not close the gap -- a remaining_after
+        in [0.9995, 1.0) still rounds to a displayed "1.000s", equal to
+        the (also 3-decimal) threshold text. ``_MIN_USEFUL_CALL_SECONDS``
+        means "too little remaining for a useful call", NOT "deadline
+        reached" -- the wording must say that, and the displayed remainder
+        must be FLOORED (not rounded) so it is always printed strictly
+        less than the printed threshold whenever this branch fires.
+
+        CE independently pinned 0.999/1.000/1.001s and confirmed the
+        round-2 boundary CONDITION itself (``<``, not ``<=``) already held
+        at all three; this test pins the WORDING (and, via the fourth
+        case, the ROUNDING-VS-FLOORING choice) at that same boundary.
+        """
+        clock = _SimClock()
+        client = _SimTimingClient(
+            clock,
+            head_sha_duration=5.0,
+            list_duration=list_duration,
+            list_results=[[]],
+        )
+
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo",
+                1,
+                client=client,
+                sleep=lambda _: None,
+                now=clock.now,
+                retry_delays=(),
+                overall_budget=10.0,
+            )
+
+        reason = result["reason"]
+        remaining_after = 10.0 - clock.now()
+
+        if expect_budget_also_short:
+            assert remaining_after < 1.0
+            # The number and the words must agree: FLOORED (not rounded)
+            # to 3 decimals, so a sub-1.0s remainder can never display
+            # equal to -- let alone above -- the printed 1.000s threshold.
+            floored_remaining = math.floor(max(remaining_after, 0.0) * 1000) / 1000
+            assert floored_remaining < 1.0
+            assert f"{floored_remaining:.3f}s remained" in reason
+            assert "too little left for another useful attempt" in reason
+            assert "ALSO exhausted" not in reason
+            assert "1.0s left" not in reason
+            assert "1.000s remained, below the 1.000s minimum" not in reason
+        else:
+            assert remaining_after >= 1.0
+            assert "not the overall time budget" in reason
+            assert "too little left for another useful attempt" not in reason
+
     def test_completes_normally_well_within_budget(self) -> None:
         """A generous budget against fast simulated calls must not perturb
         the happy path or come anywhere near the ceiling.
@@ -766,12 +1454,46 @@ class TestOverallTimeBudget:
 
 @pytest.mark.unit
 class TestPageSizeBound:
-    """Finding 4 (CE + CRS): the run listing must be scoped to the stable
-    workflow FILE name via the workflow-scoped endpoint (fixing the
-    mutable-display-name fragility), and its page-size bound must be
-    explicit and tested at the boundary rather than an undocumented
-    truncation risk.
+    """The run listing is taken from the repo-wide (unscoped) runs endpoint
+    at one head SHA, with an explicit, tested page bound. Because that page
+    is now shared with every other workflow that fired at the same commit,
+    truncation must be NAMED in the abstain reason rather than silently
+    reported as "not found".
     """
+
+    def test_truncated_listing_is_named_in_the_abstain_reason(self) -> None:
+        """A full page of other workflows' runs can, in principle, push the
+        gate's own run off the single bounded page. That degrades to an
+        abstain (never a wrong rerun), but the reason must say the page was
+        full so an operator can tell truncation from a genuine absence.
+        """
+        crowd = [
+            _run(i, pr_number=999, path=".github/workflows/ci.yml", workflow_id=987654)
+            for i in range(100)
+        ]
+        client = _FakeClient(runs_sequence=[crowd])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 7, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert "100" in result["reason"]
+        assert "truncat" in result["reason"].lower()
+        assert client.rerun_calls == []
+
+    def test_untruncated_listing_does_not_claim_truncation(self) -> None:
+        """The truncation note must be conditional on a FULL page, not
+        appended to every not-found abstain.
+        """
+        client = _FakeClient(runs_sequence=[[]])
+        with patch(f"{_MOD}.resolve_github_token", return_value="fake-token"):
+            result = retrigger_review_gate(
+                "owner/repo", 7, client=client, sleep=lambda _: None, retry_delays=()
+            )
+
+        assert result["status"] == "skipped"
+        assert "truncat" not in result["reason"].lower()
 
     def test_default_client_requests_the_documented_max_page_size(self) -> None:
         with (
@@ -787,7 +1509,11 @@ class TestPageSizeBound:
         # Second call is the runs listing (first is the PR head-SHA lookup).
         list_call_args = mock_run.call_args_list[1].args[0]
         joined = " ".join(list_call_args)
-        assert f"repos/owner/repo/actions/workflows/{WORKFLOW_FILE}/runs" in joined
+        assert "repos/owner/repo/actions/runs" in joined
+        # The workflow-SCOPED endpoint resolves the filename against the
+        # consuming repo's own workflow entry, which is the wrong one in a
+        # ruleset-wired repo -- it must not be used.
+        assert f"actions/workflows/{WORKFLOW_FILE}" not in joined
         assert "per_page=100" in joined
         assert "head_sha=abc123" in joined
 

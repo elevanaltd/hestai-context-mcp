@@ -43,7 +43,7 @@ Thumbs.db
 
 # HestAI Three-Tier Architecture
 # Tier 1: System governance (MCP-delivered, never committed)
-.hestai-sys/
+.hestai-sys
 # Tier 3: Working state (gitignored, symlinked from .hestai/state/)
 .hestai-state/
 .hestai/state
