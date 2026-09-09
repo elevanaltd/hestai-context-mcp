@@ -47,7 +47,10 @@ Selection (rework #1, PR #148 cubic triage):
     completed run re-reads the comments live, so an older one serves. When
     NONE of the matching runs are completed, this module never attempts --
     and fails -- a rerun call; what it does instead is amended by rework
-    #5 below (it waits, rather than abstaining immediately).
+    #5 below (round-1 rework retracted the original claim here: it takes
+    a FEW SHORT, bounded retries -- the same listing-propagation-race
+    retry used elsewhere in this module -- not a wait that outlasts a
+    still-running gate job; see rework #5's own section for why).
 
 Selection & robustness (rework #2, all-four-reviewers CONDITIONAL triage):
   * Finding 3: a run with unverifiable ``pull_requests`` metadata no longer
@@ -124,6 +127,7 @@ abstains rather than issue a call with no realistic chance to complete.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from typing import Any, NamedTuple, Protocol
 
@@ -592,14 +596,21 @@ def retrigger_review_gate(
                 used = overall_budget - remaining_after
                 # ``_MIN_USEFUL_CALL_SECONDS`` means "too little remaining
                 # for another useful attempt" -- NOT "deadline reached".
-                # round-3 FINDING 2 (CE): the previous wording said
+                # round-3 FINDING 2 (CE): the then-current wording said
                 # "ALSO exhausted" next to a 1-decimal-rounded "s left"
                 # figure, so a true 0.999s remainder displayed as "1.0s
                 # left" -- the words and the number visibly disagreed.
-                # Report enough precision (3 decimals) that a value on
-                # either side of the threshold can never round across it
-                # in the text, and describe the threshold itself rather
-                # than implying the clock hit zero.
+                # round-4 FINDING 2/3 (CE): reporting at 3-decimal
+                # *rounded* precision narrowed but did not close that gap
+                # -- a remaining_after in [0.9995, 1.0) still ROUNDS to
+                # "1.000s", which can display equal to (not even less
+                # than) a 3-decimal-formatted 1.000s threshold. Rounding
+                # can move a displayed value to either side of a boundary
+                # it is actually on one side of; only FLOORING guarantees
+                # the printed remainder in THIS branch (which only runs
+                # when remaining_after is already < the threshold) prints
+                # strictly less than the printed threshold, no matter how
+                # close the true value is.
                 budget_also_short = remaining_after < _MIN_USEFUL_CALL_SECONDS
                 attempt_clause = (
                     f"retry attempts exhausted after {attempts_made} "
@@ -607,14 +618,22 @@ def retrigger_review_gate(
                 )
                 if budget_also_short:
                     # Both constraints coincide at this boundary -- say so
-                    # plainly rather than claiming either one alone.
+                    # plainly rather than claiming either one alone. Floor
+                    # (not round) to 3 decimals: this branch only runs
+                    # when remaining_after < _MIN_USEFUL_CALL_SECONDS, so
+                    # flooring can only pull the displayed value FURTHER
+                    # below the threshold, never across it -- unlike
+                    # rounding, which can push a sub-threshold value up to
+                    # (or, with different constants, past) the threshold's
+                    # own printed form.
+                    floored_remaining = math.floor(max(remaining_after, 0.0) * 1000) / 1000
                     budget_clause = (
                         "the overall time budget also had too little left "
                         "for another useful attempt at essentially the "
-                        f"same moment ({max(remaining_after, 0.0):.3f}s "
-                        f"remained, below the {_MIN_USEFUL_CALL_SECONDS:.3f}s "
-                        f"minimum for a useful attempt; used {used:.1f}s of "
-                        f"the {overall_budget:.0f}s budget)"
+                        f"same moment ({floored_remaining:.3f}s remained, "
+                        f"below the {_MIN_USEFUL_CALL_SECONDS:.3f}s minimum "
+                        f"for a useful attempt; used {used:.1f}s of the "
+                        f"{overall_budget:.0f}s budget)"
                     )
                 else:
                     budget_clause = (
