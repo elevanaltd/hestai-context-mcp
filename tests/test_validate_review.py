@@ -3225,9 +3225,7 @@ def _run_probe(script_path, tmp_path):
 class TestMatcherProvenance:
     """The matcher must come from the script's own checkout, not from an install."""
 
-    def test_matcher_loads_from_script_checkout_even_when_package_importable(
-        self, tmp_path
-    ):
+    def test_matcher_loads_from_script_checkout_even_when_package_importable(self, tmp_path):
         """RED before fix: the installed package wins the import and the
         sentinel from the co-located matcher never appears.
 
