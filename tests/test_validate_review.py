@@ -10,6 +10,7 @@ fail-closed behavior - failures indicate security vulnerabilities.
 """
 
 import json
+import os
 import re
 import subprocess
 
@@ -3139,3 +3140,113 @@ class TestVendorGuardSegmentAnchoringAndCasefold:
             == "SECURITY"
         )
         assert validate_review._classify_file_facet("vendors/.pgtap-quarantine") == "SECURITY"
+
+
+# ---------------------------------------------------------------------------
+# Matcher provenance (issue #116 P0-1)
+# ---------------------------------------------------------------------------
+# The review gate checks out the PR's tree and then runs the validator.  For
+# the gate to be trustworthy, BOTH the validator script and the review_formats
+# matcher module it uses must come from the same trusted checkout.  Before this
+# fix, validate_review.py preferred the *installed* hestai_context_mcp package
+# and only fell back to the file co-located with the script on ImportError.
+# That happened to be correct in CI only because the package is never installed
+# there -- an accident of environment, not a guarantee.  These tests pin the
+# guarantee: the matcher is always loaded from the tree the script itself lives
+# in, whether or not hestai_context_mcp is importable.
+
+_SENTINEL_ROLE = "TRUSTED-CHECKOUT-SENTINEL"
+
+_STUB_REVIEW_FORMATS = f'''"""Stub matcher standing in for a trusted checkout's review_formats."""
+
+VALID_ROLES = frozenset({{"{_SENTINEL_ROLE}"}})
+
+
+def _stub(*args, **kwargs):
+    return None
+
+
+matches_approval_pattern = _stub
+has_crs_approval = _stub
+has_crs_model_approval = _stub
+has_ce_approval = _stub
+has_ho_review = _stub
+has_tmg_approval = _stub
+has_civ_approval = _stub
+has_pe_approval = _stub
+has_self_review = _stub
+has_sr_approval = _stub
+has_gr_approval = _stub
+parse_review_metadata = _stub
+'''
+
+_PROBE = """
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("validate_review_probe", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(sorted(module._VALID_ROLES)))
+"""
+
+
+def _build_fake_checkout(tmp_path, *, with_matcher=True):
+    """Lay out a checkout containing validate_review.py and (optionally) its matcher."""
+    repo_root = Path(__file__).resolve().parent.parent
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "validate_review.py").write_text(
+        (repo_root / "scripts" / "validate_review.py").read_text()
+    )
+    if with_matcher:
+        shared_dir = tmp_path / "src" / "hestai_context_mcp" / "tools" / "shared"
+        shared_dir.mkdir(parents=True)
+        (shared_dir / "review_formats.py").write_text(_STUB_REVIEW_FORMATS)
+    return scripts_dir / "validate_review.py"
+
+
+def _run_probe(script_path, tmp_path):
+    """Execute the probe with hestai_context_mcp IMPORTABLE (simulating an install)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+    return subprocess.run(
+        [sys.executable, "-c", _PROBE, str(script_path)],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        env=env,
+    )
+
+
+@pytest.mark.security
+class TestMatcherProvenance:
+    """The matcher must come from the script's own checkout, not from an install."""
+
+    def test_matcher_loads_from_script_checkout_even_when_package_importable(
+        self, tmp_path
+    ):
+        """RED before fix: the installed package wins the import and the
+        sentinel from the co-located matcher never appears.
+
+        This is the exact failure mode of issue #116 P0-1: once the validator
+        is sourced from a trusted checkout, an importable hestai_context_mcp
+        would silently re-substitute the PR's own matchers.
+        """
+        script_path = _build_fake_checkout(tmp_path)
+        result = _run_probe(script_path, tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [_SENTINEL_ROLE], (
+            "validate_review.py loaded review_formats from somewhere other than "
+            "its own checkout; matcher provenance is not guaranteed"
+        )
+
+    def test_missing_co_located_matcher_fails_closed(self, tmp_path):
+        """A checkout without its matcher must abort, never silently fall back
+        to an installed package that the gate does not control."""
+        script_path = _build_fake_checkout(tmp_path, with_matcher=False)
+        result = _run_probe(script_path, tmp_path)
+        assert result.returncode != 0
+        assert "review_formats.py not found" in result.stderr
