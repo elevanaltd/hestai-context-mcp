@@ -59,15 +59,17 @@ jobs:
 
     steps:
       # --- Determine execution context ---
+      # `mode` no longer selects the validator: the gate runs the trusted
+      # checkout's copy in BOTH modes (see "Checkout review-gate tooling"
+      # below).  It survives only to decide whether this workflow owns the
+      # commit status on the PR head -- remote repos set their own.
       - name: Detect execution context
         id: context
         run: |
           if [ "${{ github.repository }}" = "elevanaltd/hestai-context-mcp" ]; then
             echo "mode=local" >> $GITHUB_OUTPUT
-            echo "script_path=scripts/validate_review.py" >> $GITHUB_OUTPUT
           else
             echo "mode=remote" >> $GITHUB_OUTPUT
-            echo "script_path=.review-gate-tools/scripts/validate_review.py" >> $GITHUB_OUTPUT
           fi
 
       # --- Checkout the target repo (caller or self) ---
@@ -78,11 +80,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      # --- Cross-repo: fetch review-gate tooling from HestAI-MCP ---
+      # --- Fetch review-gate tooling from the trusted source of truth ---
       # Checked out into a subdirectory of the already-checked-out repo.
       # Must come AFTER the target repo checkout to survive git clean.
+      #
+      # UNCONDITIONAL (issue #116 P0-1).  This step used to be skipped in
+      # local mode, so this repo's own PRs were validated by the validator
+      # sitting in the PR's tree -- after "git checkout pr-$PR_NUMBER" below,
+      # a PR could edit its own judge.  Every PR in the gate-remediation
+      # programme touches validate_review.py, so that was not theoretical.
+      # Fetching from elevanaltd/hestai-context-mcp@main in both modes gives
+      # one trust root instead of two code paths; the PR's copy is still in
+      # the tree, it is simply never the one that runs.
       - name: Checkout review-gate tooling
-        if: steps.context.outputs.mode == 'remote'
         uses: actions/checkout@v4
         with:
           repository: elevanaltd/hestai-context-mcp
@@ -218,8 +228,11 @@ jobs:
           git fetch origin "refs/pull/$PR_NUMBER/head:pr-$PR_NUMBER"
           git checkout "pr-$PR_NUMBER"
 
-          # Run validation using context-appropriate script path
-          SCRIPT_PATH="${{ steps.context.outputs.script_path }}"
+          # Run validation from the trusted checkout, never from the PR tree
+          # we just checked out above (issue #116 P0-1).  validate_review.py
+          # resolves its review_formats matcher relative to its own location,
+          # so both halves of the judge come from .review-gate-tools/.
+          SCRIPT_PATH=".review-gate-tools/scripts/validate_review.py"
           echo "Running: python3 $SCRIPT_PATH"
 
           set +e  # Don't exit on error
