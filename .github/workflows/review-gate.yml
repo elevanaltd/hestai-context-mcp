@@ -84,18 +84,38 @@ jobs:
       # Checked out into a subdirectory of the already-checked-out repo.
       # Must come AFTER the target repo checkout to survive git clean.
       #
-      # UNCONDITIONAL (issue #116 P0-1).  This step used to be skipped in
-      # local mode, so this repo's own PRs were validated by the validator
-      # sitting in the PR's tree -- after "git checkout pr-$PR_NUMBER" below,
-      # a PR could edit its own judge.  Every PR in the gate-remediation
-      # programme touches validate_review.py, so that was not theoretical.
-      # Fetching from elevanaltd/hestai-context-mcp@main in both modes gives
-      # one trust root instead of two code paths; the PR's copy is still in
-      # the tree, it is simply never the one that runs.
+      # UNCONDITIONAL + PINNED TO A BRANCH (issue #116 P0-1).  Two separate
+      # things are required here, and the first is useless without the second.
+      #
+      # 1. Unconditional: this step used to be skipped in local mode, so this
+      #    repo's own PRs were validated by the validator sitting in the PR's
+      #    tree -- after "git checkout pr-$PR_NUMBER" below, a PR could edit
+      #    its own judge.  Every PR in the gate-remediation programme touches
+      #    validate_review.py, so that was not theoretical.
+      #
+      # 2. Explicit "ref: main": actions/checkout defaults `ref` to the
+      #    EVENT's reference/SHA when the repository being checked out is the
+      #    one that triggered the workflow, and to the default branch
+      #    otherwise.  In LOCAL mode the triggering repository IS
+      #    elevanaltd/hestai-context-mcp, so omitting `ref` silently fetched
+      #    refs/remotes/pull/N/merge -- the PR's own code, one directory
+      #    deeper.  Run 34971615631 at 7297eb2 is the receipt:
+      #    "HEAD is now at 14d8c8b Merge 7297eb2... into f3a74f1...".
+      #    Remote mode never had this problem (different triggering repo, so
+      #    it already took the default branch), which is exactly why the
+      #    defect survived in the one case the gate needed it not to.
+      #
+      # "main" is hardcoded rather than read from
+      # github.event.repository.default_branch: in remote mode that context
+      # describes the CONSUMING repository, not this one, so it would resolve
+      # a branch name from the wrong repo.  Pinning to a released TAG instead
+      # of a branch is a separate hardening decision, deliberately not taken
+      # here.
       - name: Checkout review-gate tooling
         uses: actions/checkout@v4
         with:
           repository: elevanaltd/hestai-context-mcp
+          ref: main
           path: .review-gate-tools
           sparse-checkout: |
             scripts/validate_review.py
