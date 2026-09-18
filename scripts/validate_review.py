@@ -454,9 +454,23 @@ def classify_pr_facets(
     non_exempt_files = []
 
     for f in files:
-        facet = _classify_file_facet(f["path"])
-        if facet is not None:
-            facets.add(facet)
+        # Classify the NEW path and, for renames, the OLD path too (issue #161).
+        # `git mv auth/login.py notes.md` plus a content edit in the same commit
+        # still emits an R0xx rename status; classifying only the new path let the
+        # PR land as TIER_0_EXEMPT with ZERO required reviewers -- and let
+        # scripts/validate_review.py be renamed out from under its own
+        # META_CONTROL_PLANE rule. Both facets are collected, which can only ADD to
+        # the facet set (required_roles below is a union over facets), so this
+        # escalates and never downgrades. A None from either path is simply skipped
+        # and therefore cannot mask a real facet from the other.
+        paths = [f["path"]]
+        previous_path = f.get("previous_path")
+        if previous_path and previous_path != f["path"]:
+            paths.append(previous_path)
+
+        file_facets = {facet for facet in map(_classify_file_facet, paths) if facet is not None}
+        if file_facets:
+            facets |= file_facets
             non_exempt_files.append(f)
 
     # CRITICAL ORDERING (issue #412, comment 4569387061): the declaration union
