@@ -3692,3 +3692,70 @@ class TestRenameOldSideContentSensitiveClassification:
         # legitimately takes the TIER_1_SELF short-circuit, which returns an
         # empty role set. The facet is the claim under test.
         assert required_roles == set(), reason
+
+
+@pytest.mark.security
+class TestDisqualificationSurfacedOnSelfReviewPath:
+    """cubic P2: the disqualification notice must reach the TIER_1_SELF SUCCESS exits.
+
+    The notice reached the role-check returns and the TIER_1_SELF FAILURE return,
+    but every successful self-review return exited before it was appended. The
+    security property held -- the poisoned comment was still disqualified and
+    cleared nothing -- but the wedge attempt became invisible in exactly the tier
+    where a single reviewer is least likely to notice it.
+    """
+
+    def test_self_review_success_still_reports_the_disqualification(
+        self, ci_environment, monkeypatch
+    ):
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _mock_gh_pr_view(
+                [
+                    _POISONED_CRS_COMMENT,
+                    {"body": "IL SELF-REVIEWED: fixed a typo"},
+                ]
+            ),
+        )
+
+        approved, message, missing = validate_review.check_pr_comments(
+            required_roles=set(), tier="TIER_1_SELF"
+        )
+
+        assert approved is True, f"genuine self-review must still clear T1. Got: {message}"
+        assert missing == []
+        assert "spoofing" in message.lower(), (
+            "a wedge attempt on a self-review PR must not be silent. " f"Got: {message}"
+        )
+
+    def test_self_review_via_crs_metadata_success_reports_the_disqualification(
+        self, ci_environment, monkeypatch
+    ):
+        """The metadata-satisfied self-review exits are separate returns and
+        regressed identically."""
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _mock_gh_pr_view(
+                [
+                    _POISONED_CRS_COMMENT,
+                    {
+                        "body": (
+                            "CRS APPROVED: looks good\n"
+                            '<!-- review: {"role": "CRS", "verdict": "APPROVED", '
+                            '"provider": "gemini"} -->'
+                        )
+                    },
+                ]
+            ),
+        )
+
+        approved, message, _ = validate_review.check_pr_comments(
+            required_roles=set(), tier="TIER_1_SELF"
+        )
+
+        assert approved is True, message
+        assert (
+            "spoofing" in message.lower()
+        ), f"metadata self-review exit lost the disqualification notice. Got: {message}"
