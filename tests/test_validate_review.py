@@ -3356,3 +3356,139 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
             "Validation must run to completion and report exactly the role the "
             f"poisoned comment failed to satisfy. Got missing={missing}, message={message}"
         )
+
+
+def _git_rename_repro(tmp_path, old_path: str, new_path: str):
+    """Create a repo whose STAGED diff is a real git rename plus a content edit.
+
+    Returns the repo path. Uses GIT_AUTHOR_*/GIT_COMMITTER_* env vars rather than
+    repo config so the fixture works where CI has no git identity (exit 128) and
+    where user.useConfigOnly is set. A non-main branch keeps the commit clear of
+    any global main-branch protection hook.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t.t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t.t",
+    }
+    sp.run(["git", "init", "-q", "-b", "testwork"], cwd=repo, check=True, env=env)
+
+    src = repo / old_path
+    src.parent.mkdir(parents=True, exist_ok=True)
+    # Enough content that git still scores the pair as a rename after the edit.
+    src.write_text("\n".join(f"line {i}" for i in range(40)) + "\n")
+    sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    sp.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True, env=env)
+
+    dst = repo / new_path
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    sp.run(["git", "mv", old_path, new_path], cwd=repo, check=True, env=env)
+    # Content edit in the SAME commit -> git emits R0xx, not R100.
+    with dst.open("a") as fh:
+        fh.write("appended by the same commit\n")
+    sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    return repo
+
+
+def _changed_files_in(repo):
+    """Run get_changed_files with the repo as cwd (local/staged mode)."""
+    cwd0 = os.getcwd()
+    try:
+        os.chdir(repo)
+        return validate_review.get_changed_files()
+    finally:
+        os.chdir(cwd0)
+
+
+@pytest.mark.security
+class TestRenameFacetClassification:
+    """Issue #161: a rename must not launder a file out of its facet.
+
+    ``git mv auth/login.py notes.md`` plus a content edit in the same commit
+    still emits an ``R0xx`` rename status, and ``get_changed_files`` populates
+    ``previous_path``. ``classify_pr_facets`` classified the NEW path only, so
+    the PR landed as ``TIER_0_EXEMPT`` with ZERO required reviewers.
+    """
+
+    def test_rename_out_of_security_path_still_requires_reviewers(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CI", raising=False)
+        repo = _git_rename_repro(tmp_path, "auth/login.py", "notes.md")
+
+        files = _changed_files_in(repo)
+
+        # Guard against fixture theatre: assert git really produced a rename.
+        assert len(files) == 1, files
+        assert files[0]["path"] == "notes.md"
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+        assert files[0]["previous_path"] == "auth/login.py"
+
+        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+
+        assert (
+            "SECURITY" in facets
+        ), f"renaming a security-path file to an exempt name laundered its facet: {reason}"
+        assert required_roles, f"rename produced ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label != "TIER_0_EXEMPT"
+
+    def test_validator_renamed_out_of_its_own_rule_still_requires_reviewers(
+        self, tmp_path, monkeypatch
+    ):
+        """The gate must not be renamable out from under META_CONTROL_PLANE."""
+        monkeypatch.delenv("CI", raising=False)
+        repo = _git_rename_repro(tmp_path, "scripts/validate_review.py", "notes.md")
+
+        files = _changed_files_in(repo)
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+
+        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+
+        assert "META_CONTROL_PLANE" in facets, reason
+        assert {
+            "CIV",
+            "CE",
+            "CRS",
+            "SR",
+            "TMG",
+        } <= required_roles, (
+            f"validate_review.py renamed out of its own rule: {required_roles} / {reason}"
+        )
+
+    def test_non_rename_modification_is_unchanged(self, tmp_path, monkeypatch):
+        """REGRESSION: a plain edit (no rename) classifies exactly as before."""
+        import subprocess as sp
+
+        monkeypatch.delenv("CI", raising=False)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t.t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t.t",
+        }
+        sp.run(["git", "init", "-q", "-b", "testwork"], cwd=repo, check=True, env=env)
+        target = repo / "src" / "thing.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("\n".join(f"line {i}" for i in range(40)) + "\n")
+        sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+        sp.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True, env=env)
+        with target.open("a") as fh:
+            fh.write("".join(f"edited {i}\n" for i in range(12)))
+        sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+
+        files = _changed_files_in(repo)
+
+        assert files[0]["status"] == "M"
+        assert "previous_path" not in files[0]
+
+        facets, required_roles, _, reason = validate_review.classify_pr_facets(files)
+
+        assert facets == {"ROUTINE_CODE"}, reason
+        assert required_roles == {"CE", "CRS", "TMG"}, reason
