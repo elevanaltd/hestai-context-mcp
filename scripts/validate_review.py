@@ -291,32 +291,47 @@ def _is_vendored_path(path: str) -> bool:
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
 
-def _sniff_octave_type(path: str) -> str:
+def _sniff_octave_type(path: str, content: str | None = None) -> str:
     """Read META.TYPE from an OCTAVE file. Max 50 lines, fail-safe.
 
     Args:
         path: File path to read.
+        content: Pre-read file content to sniff INSTEAD of opening ``path``.
+            The OLD side of a rename no longer exists on the working
+            filesystem, so its content must come from a git blob (issue #161).
 
     Returns:
         The TYPE value string (e.g., 'AGENT_DEFINITION', 'RULE') or empty string.
     """
     try:
-        with open(path, encoding="utf-8") as f:
-            for _ in range(50):
-                line = f.readline()
-                if not line:
-                    break
-                if "TYPE::" in line:
-                    parts = line.split("::", 1)
-                    if len(parts) == 2:
-                        return parts[1].strip().strip('"').strip("'")
+        if content is None:
+            with open(path, encoding="utf-8") as f:
+                lines = [f.readline() for _ in range(50)]
+        else:
+            # keepends=True so a blank line stays truthy ("\n") and does not
+            # trip the end-of-file break below, matching readline() semantics.
+            lines = content.splitlines(keepends=True)[:50]
+        for line in lines:
+            if not line:
+                break
+            if "TYPE::" in line:
+                parts = line.split("::", 1)
+                if len(parts) == 2:
+                    return parts[1].strip().strip('"').strip("'")
     except Exception:
         pass
     return ""
 
 
-def _classify_file_facet(path: str) -> str | None:
+def _classify_file_facet(path: str, content: str | None = None) -> str | None:
     """Classify a single file path into a content facet.
+
+    Args:
+        path: File path to classify.
+        content: Pre-read content used for the content-sensitive ``.oct.md``
+            branch, for paths that no longer exist on the working filesystem
+            (the OLD side of a rename — issue #161). Every other branch is
+            path-only and is unaffected.
 
     Returns:
         Facet name string, or None if the file is exempt.
@@ -376,7 +391,7 @@ def _classify_file_facet(path: str) -> str | None:
         if "/library/agents/" in path or "/library/skills/" in path:
             return "EXECUTABLE_SPEC"
         # For other .oct.md files, sniff TYPE to distinguish
-        octave_type = _sniff_octave_type(path)
+        octave_type = _sniff_octave_type(path, content)
         if octave_type in _EXECUTABLE_SPEC_TYPES:
             return "EXECUTABLE_SPEC"
         # All other .oct.md (RULE, STANDARD, NORTH_STAR_SUMMARY, unknown) -> GOVERNANCE
@@ -414,6 +429,18 @@ def _classify_file_facet(path: str) -> str | None:
 
     # Default: treat as ROUTINE_CODE (fail-safe: gets reviewed)
     return "ROUTINE_CODE"
+
+
+def _rename_base_rev() -> str:
+    """Revision holding the PRE-rename content of a renamed file.
+
+    Mirrors the branch split already made by :func:`get_changed_files`: under CI
+    the diff is ``{GITHUB_BASE_REF}...HEAD``, so the old blob lives at the base
+    ref; locally the diff is ``--cached`` (index vs HEAD), so it lives at HEAD.
+    """
+    if "CI" in os.environ:
+        return os.environ.get("GITHUB_BASE_REF", "origin/main")
+    return "HEAD"
 
 
 def classify_pr_facets(
@@ -463,12 +490,30 @@ def classify_pr_facets(
         # the facet set (required_roles below is a union over facets), so this
         # escalates and never downgrades. A None from either path is simply skipped
         # and therefore cannot mask a real facet from the other.
-        paths = [f["path"]]
+        #
+        # The OLD side must be classified from its BASE BLOB, not from the
+        # working filesystem. _classify_file_facet resolves a non-library
+        # .oct.md via _sniff_octave_type, which open()s the path; a renamed-away
+        # previous_path is not there, so the sniff would return "" and downgrade
+        # an out-of-library AGENT_DEFINITION/SKILL from EXECUTABLE_SPEC to
+        # GOVERNANCE -- and TIER_1_SELF excludes EXECUTABLE_SPEC but NOT
+        # GOVERNANCE, leaving the zero-external-reviewer outcome reachable. The
+        # blob read follows the existing precedent in
+        # _collect_bitemporal_declarations (the base_path / _git_show_file site).
+        # A missing blob returns None and degrades to today's behaviour.
+        #
+        # Critical-Engineer: consulted for review-gate rename classification and
+        # fail-closed metadata disqualification
+        candidates: list[tuple[str, str | None]] = [(f["path"], None)]
         previous_path = f.get("previous_path")
         if previous_path and previous_path != f["path"]:
-            paths.append(previous_path)
+            candidates.append((previous_path, _git_show_file(_rename_base_rev(), previous_path)))
 
-        file_facets = {facet for facet in map(_classify_file_facet, paths) if facet is not None}
+        file_facets = {
+            facet
+            for facet in (_classify_file_facet(p, content) for p, content in candidates)
+            if facet is not None
+        }
         if file_facets:
             facets |= file_facets
             non_exempt_files.append(f)

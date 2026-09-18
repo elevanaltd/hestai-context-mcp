@@ -3553,6 +3553,20 @@ def _commit_staged_rename(repo) -> str:
     return base_sha
 
 
+def _classify_in(repo, files):
+    """Run classify_pr_facets with the repo as cwd.
+
+    Required for renames: the old side is read from a git blob, and in
+    production the validator runs inside the repository being validated.
+    """
+    cwd0 = os.getcwd()
+    try:
+        os.chdir(repo)
+        return validate_review.classify_pr_facets(files)
+    finally:
+        os.chdir(cwd0)
+
+
 @pytest.mark.security
 class TestRenameOldSideContentSensitiveClassification:
     """Issue #161 (rework): the OLD side of a rename cannot be sniffed from HEAD.
@@ -3590,7 +3604,7 @@ class TestRenameOldSideContentSensitiveClassification:
         assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
         assert files[0]["previous_path"] == "governance/dynamic.oct.md"
 
-        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
 
         assert "EXECUTABLE_SPEC" in facets, (
             "an out-of-library AGENT_DEFINITION renamed to an exempt path was "
@@ -3621,7 +3635,7 @@ class TestRenameOldSideContentSensitiveClassification:
         assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
         assert files[0]["previous_path"] == "governance/dynamic.oct.md"
 
-        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
 
         assert "EXECUTABLE_SPEC" in facets, reason
         assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
@@ -3643,7 +3657,7 @@ class TestRenameOldSideContentSensitiveClassification:
         files = _changed_files_in(repo)
         assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
 
-        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
 
         assert "EXECUTABLE_SPEC" in facets, reason
         assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
@@ -3670,7 +3684,7 @@ class TestRenameOldSideContentSensitiveClassification:
         monkeypatch.setenv("GITHUB_BASE_REF", base_sha)
 
         files = _changed_files_in(repo)
-        facets, required_roles, _, reason = validate_review.classify_pr_facets(files)
+        facets, required_roles, _, reason = _classify_in(repo, files)
 
         assert facets == {"GOVERNANCE"}, f"over-escalated an ordinary rule rename: {reason}"
         assert "EXECUTABLE_SPEC" not in facets, reason
