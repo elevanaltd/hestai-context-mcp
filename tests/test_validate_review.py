@@ -3358,31 +3358,46 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
         )
 
 
-def _git_rename_repro(tmp_path, old_path: str, new_path: str):
-    """Create a repo whose STAGED diff is a real git rename plus a content edit.
-
-    Returns the repo path. Uses GIT_AUTHOR_*/GIT_COMMITTER_* env vars rather than
-    repo config so the fixture works where CI has no git identity (exit 128) and
-    where user.useConfigOnly is set. A non-main branch keeps the commit clear of
-    any global main-branch protection hook.
-    """
-    import subprocess as sp
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    env = {
+def _git_fixture_env():
+    """Identity via env vars: works where CI has no git identity (exit 128) and
+    where user.useConfigOnly is set."""
+    return {
         **os.environ,
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@t.t",
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t.t",
     }
+
+
+def _git_rename_repro(tmp_path, old_path: str, new_path: str, old_content: str | None = None):
+    """Create a repo whose STAGED diff is a real git rename plus a content edit.
+
+    Returns the repo path. Identity is supplied BOTH by GIT_AUTHOR_*/GIT_COMMITTER_*
+    env vars and by repo-local user.name/user.email, so the fixture works where CI
+    has no git identity (exit 128) and where user.useConfigOnly is set on macOS.
+    ``git init -b testwork`` pins the symbolic ref to a non-main branch, keeping
+    the commit clear of any global main-branch protection hook.
+
+    Args:
+        old_content: Contents of the pre-rename file. Defaults to filler lines.
+            Pass real OCTAVE to exercise content-sensitive classification.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = _git_fixture_env()
     sp.run(["git", "init", "-q", "-b", "testwork"], cwd=repo, check=True, env=env)
+    sp.run(["git", "config", "user.name", "t"], cwd=repo, check=True, env=env)
+    sp.run(["git", "config", "user.email", "t@t.t"], cwd=repo, check=True, env=env)
 
     src = repo / old_path
     src.parent.mkdir(parents=True, exist_ok=True)
     # Enough content that git still scores the pair as a rename after the edit.
-    src.write_text("\n".join(f"line {i}" for i in range(40)) + "\n")
+    if old_content is None:
+        old_content = "\n".join(f"line {i}" for i in range(40)) + "\n"
+    src.write_text(old_content)
     sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
     sp.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True, env=env)
 
@@ -3397,7 +3412,11 @@ def _git_rename_repro(tmp_path, old_path: str, new_path: str):
 
 
 def _changed_files_in(repo):
-    """Run get_changed_files with the repo as cwd (local/staged mode)."""
+    """Run get_changed_files with the repo as cwd.
+
+    Honours whichever branch the ambient env selects: the local ``--cached``
+    branch, or the ``CI`` + ``GITHUB_BASE_REF`` branch.
+    """
     cwd0 = os.getcwd()
     try:
         os.chdir(repo)
@@ -3492,3 +3511,170 @@ class TestRenameFacetClassification:
 
         assert facets == {"ROUTINE_CODE"}, reason
         assert required_roles == {"CE", "CRS", "TMG"}, reason
+
+
+_OCT_AGENT_DEFINITION = (
+    "===DYNAMIC_AGENT===\n"
+    "META:\n"
+    "  TYPE::AGENT_DEFINITION\n"
+    '  VERSION::"1.0"\n'
+    "\n"  # blank line: sniffing must not stop here
+    "§1::IDENTITY\n"
+    "  ROLE::DYNAMIC\n"
+    "===END===\n"
+)
+
+_OCT_SKILL = (
+    "===DYNAMIC_SKILL===\n"
+    "META:\n"
+    "  TYPE::SKILL\n"
+    '  VERSION::"1.0"\n'
+    "\n"
+    "§1::PURPOSE\n"
+    "  DO::things\n"
+    "===END===\n"
+)
+
+
+def _commit_staged_rename(repo) -> str:
+    """Commit the staged rename. Returns the BASE sha (the pre-rename commit)."""
+    import subprocess as sp
+
+    env = _git_fixture_env()
+    base_sha = sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    ).stdout.strip()
+    sp.run(["git", "commit", "-qm", "rename"], cwd=repo, check=True, env=env)
+    return base_sha
+
+
+@pytest.mark.security
+class TestRenameOldSideContentSensitiveClassification:
+    """Issue #161 (rework): the OLD side of a rename cannot be sniffed from HEAD.
+
+    ``_classify_file_facet`` resolves a non-library ``.oct.md`` by calling
+    ``_sniff_octave_type``, which ``open()``s the path on the working
+    filesystem. A renamed-away ``previous_path`` does not exist there, so the
+    sniff returns "" and the file is downgraded from EXECUTABLE_SPEC to
+    GOVERNANCE. The ``TIER_1_SELF`` short-circuit excludes SECURITY,
+    META_CONTROL_PLANE and EXECUTABLE_SPEC -- but NOT GOVERNANCE -- so the
+    zero-external-reviewer outcome #161 exists to close is still reachable.
+
+    The old side must therefore be classified from its BASE BLOB:
+    ``HEAD:<previous_path>`` locally, ``<base-ref>:<previous_path>`` under CI.
+
+    Both branches of ``get_changed_files`` are covered here. Only the local
+    ``--cached`` branch was previously exercised, and the CI branch is where
+    this defect lived.
+    """
+
+    def test_out_of_library_agent_definition_rename_local_cached_branch(
+        self, tmp_path, monkeypatch
+    ):
+        """LOCAL (--cached) branch: old side read from HEAD:<previous_path>."""
+        monkeypatch.delenv("CI", raising=False)
+        repo = _git_rename_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            old_content=_OCT_AGENT_DEFINITION,
+        )
+
+        files = _changed_files_in(repo)
+
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+        assert files[0]["previous_path"] == "governance/dynamic.oct.md"
+
+        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+
+        assert "EXECUTABLE_SPEC" in facets, (
+            "an out-of-library AGENT_DEFINITION renamed to an exempt path was "
+            f"downgraded instead of classified from its BASE blob: {reason}"
+        )
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_out_of_library_agent_definition_rename_ci_base_ref_branch(self, tmp_path, monkeypatch):
+        """CI branch: old side read from <base-ref>:<previous_path>.
+
+        This is the branch of get_changed_files that no test previously
+        executed, and the one the review gate actually runs.
+        """
+        repo = _git_rename_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            old_content=_OCT_AGENT_DEFINITION,
+        )
+        base_sha = _commit_staged_rename(repo)
+
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_sha)
+
+        files = _changed_files_in(repo)
+
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+        assert files[0]["previous_path"] == "governance/dynamic.oct.md"
+
+        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+
+        assert "EXECUTABLE_SPEC" in facets, reason
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_out_of_library_skill_rename_ci_base_ref_branch(self, tmp_path, monkeypatch):
+        """TYPE::SKILL is the other executable-spec type and must behave identically."""
+        repo = _git_rename_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            old_content=_OCT_SKILL,
+        )
+        base_sha = _commit_staged_rename(repo)
+
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_sha)
+
+        files = _changed_files_in(repo)
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+
+        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+
+        assert "EXECUTABLE_SPEC" in facets, reason
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_ordinary_governance_rename_is_not_over_escalated(self, tmp_path, monkeypatch):
+        """REGRESSION: the rejected blanket fix (treat every missing old .oct.md as
+        EXECUTABLE_SPEC) would add reviewers to ordinary governance renames.
+
+        A TYPE::RULE document must still classify as GOVERNANCE, not EXECUTABLE_SPEC.
+
+        This guard is not RED before the fix: today's failed sniff also yields
+        GOVERNANCE. It exists to fail if the fix over-reaches.
+        """
+        repo = _git_rename_repro(
+            tmp_path,
+            "governance/rule.oct.md",
+            "notes.md",
+            old_content=("===RULE===\nMETA:\n  TYPE::RULE\n\n§1::BODY\n  X::Y\n===END===\n"),
+        )
+        base_sha = _commit_staged_rename(repo)
+
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_sha)
+
+        files = _changed_files_in(repo)
+        facets, required_roles, _, reason = validate_review.classify_pr_facets(files)
+
+        assert facets == {"GOVERNANCE"}, f"over-escalated an ordinary rule rename: {reason}"
+        assert "EXECUTABLE_SPEC" not in facets, reason
+        # No reviewer assertion here: a 1-line single-file governance rename
+        # legitimately takes the TIER_1_SELF short-circuit, which returns an
+        # empty role set. The facet is the claim under test.
+        assert required_roles == set(), reason
