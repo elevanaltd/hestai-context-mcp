@@ -10,6 +10,7 @@ Breaking Change: Now exits non-zero on CI failures (was: fail-open)
 """
 
 # Critical-Engineer: consulted for Review-gate fail-closed validation
+import importlib.util
 import json
 import os
 import re
@@ -527,86 +528,55 @@ def determine_review_tier(files: list[dict[str, Any]]) -> tuple[str, str]:
 
 
 # Import shared review format utilities (single source of truth).
-# In CI, the package may not be installed, so we use importlib to load
-# the module file directly without triggering the package's __init__.py.
-try:
-    from hestai_context_mcp.tools.shared.review_formats import (
-        VALID_ROLES as _VALID_ROLES,
+#
+# TRUSTED PROVENANCE (issue #116 P0-1): the matcher module is ALWAYS loaded
+# from the tree this script itself lives in, via importlib -- never from an
+# installed hestai_context_mcp package.  The review gate checks out the PR's
+# tree and then runs the validator; for the verdict to mean anything, the
+# validator and its matchers must share one trust root, and the only trust
+# root the script can vouch for is its own location.  Preferring the installed
+# package (the previous behaviour) was correct in CI only because the package
+# happens not to be installed there -- an environment accident that any future
+# `pip install -e .`, or any PR that puts its own src/ on sys.path, would
+# silently reverse.  Resolution is co-location, not configuration, so there is
+# nothing for a PR to set and nothing for the workflow to keep in sync.
+#
+# Missing matcher => hard failure.  Falling back to an installed package would
+# reopen exactly the hole this closes.
+_module_path = (
+    Path(__file__).resolve().parent.parent
+    / "src"
+    / "hestai_context_mcp"
+    / "tools"
+    / "shared"
+    / "review_formats.py"
+)
+if not _module_path.exists():
+    raise FileNotFoundError(
+        f"review_formats.py not found at {_module_path}. "
+        "Expected relative to scripts/ directory."
     )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_ce_approval as _has_ce_approval,
+_spec = importlib.util.spec_from_file_location("review_formats", _module_path)
+if _spec is None or _spec.loader is None:
+    raise FileNotFoundError(
+        f"review_formats.py not found at {_module_path}. "
+        "Expected relative to scripts/ directory."
     )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_civ_approval as _has_civ_approval,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_crs_approval as _has_crs_approval,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_crs_model_approval as _has_crs_model_approval,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_gr_approval as _has_gr_approval,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_ho_review as _has_ho_review,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_pe_approval as _has_pe_approval,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_self_review as _has_self_review,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_sr_approval as _has_sr_approval,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        has_tmg_approval as _has_tmg_approval,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        matches_approval_pattern as _matches_approval_pattern,
-    )
-    from hestai_context_mcp.tools.shared.review_formats import (
-        parse_review_metadata as _parse_review_metadata,
-    )
-except (ImportError, ModuleNotFoundError):
-    # CI fallback: load the module file directly via importlib
-    import importlib.util
-
-    _module_path = (
-        Path(__file__).resolve().parent.parent
-        / "src"
-        / "hestai_context_mcp"
-        / "tools"
-        / "shared"
-        / "review_formats.py"
-    )
-    if not _module_path.exists():
-        raise FileNotFoundError(
-            f"review_formats.py not found at {_module_path}. "
-            "Expected relative to scripts/ directory."
-        ) from None
-    _spec = importlib.util.spec_from_file_location("review_formats", _module_path)
-    if _spec is None or _spec.loader is None:
-        raise FileNotFoundError(
-            f"review_formats.py not found at {_module_path}. "
-            "Expected relative to scripts/ directory."
-        ) from None
-    _review_formats = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_review_formats)
-    _matches_approval_pattern = _review_formats.matches_approval_pattern
-    _has_crs_approval = _review_formats.has_crs_approval
-    _has_crs_model_approval = _review_formats.has_crs_model_approval
-    _has_ce_approval = _review_formats.has_ce_approval
-    _has_ho_review = _review_formats.has_ho_review
-    _has_tmg_approval = _review_formats.has_tmg_approval
-    _has_civ_approval = _review_formats.has_civ_approval
-    _has_pe_approval = _review_formats.has_pe_approval
-    _has_self_review = _review_formats.has_self_review
-    _has_sr_approval = _review_formats.has_sr_approval
-    _has_gr_approval = _review_formats.has_gr_approval
-    _parse_review_metadata = _review_formats.parse_review_metadata
-    _VALID_ROLES = _review_formats.VALID_ROLES
+_review_formats = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_review_formats)
+_matches_approval_pattern = _review_formats.matches_approval_pattern
+_has_crs_approval = _review_formats.has_crs_approval
+_has_crs_model_approval = _review_formats.has_crs_model_approval
+_has_ce_approval = _review_formats.has_ce_approval
+_has_ho_review = _review_formats.has_ho_review
+_has_tmg_approval = _review_formats.has_tmg_approval
+_has_civ_approval = _review_formats.has_civ_approval
+_has_pe_approval = _review_formats.has_pe_approval
+_has_self_review = _review_formats.has_self_review
+_has_sr_approval = _review_formats.has_sr_approval
+_has_gr_approval = _review_formats.has_gr_approval
+_parse_review_metadata = _review_formats.parse_review_metadata
+_VALID_ROLES = _review_formats.VALID_ROLES
 
 
 # ---------------------------------------------------------------------------
