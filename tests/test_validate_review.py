@@ -4096,3 +4096,112 @@ class TestSniffSemanticsAgreeAcrossInputs:
 
         assert validate_review._sniff_octave_type(rel) == ""
         assert validate_review._sniff_octave_type(rel, content=content) == ""
+
+
+@pytest.mark.security
+class TestBaseTreeResolvedOnceAndThreaded:
+    """Issue #161 (cycle 3): a shared FUNCTION is not a shared VALUE.
+
+    get_changed_files resolved the base tree, _classify_renamed_old_side
+    resolved it AGAIN per renamed file, and classify_pr_facets is called twice
+    in the production path -- so resolution repeated. A ref movement, a
+    concurrent fetch, or a transient inconsistent result between those calls
+    lets collection diff tree A while classification reads a blob from tree B.
+    With executable content at A and TYPE::RULE at B the result is
+    facets={GOVERNANCE}, roles={}, tier=TIER_1_SELF: zero external reviewers.
+
+    The resolver below deliberately returns a DIFFERENT sha on every call, so
+    any second resolution is observable. That is what makes the
+    resolve-once-and-thread invariant real rather than asserted in a comment.
+    """
+
+    @staticmethod
+    def _install(monkeypatch, tmp_path):
+        """Wire a drifting resolver + a git/gh mock. Returns (resolutions, calls)."""
+        resolutions: list[str] = []
+        calls: list[list[str]] = []
+
+        def drifting_resolver():
+            sha = f"sha{len(resolutions)}"
+            resolutions.append(sha)
+            return sha
+
+        monkeypatch.setattr(validate_review, "_resolve_base_tree_rev", drifting_resolver)
+
+        executable = _OCT_AGENT_DEFINITION
+        rule = "===RULE===\nMETA:\n  TYPE::RULE\n===END===\n"
+
+        def mock_run(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            joined = " ".join(cmd)
+            if cmd[:2] == ["git", "diff"] and "--name-status" in cmd:
+                return MagicMock(
+                    stdout="R094\tgovernance/dynamic.oct.md\tnotes.md\n",
+                    stderr="",
+                    returncode=0,
+                    check=lambda: None,
+                )
+            if cmd[:2] == ["git", "diff"] and "--numstat" in cmd:
+                return MagicMock(
+                    stdout="1\t0\tgovernance/dynamic.oct.md\tnotes.md\n",
+                    stderr="",
+                    returncode=0,
+                    check=lambda: None,
+                )
+            if cmd[:2] == ["git", "show"]:
+                # The FIRST resolved tree holds the executable spec; any later
+                # tree holds a plain rule. Reading the wrong one downgrades.
+                body = executable if joined.startswith("git show sha0:") else rule
+                return MagicMock(stdout=body, stderr="", returncode=0, check=lambda: None)
+            if cmd[0] == "gh":
+                return MagicMock(
+                    stdout=json.dumps({"body": "", "comments": []}),
+                    stderr="",
+                    returncode=0,
+                    check=lambda: None,
+                )
+            return MagicMock(stdout="", stderr="", returncode=0, check=lambda: None)
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        monkeypatch.setattr(validate_review, "check_emergency_bypass", lambda: False)
+        monkeypatch.setattr(validate_review, "check_pr_comments", lambda *a, **k: (True, "ok", []))
+        monkeypatch.setattr(validate_review, "_get_pr_body", lambda: "")
+        monkeypatch.setattr(Path, "cwd", lambda: tmp_path)
+        return resolutions, calls
+
+    def test_base_tree_is_resolved_exactly_once_per_run(
+        self, ci_environment, monkeypatch, tmp_path
+    ):
+        resolutions, _ = self._install(monkeypatch, tmp_path)
+
+        validate_review.main()
+
+        assert len(resolutions) == 1, (
+            "the base tree was resolved more than once in a single validation run; "
+            f"resolutions={resolutions}. Collection and classification can therefore "
+            "disagree about which tree the diff was taken against."
+        )
+
+    def test_diff_and_blob_read_use_the_same_sha(self, ci_environment, monkeypatch, tmp_path):
+        resolutions, calls = self._install(monkeypatch, tmp_path)
+
+        validate_review.main()
+
+        diff_shas = {
+            arg.split("..")[0]
+            for cmd in calls
+            if cmd[:2] == ["git", "diff"]
+            for arg in cmd
+            if ".." in arg and arg.endswith("HEAD")
+        }
+        show_shas = {
+            cmd[2].split(":", 1)[0] for cmd in calls if cmd[:2] == ["git", "show"] and len(cmd) > 2
+        }
+
+        assert diff_shas, f"no git diff against a resolved tree was issued: {calls}"
+        assert show_shas, f"no git show blob read was issued: {calls}"
+        assert diff_shas == show_shas, (
+            f"collection diffed {diff_shas} but classification read blobs from "
+            f"{show_shas} - the diff tree and the blob tree must be the same value"
+        )
+        assert diff_shas == {resolutions[0]}
