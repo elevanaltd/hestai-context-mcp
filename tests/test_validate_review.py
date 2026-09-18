@@ -82,7 +82,9 @@ class TestFailClosedBehavior:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
 
         # Mock check_pr_comments to return False (missing review)
@@ -131,7 +133,9 @@ class TestLocalModePermissiveness:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
 
         # Mock check_emergency_bypass to return False
@@ -147,11 +151,22 @@ class TestForkPRSupport:
     """Validate fork PR support (already fixed in PR #193)."""
 
     def test_get_changed_files_uses_base_ref_in_ci(self, ci_environment, monkeypatch):
-        """CI mode: Uses GITHUB_BASE_REF for fork PRs."""
+        """CI mode: Uses GITHUB_BASE_REF for fork PRs.
+
+        The base ref is now consumed via `git merge-base <base_ref> HEAD`, and
+        the diff runs against that resolved tree. `git diff A...HEAD` is exactly
+        `git diff $(git merge-base A HEAD) HEAD`, so this is equivalent for the
+        diff -- but it names the tree explicitly, so old-side rename
+        classification can read the SAME tree instead of guessing (issue #161
+        round 3). This test previously pinned the literal "origin/main...HEAD";
+        that spelling encoded the defect, the fork-PR intent it guarded does not.
+        """
         calls = []
 
         def mock_run(cmd, *args, **kwargs):
             calls.append(cmd)
+            if cmd[:2] == ["git", "merge-base"]:
+                return MagicMock(stdout="deadbeef\n", stderr="", returncode=0)
             return MagicMock(
                 stdout="10\t5\tsrc/core.py\n", stderr="", returncode=0, check=lambda: None
             )
@@ -160,9 +175,12 @@ class TestForkPRSupport:
 
         validate_review.get_changed_files()
 
-        # Verify git diff command uses base_ref
-        assert len(calls) > 0
-        assert any("origin/main...HEAD" in " ".join(cmd) for cmd in calls)
+        # The base ref is still what drives CI mode (fork PR support) ...
+        assert ["git", "merge-base", "origin/main", "HEAD"] in calls
+        # ... and the diff runs against the tree that resolved from it.
+        assert any("deadbeef..HEAD" in " ".join(cmd) for cmd in calls)
+        # Never the local staged path.
+        assert not any("--cached" in cmd for cmd in calls)
 
     def test_get_changed_files_uses_cached_locally(self, local_environment, monkeypatch):
         """Local mode: Uses --cached for staged files."""
@@ -197,7 +215,9 @@ class TestEmergencyBypassAudit:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
 
         # Mock check_emergency_bypass to return True
@@ -232,7 +252,9 @@ class TestEmergencyBypassAudit:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
         monkeypatch.setattr(validate_review, "check_emergency_bypass", lambda: True)
         monkeypatch.setattr(Path, "cwd", lambda: tmp_path)
@@ -1689,7 +1711,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -1723,7 +1747,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -1748,7 +1774,7 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [
+            lambda *_a, **_k: [
                 {
                     "path": "scripts/validate_review.py",
                     "added": 10,
@@ -1784,7 +1810,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -1813,7 +1841,7 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "README.md", "added": 5, "deleted": 2, "total_changed": 7}],
+            lambda *_a, **_k: [{"path": "README.md", "added": 5, "deleted": 2, "total_changed": 7}],
         )
 
         validate_review.main()
@@ -1842,7 +1870,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         # Simulate 2 of 3 approvals present: TMG approved, CRS approved, CE missing
         monkeypatch.setattr(
@@ -1880,7 +1910,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         # All 3 roles missing
         monkeypatch.setattr(
@@ -1912,7 +1944,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -1941,7 +1975,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2128,7 +2164,9 @@ class TestStructuredMissingRoles:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         # Mock returns structured data: CE is missing, CRS and TMG approved
         monkeypatch.setattr(
@@ -2173,7 +2211,9 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2207,7 +2247,9 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2239,7 +2281,9 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2272,7 +2316,7 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "README.md", "added": 5, "deleted": 2, "total_changed": 7}],
+            lambda *_a, **_k: [{"path": "README.md", "added": 5, "deleted": 2, "total_changed": 7}],
         )
         original_run = subprocess.run
 
@@ -2298,7 +2342,9 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2470,7 +2516,9 @@ class TestCommentEventFastPath:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2500,7 +2548,9 @@ class TestCommentEventFastPath:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2548,7 +2598,7 @@ class TestCommentEventFastPath:
         # get_changed_files MUST be called when SHA mismatches (fallback path)
         get_changed_files_called = False
 
-        def mock_get_changed_files():
+        def mock_get_changed_files(*_a, **_k):
             nonlocal get_changed_files_called
             get_changed_files_called = True
             return [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}]
@@ -2599,7 +2649,9 @@ class TestCommentEventFastPath:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2651,7 +2703,7 @@ class TestCommentEventFastPath:
         # get_changed_files MUST be called when base ref mismatches
         get_changed_files_called = False
 
-        def mock_get_changed_files():
+        def mock_get_changed_files(*_a, **_k):
             nonlocal get_changed_files_called
             get_changed_files_called = True
             return [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}]
@@ -2752,7 +2804,7 @@ class TestCommentEventFastPath:
 
         get_changed_files_called = False
 
-        def mock_get_changed_files():
+        def mock_get_changed_files(*_a, **_k):
             nonlocal get_changed_files_called
             get_changed_files_called = True
             return [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}]
@@ -2801,7 +2853,7 @@ class TestCommentEventFastPath:
 
         get_changed_files_called = False
 
-        def mock_get_changed_files():
+        def mock_get_changed_files(*_a, **_k):
             nonlocal get_changed_files_called
             get_changed_files_called = True
             return [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}]
@@ -3248,3 +3300,946 @@ class TestMatcherProvenance:
         result = _run_probe(script_path, tmp_path)
         assert result.returncode != 0
         assert "review_formats.py not found" in result.stderr
+
+
+_POISONED_CRS_COMMENT = {
+    "body": (
+        "CRS BLOCKED: this PR must not land\n"
+        '<!-- review: {"role": "CRS", "verdict": "APPROVED", "provider": "gemini"} -->'
+    )
+}
+
+
+def _mock_gh_pr_view(comments, body=""):
+    """Build a subprocess.run replacement returning a `gh pr view --json` payload."""
+
+    def mock_run(cmd, *args, **kwargs):
+        return MagicMock(
+            stdout=json.dumps({"body": body, "comments": comments}),
+            returncode=0,
+            check=lambda: None,
+        )
+
+    return mock_run
+
+
+@pytest.mark.security
+class TestCrossValidationDisqualifiesInsteadOfWedging:
+    """Issue #155 (fail-CLOSED half): one poisoned comment must not wedge the PR.
+
+    A comment whose ``<!-- review: ... -->`` metadata claims an approval verdict
+    that the visible text contradicts used to abort the ENTIRE validation run
+    before any role checker ran. Anyone able to comment on a PR could therefore
+    block every approval on it -- including a revert of a bad ``main``.
+
+    The comment must be DISQUALIFIED (cleared of both regex-matchable text and
+    metadata) while validation continues over the remaining comments. The
+    security property is unchanged: a spoofed comment still clears nothing.
+    """
+
+    def test_poisoned_comment_does_not_block_genuine_approvals(self, ci_environment, monkeypatch):
+        """BLAST RADIUS: genuine approvals for every required role must still satisfy
+        the gate when an unrelated poisoned comment is present on the same PR."""
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _mock_gh_pr_view(
+                [
+                    _POISONED_CRS_COMMENT,
+                    {"body": "TMG APPROVED: tests verified"},
+                    {"body": "CRS APPROVED: Logic correct"},
+                    {"body": "CE APPROVED: Architecture sound"},
+                ]
+            ),
+        )
+
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+
+        assert approved is True, (
+            "A single poisoned metadata comment wedged the whole PR shut; genuine "
+            f"TMG/CRS/CE approvals must still satisfy the gate. Got: {message}"
+        )
+        assert missing == []
+
+    def test_disqualification_is_surfaced_not_silent(self, ci_environment, monkeypatch):
+        """A wedge attempt must remain visible in the gate's human-readable reason."""
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _mock_gh_pr_view(
+                [
+                    _POISONED_CRS_COMMENT,
+                    {"body": "TMG APPROVED: tests verified"},
+                    {"body": "CRS APPROVED: Logic correct"},
+                    {"body": "CE APPROVED: Architecture sound"},
+                ]
+            ),
+        )
+
+        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
+
+        # Both halves matter: the gate PASSES (no wedge) and the wedge attempt is
+        # still reported. Asserting only the message would also pass against the
+        # old aborting code, whose failure message likewise mentions spoofing.
+        assert approved is True, f"Gate must not be wedged. Got: {message}"
+        assert (
+            "spoofing" in message.lower()
+        ), f"Disqualifying a comment must not be silent. Got: {message}"
+
+    def test_poisoned_comment_clears_nothing(self, ci_environment, monkeypatch):
+        """SECURITY: the disqualified comment must satisfy neither the regex
+        matchers nor the metadata check -- CRS stays missing."""
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _mock_gh_pr_view(
+                [
+                    _POISONED_CRS_COMMENT,
+                    {"body": "TMG APPROVED: tests verified"},
+                    {"body": "CE APPROVED: Architecture sound"},
+                ]
+            ),
+        )
+
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+
+        assert approved is False, f"Spoofed CRS metadata must not clear CRS. Got: {message}"
+        assert missing == ["CRS"], (
+            "Validation must run to completion and report exactly the role the "
+            f"poisoned comment failed to satisfy. Got missing={missing}, message={message}"
+        )
+
+
+def _git_fixture_env():
+    """Hermetic git environment for fixture repos.
+
+    Identity via env vars: works where CI has no git identity (exit 128) and
+    where user.useConfigOnly is set.
+
+    GIT_CONFIG_GLOBAL/SYSTEM are neutralised because a developer's global
+    core.hooksPath can refuse `git switch` in a scratch repo ("Cannot switch
+    branches in main repo"), which would break the advancing-base fixtures
+    non-deterministically depending on whose machine runs them.
+    """
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t.t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t.t",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+
+
+def _git_rename_repro(tmp_path, old_path: str, new_path: str, old_content: str | None = None):
+    """Create a repo whose STAGED diff is a real git rename plus a content edit.
+
+    Returns the repo path. Identity is supplied BOTH by GIT_AUTHOR_*/GIT_COMMITTER_*
+    env vars and by repo-local user.name/user.email, so the fixture works where CI
+    has no git identity (exit 128) and where user.useConfigOnly is set on macOS.
+    ``git init -b testwork`` pins the symbolic ref to a non-main branch, keeping
+    the commit clear of any global main-branch protection hook.
+
+    Args:
+        old_content: Contents of the pre-rename file. Defaults to filler lines.
+            Pass real OCTAVE to exercise content-sensitive classification.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = _git_fixture_env()
+    sp.run(["git", "init", "-q", "-b", "testwork"], cwd=repo, check=True, env=env)
+    sp.run(["git", "config", "user.name", "t"], cwd=repo, check=True, env=env)
+    sp.run(["git", "config", "user.email", "t@t.t"], cwd=repo, check=True, env=env)
+
+    src = repo / old_path
+    src.parent.mkdir(parents=True, exist_ok=True)
+    # Enough content that git still scores the pair as a rename after the edit.
+    if old_content is None:
+        old_content = "\n".join(f"line {i}" for i in range(40)) + "\n"
+    src.write_text(old_content)
+    sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    sp.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True, env=env)
+
+    dst = repo / new_path
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    sp.run(["git", "mv", old_path, new_path], cwd=repo, check=True, env=env)
+    # Content edit in the SAME commit -> git emits R0xx, not R100.
+    with dst.open("a") as fh:
+        fh.write("appended by the same commit\n")
+    sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    return repo
+
+
+def _changed_files_in(repo):
+    """Run get_changed_files with the repo as cwd.
+
+    Honours whichever branch the ambient env selects: the local ``--cached``
+    branch, or the ``CI`` + ``GITHUB_BASE_REF`` branch.
+    """
+    cwd0 = os.getcwd()
+    try:
+        os.chdir(repo)
+        return validate_review.get_changed_files()
+    finally:
+        os.chdir(cwd0)
+
+
+@pytest.mark.security
+class TestRenameFacetClassification:
+    """Issue #161: a rename must not launder a file out of its facet.
+
+    ``git mv auth/login.py notes.md`` plus a content edit in the same commit
+    still emits an ``R0xx`` rename status, and ``get_changed_files`` populates
+    ``previous_path``. ``classify_pr_facets`` classified the NEW path only, so
+    the PR landed as ``TIER_0_EXEMPT`` with ZERO required reviewers.
+    """
+
+    def test_rename_out_of_security_path_still_requires_reviewers(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CI", raising=False)
+        repo = _git_rename_repro(tmp_path, "auth/login.py", "notes.md")
+
+        files = _changed_files_in(repo)
+
+        # Guard against fixture theatre: assert git really produced a rename.
+        assert len(files) == 1, files
+        assert files[0]["path"] == "notes.md"
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+        assert files[0]["previous_path"] == "auth/login.py"
+
+        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+
+        assert (
+            "SECURITY" in facets
+        ), f"renaming a security-path file to an exempt name laundered its facet: {reason}"
+        assert required_roles, f"rename produced ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label != "TIER_0_EXEMPT"
+
+    def test_validator_renamed_out_of_its_own_rule_still_requires_reviewers(
+        self, tmp_path, monkeypatch
+    ):
+        """The gate must not be renamable out from under META_CONTROL_PLANE."""
+        monkeypatch.delenv("CI", raising=False)
+        repo = _git_rename_repro(tmp_path, "scripts/validate_review.py", "notes.md")
+
+        files = _changed_files_in(repo)
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+
+        facets, required_roles, tier_label, reason = validate_review.classify_pr_facets(files)
+
+        assert "META_CONTROL_PLANE" in facets, reason
+        assert {
+            "CIV",
+            "CE",
+            "CRS",
+            "SR",
+            "TMG",
+        } <= required_roles, (
+            f"validate_review.py renamed out of its own rule: {required_roles} / {reason}"
+        )
+
+    def test_non_rename_modification_is_unchanged(self, tmp_path, monkeypatch):
+        """REGRESSION: a plain edit (no rename) classifies exactly as before."""
+        import subprocess as sp
+
+        monkeypatch.delenv("CI", raising=False)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t.t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t.t",
+        }
+        sp.run(["git", "init", "-q", "-b", "testwork"], cwd=repo, check=True, env=env)
+        target = repo / "src" / "thing.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("\n".join(f"line {i}" for i in range(40)) + "\n")
+        sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+        sp.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True, env=env)
+        with target.open("a") as fh:
+            fh.write("".join(f"edited {i}\n" for i in range(12)))
+        sp.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+
+        files = _changed_files_in(repo)
+
+        assert files[0]["status"] == "M"
+        assert "previous_path" not in files[0]
+
+        facets, required_roles, _, reason = validate_review.classify_pr_facets(files)
+
+        assert facets == {"ROUTINE_CODE"}, reason
+        assert required_roles == {"CE", "CRS", "TMG"}, reason
+
+
+_OCT_AGENT_DEFINITION = (
+    "===DYNAMIC_AGENT===\n"
+    "META:\n"
+    "  TYPE::AGENT_DEFINITION\n"
+    '  VERSION::"1.0"\n'
+    "\n"  # blank line: sniffing must not stop here
+    "§1::IDENTITY\n"
+    "  ROLE::DYNAMIC\n"
+    "===END===\n"
+)
+
+_OCT_SKILL = (
+    "===DYNAMIC_SKILL===\n"
+    "META:\n"
+    "  TYPE::SKILL\n"
+    '  VERSION::"1.0"\n'
+    "\n"
+    "§1::PURPOSE\n"
+    "  DO::things\n"
+    "===END===\n"
+)
+
+
+def _commit_staged_rename(repo) -> str:
+    """Commit the staged rename. Returns the BASE sha (the pre-rename commit)."""
+    import subprocess as sp
+
+    env = _git_fixture_env()
+    base_sha = sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    ).stdout.strip()
+    sp.run(["git", "commit", "-qm", "rename"], cwd=repo, check=True, env=env)
+    return base_sha
+
+
+def _classify_in(repo, files):
+    """Run classify_pr_facets with the repo as cwd.
+
+    Required for renames: the old side is read from a git blob, and in
+    production the validator runs inside the repository being validated.
+    """
+    cwd0 = os.getcwd()
+    try:
+        os.chdir(repo)
+        return validate_review.classify_pr_facets(files)
+    finally:
+        os.chdir(cwd0)
+
+
+@pytest.mark.security
+class TestRenameOldSideContentSensitiveClassification:
+    """Issue #161 (rework): the OLD side of a rename cannot be sniffed from HEAD.
+
+    ``_classify_file_facet`` resolves a non-library ``.oct.md`` by calling
+    ``_sniff_octave_type``, which ``open()``s the path on the working
+    filesystem. A renamed-away ``previous_path`` does not exist there, so the
+    sniff returns "" and the file is downgraded from EXECUTABLE_SPEC to
+    GOVERNANCE. The ``TIER_1_SELF`` short-circuit excludes SECURITY,
+    META_CONTROL_PLANE and EXECUTABLE_SPEC -- but NOT GOVERNANCE -- so the
+    zero-external-reviewer outcome #161 exists to close is still reachable.
+
+    The old side must therefore be classified from its BASE BLOB:
+    ``HEAD:<previous_path>`` locally, ``<base-ref>:<previous_path>`` under CI.
+
+    Both branches of ``get_changed_files`` are covered here. Only the local
+    ``--cached`` branch was previously exercised, and the CI branch is where
+    this defect lived.
+    """
+
+    def test_out_of_library_agent_definition_rename_local_cached_branch(
+        self, tmp_path, monkeypatch
+    ):
+        """LOCAL (--cached) branch: old side read from HEAD:<previous_path>."""
+        monkeypatch.delenv("CI", raising=False)
+        repo = _git_rename_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            old_content=_OCT_AGENT_DEFINITION,
+        )
+
+        files = _changed_files_in(repo)
+
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+        assert files[0]["previous_path"] == "governance/dynamic.oct.md"
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert "EXECUTABLE_SPEC" in facets, (
+            "an out-of-library AGENT_DEFINITION renamed to an exempt path was "
+            f"downgraded instead of classified from its BASE blob: {reason}"
+        )
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_out_of_library_agent_definition_rename_ci_base_ref_branch(self, tmp_path, monkeypatch):
+        """CI branch: old side read from <base-ref>:<previous_path>.
+
+        This is the branch of get_changed_files that no test previously
+        executed, and the one the review gate actually runs.
+        """
+        repo = _git_rename_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            old_content=_OCT_AGENT_DEFINITION,
+        )
+        base_sha = _commit_staged_rename(repo)
+
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_sha)
+
+        files = _changed_files_in(repo)
+
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+        assert files[0]["previous_path"] == "governance/dynamic.oct.md"
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert "EXECUTABLE_SPEC" in facets, reason
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_out_of_library_skill_rename_ci_base_ref_branch(self, tmp_path, monkeypatch):
+        """TYPE::SKILL is the other executable-spec type and must behave identically."""
+        repo = _git_rename_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            old_content=_OCT_SKILL,
+        )
+        base_sha = _commit_staged_rename(repo)
+
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_sha)
+
+        files = _changed_files_in(repo)
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert "EXECUTABLE_SPEC" in facets, reason
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_ordinary_governance_rename_is_not_over_escalated(self, tmp_path, monkeypatch):
+        """REGRESSION: the rejected blanket fix (treat every missing old .oct.md as
+        EXECUTABLE_SPEC) would add reviewers to ordinary governance renames.
+
+        A TYPE::RULE document must still classify as GOVERNANCE, not EXECUTABLE_SPEC.
+
+        This guard is not RED before the fix: today's failed sniff also yields
+        GOVERNANCE. It exists to fail if the fix over-reaches.
+        """
+        repo = _git_rename_repro(
+            tmp_path,
+            "governance/rule.oct.md",
+            "notes.md",
+            old_content=("===RULE===\nMETA:\n  TYPE::RULE\n\n§1::BODY\n  X::Y\n===END===\n"),
+        )
+        base_sha = _commit_staged_rename(repo)
+
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_sha)
+
+        files = _changed_files_in(repo)
+        facets, required_roles, _, reason = _classify_in(repo, files)
+
+        assert facets == {"GOVERNANCE"}, f"over-escalated an ordinary rule rename: {reason}"
+        assert "EXECUTABLE_SPEC" not in facets, reason
+        # No reviewer assertion here: a 1-line single-file governance rename
+        # legitimately takes the TIER_1_SELF short-circuit, which returns an
+        # empty role set. The facet is the claim under test.
+        assert required_roles == set(), reason
+
+
+@pytest.mark.security
+class TestDisqualificationSurfacedOnSelfReviewPath:
+    """cubic P2: the disqualification notice must reach the TIER_1_SELF SUCCESS exits.
+
+    The notice reached the role-check returns and the TIER_1_SELF FAILURE return,
+    but every successful self-review return exited before it was appended. The
+    security property held -- the poisoned comment was still disqualified and
+    cleared nothing -- but the wedge attempt became invisible in exactly the tier
+    where a single reviewer is least likely to notice it.
+    """
+
+    def test_self_review_success_still_reports_the_disqualification(
+        self, ci_environment, monkeypatch
+    ):
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _mock_gh_pr_view(
+                [
+                    _POISONED_CRS_COMMENT,
+                    {"body": "IL SELF-REVIEWED: fixed a typo"},
+                ]
+            ),
+        )
+
+        approved, message, missing = validate_review.check_pr_comments(
+            required_roles=set(), tier="TIER_1_SELF"
+        )
+
+        assert approved is True, f"genuine self-review must still clear T1. Got: {message}"
+        assert missing == []
+        assert "spoofing" in message.lower(), (
+            "a wedge attempt on a self-review PR must not be silent. " f"Got: {message}"
+        )
+
+    def test_self_review_via_crs_metadata_success_reports_the_disqualification(
+        self, ci_environment, monkeypatch
+    ):
+        """The metadata-satisfied self-review exits are separate returns and
+        regressed identically."""
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _mock_gh_pr_view(
+                [
+                    _POISONED_CRS_COMMENT,
+                    {
+                        "body": (
+                            "CRS APPROVED: looks good\n"
+                            '<!-- review: {"role": "CRS", "verdict": "APPROVED", '
+                            '"provider": "gemini"} -->'
+                        )
+                    },
+                ]
+            ),
+        )
+
+        approved, message, _ = validate_review.check_pr_comments(
+            required_roles=set(), tier="TIER_1_SELF"
+        )
+
+        assert approved is True, message
+        assert (
+            "spoofing" in message.lower()
+        ), f"metadata self-review exit lost the disqualification notice. Got: {message}"
+
+
+def _git_advancing_base_repro(
+    tmp_path,
+    old_path: str,
+    new_path: str,
+    old_content: str,
+    base_action: str = "modify",
+    advanced_content: str = "===RULE===\nMETA:\n  TYPE::RULE\n===END===\n",
+):
+    """Repo with a REAL NAMED base branch that ADVANCES after divergence.
+
+    A SHA-pinned fixture cannot express this defect: pinning GITHUB_BASE_REF to
+    the pre-rename commit makes the base tip equal the merge base by
+    construction. Only a named branch that has moved on since divergence
+    distinguishes `base_tip:<old_path>` from `merge_base:<old_path>`.
+
+    Layout::
+
+        M (basebranch, old_path = old_content)   <- merge base
+        |\\
+        | R (testwork, HEAD: old_path renamed to new_path + edited)
+        A (basebranch tip: old_path modified or deleted)
+
+    Returns (repo, base_branch_name).
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = _git_fixture_env()
+
+    def git(*args):
+        sp.run(["git", *args], cwd=repo, check=True, env=env)
+
+    git("init", "-q", "-b", "basebranch")
+    git("config", "user.name", "t")
+    git("config", "user.email", "t@t.t")
+
+    src = repo / old_path
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(old_content)
+    git("add", "-A")
+    git("commit", "-qm", "merge base")
+
+    # Feature branch: the rename plus a content edit in the same commit.
+    git("switch", "-qc", "testwork")
+    (repo / new_path).parent.mkdir(parents=True, exist_ok=True)
+    git("mv", old_path, new_path)
+    with (repo / new_path).open("a") as fh:
+        fh.write("appended by the same commit\n")
+    git("add", "-A")
+    git("commit", "-qm", "rename")
+
+    # Base branch advances AFTER divergence, touching the very path the
+    # feature branch renamed away.
+    git("switch", "-q", "basebranch")
+    if base_action == "delete":
+        git("rm", "-q", old_path)
+    else:
+        src.write_text(advanced_content)
+        git("add", "-A")
+    git("commit", "-qm", "base advances")
+
+    git("switch", "-q", "testwork")
+    return repo, "basebranch"
+
+
+@pytest.mark.security
+class TestRenameClassifiedFromMergeBaseNotBaseTip:
+    """Issue #161 (round 3): three-dot diff semantics.
+
+    get_changed_files diffs ``{base_ref}...HEAD``. Three dots means the
+    left-hand tree is ``merge-base(base_ref, HEAD)`` -- NOT the base_ref tip.
+    Classifying the old side against the base TIP reads the wrong tree on any
+    PR whose base has advanced since divergence, which is the normal case, and
+    the zero-external-reviewer outcome becomes reachable again.
+    """
+
+    def test_advanced_base_still_classifies_old_side_from_merge_base(self, tmp_path, monkeypatch):
+        """Base branch changed the old path to TYPE::RULE after divergence.
+
+        Merge base still holds TYPE::AGENT_DEFINITION, so the rename must
+        classify EXECUTABLE_SPEC. Reading the base tip yields GOVERNANCE and
+        drops to zero external reviewers.
+        """
+        repo, base_branch = _git_advancing_base_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            _OCT_AGENT_DEFINITION,
+            base_action="modify",
+        )
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_branch)
+
+        files = _changed_files_in(repo)
+
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+        assert files[0]["previous_path"] == "governance/dynamic.oct.md"
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert "EXECUTABLE_SPEC" in facets, (
+            "old side was classified against the base TIP, not the merge base "
+            f"the diff actually used: {reason}"
+        )
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_base_deleted_old_path_still_classifies_from_merge_base(self, tmp_path, monkeypatch):
+        """Base branch DELETED the old path after divergence.
+
+        The merge base still holds the blob, so this must classify precisely
+        (not via the conservative error path).
+        """
+        repo, base_branch = _git_advancing_base_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            _OCT_AGENT_DEFINITION,
+            base_action="delete",
+        )
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_branch)
+
+        files = _changed_files_in(repo)
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert "EXECUTABLE_SPEC" in facets, reason
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_advanced_base_does_not_over_escalate_an_ordinary_rule(self, tmp_path, monkeypatch):
+        """REGRESSION: reading the merge base must stay PRECISE for a genuine
+        TYPE::RULE, even when the base tip has since made it an AGENT_DEFINITION.
+
+        Guards the inverse error: escalating everything unreadable-or-changed.
+        """
+        repo, base_branch = _git_advancing_base_repro(
+            tmp_path,
+            "governance/rule.oct.md",
+            "notes.md",
+            "===RULE===\nMETA:\n  TYPE::RULE\n===END===\n",
+            base_action="modify",
+            advanced_content=_OCT_AGENT_DEFINITION,
+        )
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_branch)
+
+        files = _changed_files_in(repo)
+        facets, _, _, reason = _classify_in(repo, files)
+
+        assert facets == {"GOVERNANCE"}, f"over-escalated an ordinary rule rename: {reason}"
+
+
+@pytest.mark.security
+class TestRenameOldSideFailsClosedWhenUnreadable:
+    """Once rename metadata has identified an old path, an inability to resolve
+    the base tree or read the blob must NOT silently downgrade an executable
+    specification to governance/self-review.
+
+    Precise when resolvable; conservative only on the ERROR path. This does not
+    contradict the rejected blanket fix, which concerned the resolvable case.
+    """
+
+    def test_unresolvable_base_ref_does_not_downgrade(self, tmp_path, monkeypatch):
+        """An unresolvable base ref must fail CLOSED, not fall back to GOVERNANCE.
+
+        NOTE: the file dict here is constructed rather than produced by
+        get_changed_files, because an unresolvable base ref makes collection
+        itself fail closed and return nothing to classify. The rename SHAPE is
+        proven against real git elsewhere in this file; what is under test here
+        is the classifier's behaviour when the blob cannot be read.
+        """
+        repo, _ = _git_advancing_base_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            _OCT_AGENT_DEFINITION,
+        )
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", "no-such-branch-exists")
+
+        files = [
+            {
+                "path": "notes.md",
+                "added": 1,
+                "deleted": 0,
+                "total_changed": 1,
+                "status": "R",
+                "previous_path": "governance/dynamic.oct.md",
+            }
+        ]
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert (
+            "GOVERNANCE" not in facets
+        ), f"silently downgraded an unreadable old side to GOVERNANCE: {reason}"
+        assert required_roles, f"ZERO required reviewers on the error path: {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+
+# Characters str.splitlines() treats as line boundaries but readline() does not.
+# The next one someone thinks of should already be covered by this list.
+_SPLITLINES_ONLY_SEPARATORS = [
+    "\x0b",  # line tabulation
+    "\x0c",  # form feed
+    "\x1c",  # file separator
+    "\x1d",  # group separator
+    "\x1e",  # record separator
+    "\x85",  # next line (NEL)
+    " ",  # line separator
+    " ",  # paragraph separator
+]
+
+
+@pytest.mark.security
+class TestSniffSemanticsAgreeAcrossInputs:
+    """cubic P2: one rule, two implementations, drifting.
+
+    _sniff_octave_type read a file with readline() (splits on \\n) but a blob
+    with str.splitlines() (ALSO splits on \\x0b \\x0c \\x1c \\x1d \\x1e \\x85
+    \\u2028 \\u2029). More than 50 such separators before TYPE:: truncated the
+    blob path while the file path still found it.
+
+    Since the OLD side of a rename is now ALWAYS read as a blob, an
+    out-of-library AGENT_DEFINITION or SKILL shaped this way classified
+    GOVERNANCE, fell into TIER_1_SELF and reached zero external reviewers --
+    the #161 outcome, reachable through the #161 fix. The old blob is
+    attacker-authorable: whoever wrote the file chooses its bytes.
+
+    This is the same shape as the merge-base defect: two code paths
+    independently deciding what should be a single rule.
+    """
+
+    @staticmethod
+    def _write(tmp_path, content: str) -> str:
+        rel = "governance/dynamic.oct.md"
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+        return rel
+
+    @pytest.mark.parametrize("sep", _SPLITLINES_ONLY_SEPARATORS)
+    def test_sniff_agrees_between_file_and_blob(self, tmp_path, sep, monkeypatch):
+        """PROPERTY: identical bytes must sniff identically from either input."""
+        content = ("A" + sep) * 60 + "TYPE::AGENT_DEFINITION\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        from_file = validate_review._sniff_octave_type(rel)
+        from_blob = validate_review._sniff_octave_type(rel, content=content)
+
+        assert from_blob == from_file, (
+            f"separator {sep!r}: file sniff gave {from_file!r} but blob sniff "
+            f"gave {from_blob!r} for identical content"
+        )
+        assert from_file == "AGENT_DEFINITION"
+
+    @pytest.mark.parametrize("sep", _SPLITLINES_ONLY_SEPARATORS)
+    def test_facet_agrees_between_file_and_blob(self, tmp_path, sep, monkeypatch):
+        """END TO END: the facet is where the harm lands, so assert the facet."""
+        content = ("A" + sep) * 60 + "TYPE::AGENT_DEFINITION\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        from_file = validate_review._classify_file_facet(rel)
+        from_blob = validate_review._classify_file_facet(rel, content=content)
+
+        assert from_blob == from_file, (
+            f"separator {sep!r}: same bytes classified {from_file} from the file "
+            f"but {from_blob} from the blob"
+        )
+        assert from_file == "EXECUTABLE_SPEC", (
+            "an out-of-library AGENT_DEFINITION must not be downgraded; "
+            "GOVERNANCE falls into TIER_1_SELF and reaches zero external reviewers"
+        )
+
+    def test_skill_type_agrees_too(self, tmp_path, monkeypatch):
+        """TYPE::SKILL is the other executable-spec type."""
+        content = ("A\x0c") * 60 + "TYPE::SKILL\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        assert (
+            validate_review._classify_file_facet(rel, content=content)
+            == validate_review._classify_file_facet(rel)
+            == "EXECUTABLE_SPEC"
+        )
+
+    def test_blank_line_before_type_does_not_truncate_either_input(self, tmp_path, monkeypatch):
+        """REGRESSION: a blank line is '\\n' (truthy) to readline and must not be
+        read as end-of-input by either path."""
+        content = "===DOC===\nMETA:\n\n\n  TYPE::AGENT_DEFINITION\n===END===\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        assert validate_review._sniff_octave_type(rel) == "AGENT_DEFINITION"
+        assert validate_review._sniff_octave_type(rel, content=content) == "AGENT_DEFINITION"
+
+    def test_fifty_line_scan_limit_is_the_same_for_both_inputs(self, tmp_path, monkeypatch):
+        """The cap must be counted in the same units on both paths: TYPE:: beyond
+        the 50th real line is found by neither."""
+        content = "filler\n" * 60 + "  TYPE::AGENT_DEFINITION\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        assert validate_review._sniff_octave_type(rel) == ""
+        assert validate_review._sniff_octave_type(rel, content=content) == ""
+
+
+@pytest.mark.security
+class TestBaseTreeResolvedOnceAndThreaded:
+    """Issue #161 (cycle 3): a shared FUNCTION is not a shared VALUE.
+
+    get_changed_files resolved the base tree, _classify_renamed_old_side
+    resolved it AGAIN per renamed file, and classify_pr_facets is called twice
+    in the production path -- so resolution repeated. A ref movement, a
+    concurrent fetch, or a transient inconsistent result between those calls
+    lets collection diff tree A while classification reads a blob from tree B.
+    With executable content at A and TYPE::RULE at B the result is
+    facets={GOVERNANCE}, roles={}, tier=TIER_1_SELF: zero external reviewers.
+
+    The resolver below deliberately returns a DIFFERENT sha on every call, so
+    any second resolution is observable. That is what makes the
+    resolve-once-and-thread invariant real rather than asserted in a comment.
+    """
+
+    @staticmethod
+    def _install(monkeypatch, tmp_path):
+        """Wire a drifting resolver + a git/gh mock. Returns (resolutions, calls)."""
+        resolutions: list[str] = []
+        calls: list[list[str]] = []
+
+        def drifting_resolver():
+            sha = f"sha{len(resolutions)}"
+            resolutions.append(sha)
+            return sha
+
+        monkeypatch.setattr(validate_review, "_resolve_base_tree_rev", drifting_resolver)
+
+        executable = _OCT_AGENT_DEFINITION
+        rule = "===RULE===\nMETA:\n  TYPE::RULE\n===END===\n"
+
+        def mock_run(cmd, *args, **kwargs):
+            calls.append(list(cmd))
+            joined = " ".join(cmd)
+            if cmd[:2] == ["git", "diff"] and "--name-status" in cmd:
+                return MagicMock(
+                    stdout="R094\tgovernance/dynamic.oct.md\tnotes.md\n",
+                    stderr="",
+                    returncode=0,
+                    check=lambda: None,
+                )
+            if cmd[:2] == ["git", "diff"] and "--numstat" in cmd:
+                return MagicMock(
+                    stdout="1\t0\tgovernance/dynamic.oct.md\tnotes.md\n",
+                    stderr="",
+                    returncode=0,
+                    check=lambda: None,
+                )
+            if cmd[:2] == ["git", "show"]:
+                # The FIRST resolved tree holds the executable spec; any later
+                # tree holds a plain rule. Reading the wrong one downgrades.
+                body = executable if joined.startswith("git show sha0:") else rule
+                return MagicMock(stdout=body, stderr="", returncode=0, check=lambda: None)
+            if cmd[0] == "gh":
+                return MagicMock(
+                    stdout=json.dumps({"body": "", "comments": []}),
+                    stderr="",
+                    returncode=0,
+                    check=lambda: None,
+                )
+            return MagicMock(stdout="", stderr="", returncode=0, check=lambda: None)
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+        monkeypatch.setattr(validate_review, "check_emergency_bypass", lambda: False)
+        monkeypatch.setattr(validate_review, "check_pr_comments", lambda *a, **k: (True, "ok", []))
+        monkeypatch.setattr(validate_review, "_get_pr_body", lambda: "")
+        monkeypatch.setattr(Path, "cwd", lambda: tmp_path)
+        return resolutions, calls
+
+    def test_base_tree_is_resolved_exactly_once_per_run(
+        self, ci_environment, monkeypatch, tmp_path
+    ):
+        resolutions, _ = self._install(monkeypatch, tmp_path)
+
+        validate_review.main()
+
+        assert len(resolutions) == 1, (
+            "the base tree was resolved more than once in a single validation run; "
+            f"resolutions={resolutions}. Collection and classification can therefore "
+            "disagree about which tree the diff was taken against."
+        )
+
+    def test_diff_and_blob_read_use_the_same_sha(self, ci_environment, monkeypatch, tmp_path):
+        resolutions, calls = self._install(monkeypatch, tmp_path)
+
+        validate_review.main()
+
+        diff_shas = {
+            arg.split("..")[0]
+            for cmd in calls
+            if cmd[:2] == ["git", "diff"]
+            for arg in cmd
+            if ".." in arg and arg.endswith("HEAD")
+        }
+        show_shas = {
+            cmd[2].split(":", 1)[0] for cmd in calls if cmd[:2] == ["git", "show"] and len(cmd) > 2
+        }
+
+        assert diff_shas, f"no git diff against a resolved tree was issued: {calls}"
+        assert show_shas, f"no git show blob read was issued: {calls}"
+        assert diff_shas == show_shas, (
+            f"collection diffed {diff_shas} but classification read blobs from "
+            f"{show_shas} - the diff tree and the blob tree must be the same value"
+        )
+        assert diff_shas == {resolutions[0]}

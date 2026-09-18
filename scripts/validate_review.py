@@ -11,6 +11,7 @@ Breaking Change: Now exits non-zero on CI failures (was: fail-open)
 
 # Critical-Engineer: consulted for Review-gate fail-closed validation
 import importlib.util
+import io
 import json
 import os
 import re
@@ -49,7 +50,7 @@ _BOT_LOGIN_SET: frozenset[str] = frozenset(
 )
 
 
-def get_changed_files() -> list[dict[str, Any]]:
+def get_changed_files(base_tree: str | None = None) -> list[dict[str, Any]]:
     """Get list of changed files with line counts and file status.
 
     Each returned dict includes:
@@ -62,14 +63,33 @@ def get_changed_files() -> list[dict[str, Any]]:
 
     For renamed files, ``previous_path`` is populated so that callers can
     fetch the BASE blob using the old path (issue #417).
+
+    Args:
+        base_tree: The already-resolved CI base tree revision. :func:`main`
+            resolves it ONCE and passes the SAME VALUE here and to
+            :func:`classify_pr_facets`, so collection and classification cannot
+            disagree about which tree the diff was taken against (issue #161).
+            When None (direct callers and tests) it is resolved here instead;
+            that is a second resolution, so the production path must pass it.
+            Ignored outside CI, where the diff is ``--cached`` against HEAD.
     """
     try:
         # In CI, compare against base branch; locally use cached
         if "CI" in os.environ:
-            # Get the base branch (usually main)
-            base_ref = os.environ.get("GITHUB_BASE_REF", "origin/main")
-            numstat_cmd = ["git", "diff", f"{base_ref}...HEAD", "--numstat"]
-            status_cmd = ["git", "diff", f"{base_ref}...HEAD", "--name-status"]
+            # `{base_ref}...HEAD` is exactly `merge-base(base_ref, HEAD)..HEAD`,
+            # so diffing the resolved tree is equivalent -- and it makes the tree
+            # an explicit VALUE that classification can be handed.
+            if base_tree is None:
+                base_tree = _resolve_base_tree_rev()
+            if base_tree is None:
+                print(
+                    "❌ Cannot resolve the merge base in CI; refusing to classify "
+                    "against an unknown tree.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            numstat_cmd = ["git", "diff", f"{base_tree}..HEAD", "--numstat"]
+            status_cmd = ["git", "diff", f"{base_tree}..HEAD", "--name-status"]
         else:
             # Local: check staged files
             numstat_cmd = ["git", "diff", "--cached", "--numstat"]
@@ -291,20 +311,44 @@ def _is_vendored_path(path: str) -> bool:
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
 
-def _sniff_octave_type(path: str) -> str:
+def _sniff_octave_type(path: str, content: str | None = None) -> str:
     """Read META.TYPE from an OCTAVE file. Max 50 lines, fail-safe.
 
     Args:
         path: File path to read.
+        content: Pre-read file content to sniff INSTEAD of opening ``path``.
+            The OLD side of a rename no longer exists on the working
+            filesystem, so its content must come from a git blob (issue #161).
 
     Returns:
         The TYPE value string (e.g., 'AGENT_DEFINITION', 'RULE') or empty string.
     """
+    # ONE set of line semantics for BOTH inputs. These were previously two
+    # implementations -- readline() for a file, str.splitlines() for a blob --
+    # which disagreed: splitlines() also breaks on \x0b \x0c \x1c \x1d \x1e \x85
+    #    , so >50 such separators before TYPE:: truncated the blob scan
+    # while the file scan still found it. Identical bytes then produced different
+    # facets purely by which input carried them, and since the OLD side of a
+    # rename is always read as a blob (and is attacker-authorable), that
+    # downgraded an executable spec to GOVERNANCE -> TIER_1_SELF -> zero external
+    # reviewers. Wrapping the blob in StringIO and sharing the loop removes the
+    # possibility of drift rather than patching one side of it.
+    # newline=None gives StringIO the same universal-newline translation that
+    # open() applies by default, so \r and \r\n behave identically too.
+    #
+    # PARITY IS LINE-SPLITTING ONLY, NOT DECODING. The filesystem read here is
+    # strict UTF-8, while blob content arrives from _git_show_file decoded with
+    # errors="replace". Malformed UTF-8 can therefore still make the two inputs
+    # disagree. That residual gap cannot reopen the downgrade path: a mangled
+    # byte can only destroy a TYPE:: match, never fabricate one, so it can only
+    # make _classify_renamed_old_side fall to its conservative EXECUTABLE_SPEC
+    # branch. Narrowed deliberately rather than claiming a parity that does not
+    # hold (see the decode-policy note on issue #161).
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") if content is None else io.StringIO(content, None) as f:
             for _ in range(50):
                 line = f.readline()
-                if not line:
+                if not line:  # '' only at EOF; a blank line is '\n'
                     break
                 if "TYPE::" in line:
                     parts = line.split("::", 1)
@@ -315,8 +359,15 @@ def _sniff_octave_type(path: str) -> str:
     return ""
 
 
-def _classify_file_facet(path: str) -> str | None:
+def _classify_file_facet(path: str, content: str | None = None) -> str | None:
     """Classify a single file path into a content facet.
+
+    Args:
+        path: File path to classify.
+        content: Pre-read content used for the content-sensitive ``.oct.md``
+            branch, for paths that no longer exist on the working filesystem
+            (the OLD side of a rename — issue #161). Every other branch is
+            path-only and is unaffected.
 
     Returns:
         Facet name string, or None if the file is exempt.
@@ -376,7 +427,7 @@ def _classify_file_facet(path: str) -> str | None:
         if "/library/agents/" in path or "/library/skills/" in path:
             return "EXECUTABLE_SPEC"
         # For other .oct.md files, sniff TYPE to distinguish
-        octave_type = _sniff_octave_type(path)
+        octave_type = _sniff_octave_type(path, content)
         if octave_type in _EXECUTABLE_SPEC_TYPES:
             return "EXECUTABLE_SPEC"
         # All other .oct.md (RULE, STANDARD, NORTH_STAR_SUMMARY, unknown) -> GOVERNANCE
@@ -416,9 +467,84 @@ def _classify_file_facet(path: str) -> str | None:
     return "ROUTINE_CODE"
 
 
+def _resolve_base_tree_rev() -> str | None:
+    """SINGLE SOURCE OF TRUTH for the tree the PR diff is taken against.
+
+    Both changed-file collection and old-side rename classification MUST use
+    this. The #161 round-3 defect existed precisely because two sites
+    independently decided which tree the diff was against and disagreed.
+
+    - Local: the diff is ``--cached`` (index vs HEAD), so the pre-change tree is
+      ``HEAD``.
+    - CI: the diff is ``{base_ref}...HEAD``. Three dots means the left-hand tree
+      is ``merge-base(base_ref, HEAD)`` -- NOT the base_ref tip, which has
+      usually advanced since divergence. ``git diff A...B`` is exactly
+      ``git diff $(git merge-base A B) B``, so resolving the merge base here and
+      using it in both places is equivalent for the diff and *correct* for the
+      blob read.
+
+    Returns:
+        A revision string, or None when the merge base cannot be resolved.
+        None is a hard signal: callers MUST fail closed rather than fall back to
+        a different tree.
+    """
+    if "CI" not in os.environ:
+        return "HEAD"
+    base_ref = os.environ.get("GITHUB_BASE_REF", "origin/main")
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", base_ref, "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _classify_renamed_old_side(previous_path: str, base_tree: str | None) -> str | None:
+    """Classify the OLD side of a rename from the given base tree, FAIL CLOSED.
+
+    ``base_tree`` is passed IN, never resolved here: resolving it again would
+    recreate the defect this parameter exists to prevent (issue #161 cycle 3).
+    A None value means the caller could not resolve it, which is itself a
+    fail-closed trigger below.
+
+    Precise when the blob resolves; conservative only when it does not. These are
+    different cases and must not be collapsed: the blanket rule "treat every
+    missing old .oct.md as executable" was rejected for the RESOLVABLE case,
+    where the precise base-blob read is correct. Here, on the ERROR path,
+    conservatism is correct -- once rename metadata has identified an old path,
+    an inability to resolve the base tree or read the blob must NOT silently
+    downgrade an executable specification to governance/self-review, because
+    TIER_1_SELF excludes EXECUTABLE_SPEC but not GOVERNANCE.
+
+    GOVERNANCE is the exact fallback a failed content sniff produces, and the
+    sniff is the ONLY thing that can upgrade an .oct.md to EXECUTABLE_SPEC.
+    So an unreadable blob whose path-only classification lands on GOVERNANCE is
+    precisely the ambiguous case, and only that case escalates. Every other
+    branch of the classifier is path-only and is left untouched.
+    """
+    content = _git_show_file(base_tree, previous_path) if base_tree else None
+    facet = _classify_file_facet(previous_path, content)
+    if content is None and facet == "GOVERNANCE":
+        print(
+            f"⚠️  Could not read the pre-rename content of {previous_path}; "
+            "classifying it as EXECUTABLE_SPEC (fail-closed) rather than "
+            "downgrading it to GOVERNANCE.",
+            file=sys.stderr,
+        )
+        return "EXECUTABLE_SPEC"
+    return facet
+
+
 def classify_pr_facets(
     files: list[dict[str, Any]],
     declared_roles: set[str] | None = None,
+    base_tree: str | None = None,
 ) -> tuple[set[str], set[str], str, str]:
     """Classify PR files into content facets and compute required reviewers.
 
@@ -440,6 +566,11 @@ def classify_pr_facets(
         declared_roles: Optional set of escalation roles unioned in BEFORE the
             early returns. Must already be whitelist-filtered. Defaults to None
             (no declaration -> unchanged diff-shape behaviour).
+        base_tree: The already-resolved revision the PR diff was taken against,
+            used to read the OLD side of a rename. Pass the SAME value given to
+            :func:`get_changed_files`. Defaults to None, which resolves it here
+            (only if a rename needs it) -- acceptable for direct callers, but
+            the production path threads one resolved value instead.
 
     Returns:
         Tuple of (facets, required_roles, tier_label, reason):
@@ -450,13 +581,59 @@ def classify_pr_facets(
     """
     declared: set[str] = set(declared_roles) if declared_roles else set()
 
+    # base_tree is normally passed IN by main(), which resolves it ONCE per
+    # validation run and hands the SAME VALUE to get_changed_files and to both
+    # calls of this function. Direct callers (and tests) may omit it, in which
+    # case it is resolved here -- but only when a rename actually needs it, and
+    # at most once per call. The production path must pass it: resolving
+    # independently is precisely how collection and classification came to
+    # disagree about which tree the diff was taken against (issue #161 cycle 3).
+    if base_tree is None and any(
+        f.get("previous_path") and f.get("previous_path") != f.get("path") for f in files
+    ):
+        base_tree = _resolve_base_tree_rev()
+
     facets: set[str] = set()
     non_exempt_files = []
 
     for f in files:
-        facet = _classify_file_facet(f["path"])
-        if facet is not None:
-            facets.add(facet)
+        # Classify the NEW path and, for renames, the OLD path too (issue #161).
+        # `git mv auth/login.py notes.md` plus a content edit in the same commit
+        # still emits an R0xx rename status; classifying only the new path let the
+        # PR land as TIER_0_EXEMPT with ZERO required reviewers -- and let
+        # scripts/validate_review.py be renamed out from under its own
+        # META_CONTROL_PLANE rule. Both facets are collected, which can only ADD to
+        # the facet set (required_roles below is a union over facets), so this
+        # escalates and never downgrades. A None from either path is simply skipped
+        # and therefore cannot mask a real facet from the other.
+        #
+        # The OLD side must be classified from its BASE BLOB, not from the
+        # working filesystem. _classify_file_facet resolves a non-library
+        # .oct.md via _sniff_octave_type, which open()s the path; a renamed-away
+        # previous_path is not there, so the sniff would return "" and downgrade
+        # an out-of-library AGENT_DEFINITION/SKILL from EXECUTABLE_SPEC to
+        # GOVERNANCE -- and TIER_1_SELF excludes EXECUTABLE_SPEC but NOT
+        # GOVERNANCE, leaving the zero-external-reviewer outcome reachable. The
+        # blob read follows the existing precedent in
+        # _collect_bitemporal_declarations (the base_path / _git_show_file site),
+        # and reads it from `base_tree` -- the revision resolved ONCE by main()
+        # and threaded through both this call and get_changed_files.
+        #
+        # Critical-Engineer: consulted for review-gate rename classification and
+        # fail-closed metadata disqualification
+        file_facets = set()
+        new_facet = _classify_file_facet(f["path"])
+        if new_facet is not None:
+            file_facets.add(new_facet)
+
+        previous_path = f.get("previous_path")
+        if previous_path and previous_path != f["path"]:
+            old_facet = _classify_renamed_old_side(previous_path, base_tree)
+            if old_facet is not None:
+                file_facets.add(old_facet)
+
+        if file_facets:
+            facets |= file_facets
             non_exempt_files.append(f)
 
     # CRITICAL ORDERING (issue #412, comment 4569387061): the declaration union
@@ -961,26 +1138,36 @@ def check_pr_comments(
         # --- Metadata extraction and cross-validation ---
         # Extract structured metadata from all texts for machine-readable checks.
         # When metadata IS present, also run regex on the same comment.
-        # If regex-extracted verdict contradicts metadata verdict, FAIL
-        # (prevents spoofing: visible "BLOCKED" with hidden metadata "APPROVED").
+        # If regex-extracted verdict contradicts metadata verdict, the comment is
+        # DISQUALIFIED (prevents spoofing: visible "BLOCKED" with hidden metadata
+        # "APPROVED").
+        #
+        # DISQUALIFY, DO NOT ABORT (issue #155, fail-CLOSED half): this block used
+        # to `return (False, ...)` on the first mismatch, ending the run before any
+        # role checker executed. Because anyone who can comment on a PR can post
+        # such a comment, that turned a spoofing guard into a denial-of-service --
+        # one comment blocked EVERY approval on the PR, including a revert of a bad
+        # main. The offending text is instead dropped from BOTH `searchable_texts`
+        # and `metadata_entries`, so it can satisfy neither the regex matchers nor
+        # `_meta_has`, and validation continues over the remaining comments. The
+        # security property is unchanged: a spoofed comment still clears nothing.
         metadata_entries: list[dict[str, str | None]] = []
+        validated_texts: list[str] = []
+        disqualified: list[str] = []
         for text in searchable_texts:
             meta = _parse_review_metadata(text)
             if meta is not None:
-                metadata_entries.append(meta)
                 # CROSS-VALIDATION: If metadata says a role gave an approval
                 # verdict, the visible text in the same comment MUST also
-                # match that approval via regex. Otherwise reject.
+                # match that approval via regex. Otherwise disqualify.
                 meta_role = meta.get("role")
                 meta_verdict = meta.get("verdict")
-                if meta_role and meta_verdict:
-                    # Only cross-validate recognized review roles.
-                    # Unrecognized roles (e.g., agent names like
-                    # "code-review-specialist") cannot satisfy any gate
-                    # check, so mismatched metadata is irrelevant -- not
-                    # a spoofing vector.
-                    if meta_role not in _VALID_ROLES:
-                        continue
+                # Only cross-validate recognized review roles.
+                # Unrecognized roles (e.g., agent names like
+                # "code-review-specialist") cannot satisfy any gate
+                # check, so mismatched metadata is irrelevant -- not
+                # a spoofing vector.
+                if meta_role and meta_verdict and meta_role in _VALID_ROLES:
                     # Only cross-validate approval verdicts (not BLOCKED/CONDITIONAL)
                     approval_keywords = {"APPROVED", "SELF-REVIEWED", "REVIEWED", "GO"}
                     if meta_verdict in approval_keywords:
@@ -996,13 +1183,35 @@ def check_pr_comments(
                             visible_text, meta_role, meta_verdict
                         )
                         if not regex_agrees:
-                            return (
-                                False,
-                                f"❌ Cross-validation failure: metadata says "
-                                f"{meta_role} {meta_verdict} but visible text "
-                                f"does not match. Possible spoofing detected.",
-                                [],
-                            )
+                            disqualified.append(f"{meta_role} {meta_verdict}")
+                            continue
+                metadata_entries.append(meta)
+            validated_texts.append(text)
+
+        searchable_texts = validated_texts
+
+        # Surface the disqualification: a wedge attempt must be visible, not fatal.
+        # `_reason` decorates EVERY verdict message below, so the notice cannot be
+        # lost by adding or reordering an exit. It previously reached only the
+        # role-check returns and the TIER_1_SELF failure return, leaving the six
+        # successful self-review exits silent -- the security property held, but
+        # the wedge attempt was invisible in the tier with the fewest reviewers.
+        disqualified_note = ""
+        if disqualified:
+            detail = ", ".join(sorted(set(disqualified)))
+            print(
+                f"   ⚠️  Disqualified {len(disqualified)} comment(s) whose metadata "
+                f"contradicts their visible text ({detail}). Possible spoofing "
+                f"detected; these comments clear nothing. Validation continues."
+            )
+            disqualified_note = (
+                f" [⚠️ {len(disqualified)} comment(s) disqualified by cross-validation "
+                f"({detail}) - possible spoofing detected; they cleared nothing]"
+            )
+
+        def _reason(text: str) -> str:
+            """Decorate a verdict message with the disqualification notice (if any)."""
+            return f"{text}{disqualified_note}"
 
         def _meta_has(
             role: str,
@@ -1040,18 +1249,18 @@ def check_pr_comments(
         if tier == "TIER_1_SELF" and (required_roles is None or len(required_roles) == 0):
             for entry in metadata_entries:
                 if entry.get("verdict") == "SELF-REVIEWED":
-                    return True, "✓ Self-review found (metadata)", []
+                    return True, _reason("✓ Self-review found (metadata)"), []
             if _meta_has("HO", "REVIEWED"):
-                return True, "✓ HO supervisory review found (metadata)", []
+                return True, _reason("✓ HO supervisory review found (metadata)"), []
             if _meta_has("CRS", "APPROVED"):
-                return True, "✓ CRS approval satisfies self-review (metadata)", []
+                return True, _reason("✓ CRS approval satisfies self-review (metadata)"), []
             if _has_self_review(searchable_texts):
-                return True, "✓ Self-review found", []
+                return True, _reason("✓ Self-review found"), []
             if _has_approval(searchable_texts, "HO", "REVIEWED"):
-                return True, "✓ HO supervisory review found", []
+                return True, _reason("✓ HO supervisory review found"), []
             if _has_crs_approval(searchable_texts):
-                return True, "✓ CRS approval satisfies self-review requirement", []
-            return False, "❌ Missing: SELF-REVIEWED or HO REVIEWED comment", []
+                return True, _reason("✓ CRS approval satisfies self-review requirement"), []
+            return False, _reason("❌ Missing: SELF-REVIEWED or HO REVIEWED comment"), []
 
         # Determine effective roles to check
         effective_roles = required_roles if required_roles is not None else set()
@@ -1067,7 +1276,7 @@ def check_pr_comments(
             }
             effective_roles = _tier_role_map.get(tier, set())
             if not effective_roles:
-                return False, f"❌ Unrecognized tier: {tier}", []
+                return False, _reason(f"❌ Unrecognized tier: {tier}"), []
 
         # Check each required role (SECURITY: fail-closed for unknown roles)
         missing_roles: list[str] = []
@@ -1080,9 +1289,9 @@ def check_pr_comments(
 
         if not missing_roles:
             role_names = ", ".join(sorted(effective_roles))
-            return True, f"✓ All required approvals found ({role_names})", []
+            return True, _reason(f"✓ All required approvals found ({role_names})"), []
 
-        return False, f"❌ Missing: {', '.join(missing_display)}", missing_roles
+        return False, _reason(f"❌ Missing: {', '.join(missing_display)}"), missing_roles
 
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
         # SECURITY FIX: Fail closed in CI, permissive locally
@@ -1341,8 +1550,16 @@ def main() -> int:
         if isinstance(cached_prov, dict):
             provenance = {k: list(v) for k, v in cached_prov.items()}
     else:
+        # Resolve the base tree ONCE for this validation run, then thread that
+        # exact revision through collection AND both classification calls below
+        # (issue #161 cycle 3). Resolving per call site let a ref movement or a
+        # concurrent fetch give collection tree A and classification tree B,
+        # which downgraded a renamed executable spec to GOVERNANCE ->
+        # TIER_1_SELF -> zero external reviewers. One resolution, passed down.
+        base_tree = _resolve_base_tree_rev()
+
         # Get changed files
-        files = get_changed_files()
+        files = get_changed_files(base_tree)
         if not files:
             print("✓ No files changed")
             return 0
@@ -1371,13 +1588,13 @@ def main() -> int:
         # Classify PR content into facets and compute required reviewers,
         # unioning the (whitelist-filtered) declared roles BEFORE early returns.
         _facets, required_roles, tier, reason = classify_pr_facets(
-            files, declared_roles=declared_roles
+            files, declared_roles=declared_roles, base_tree=base_tree
         )
 
         # Compute the diff/facet-only role floor (no declaration) so provenance
         # can attribute DIFF independently of any declared source. A role that is
         # BOTH diff-required AND declared must show ALL its sources.
-        _df, diff_roles, _dt, _dr = classify_pr_facets(files)
+        _df, diff_roles, _dt, _dr = classify_pr_facets(files, base_tree=base_tree)
 
         # Build the provenance map: every required role gets a source list. A
         # role's sources are the UNION of its declaration origins (HEAD/BASE/

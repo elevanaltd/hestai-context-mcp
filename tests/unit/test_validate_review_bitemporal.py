@@ -635,7 +635,7 @@ class TestMainEndToEndEscalation:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [_f("decisions/ADR-HO-AUTH.md", added=40, deleted=0, status="A")],
+            lambda *_a, **_k: [_f("decisions/ADR-HO-AUTH.md", added=40, deleted=0, status="A")],
         )
         monkeypatch.setattr(validate_review, "_get_pr_body", lambda: "")
 
@@ -672,7 +672,7 @@ class TestMainEndToEndEscalation:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [_f("docs/README.md", added=5, deleted=2)],
+            lambda *_a, **_k: [_f("docs/README.md", added=5, deleted=2)],
         )
         monkeypatch.setattr(validate_review, "_get_pr_body", lambda: "")
         monkeypatch.setattr(validate_review, "_git_show_file", lambda sha, path: None)
@@ -977,7 +977,9 @@ class TestProvenanceMultiSourceAttribution:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [_f("src/core.py", added=50, deleted=20)],  # ROUTINE_CODE -> CE,CRS,TMG
+            lambda *_a, **_k: [
+                _f("src/core.py", added=50, deleted=20)
+            ],  # ROUTINE_CODE -> CE,CRS,TMG
         )
         # PR body declares CRS (overlaps diff) + SR (new). No blob declarations.
         monkeypatch.setattr(
@@ -1009,7 +1011,7 @@ class TestProvenanceMultiSourceAttribution:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [_f("docs/ADR.md", added=10, deleted=0)],  # exempt -> no diff roles
+            lambda *_a, **_k: [_f("docs/ADR.md", added=10, deleted=0)],  # exempt -> no diff roles
         )
         monkeypatch.setattr(
             validate_review,
