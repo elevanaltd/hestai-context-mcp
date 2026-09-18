@@ -11,6 +11,7 @@ Breaking Change: Now exits non-zero on CI failures (was: fail-open)
 
 # Critical-Engineer: consulted for Review-gate fail-closed validation
 import importlib.util
+import io
 import json
 import os
 import re
@@ -313,21 +314,28 @@ def _sniff_octave_type(path: str, content: str | None = None) -> str:
     Returns:
         The TYPE value string (e.g., 'AGENT_DEFINITION', 'RULE') or empty string.
     """
+    # ONE set of line semantics for BOTH inputs. These were previously two
+    # implementations -- readline() for a file, str.splitlines() for a blob --
+    # which disagreed: splitlines() also breaks on \x0b \x0c \x1c \x1d \x1e \x85
+    #    , so >50 such separators before TYPE:: truncated the blob scan
+    # while the file scan still found it. Identical bytes then produced different
+    # facets purely by which input carried them, and since the OLD side of a
+    # rename is always read as a blob (and is attacker-authorable), that
+    # downgraded an executable spec to GOVERNANCE -> TIER_1_SELF -> zero external
+    # reviewers. Wrapping the blob in StringIO and sharing the loop removes the
+    # possibility of drift rather than patching one side of it.
+    # newline=None gives StringIO the same universal-newline translation that
+    # open() applies by default, so \r and \r\n behave identically too.
     try:
-        if content is None:
-            with open(path, encoding="utf-8") as f:
-                lines = [f.readline() for _ in range(50)]
-        else:
-            # keepends=True so a blank line stays truthy ("\n") and does not
-            # trip the end-of-file break below, matching readline() semantics.
-            lines = content.splitlines(keepends=True)[:50]
-        for line in lines:
-            if not line:
-                break
-            if "TYPE::" in line:
-                parts = line.split("::", 1)
-                if len(parts) == 2:
-                    return parts[1].strip().strip('"').strip("'")
+        with open(path, encoding="utf-8") if content is None else io.StringIO(content, None) as f:
+            for _ in range(50):
+                line = f.readline()
+                if not line:  # '' only at EOF; a blank line is '\n'
+                    break
+                if "TYPE::" in line:
+                    parts = line.split("::", 1)
+                    if len(parts) == 2:
+                        return parts[1].strip().strip('"').strip("'")
     except Exception:
         pass
     return ""
