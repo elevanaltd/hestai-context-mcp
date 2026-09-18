@@ -66,10 +66,20 @@ def get_changed_files() -> list[dict[str, Any]]:
     try:
         # In CI, compare against base branch; locally use cached
         if "CI" in os.environ:
-            # Get the base branch (usually main)
-            base_ref = os.environ.get("GITHUB_BASE_REF", "origin/main")
-            numstat_cmd = ["git", "diff", f"{base_ref}...HEAD", "--numstat"]
-            status_cmd = ["git", "diff", f"{base_ref}...HEAD", "--name-status"]
+            # Resolve the base tree ONCE, here, and let classification reuse the
+            # same answer (issue #161 round 3). `{base_ref}...HEAD` is exactly
+            # `merge-base(base_ref, HEAD)..HEAD`, so this is equivalent for the
+            # diff while making the tree explicit and shareable.
+            base_tree = _resolve_base_tree_rev()
+            if base_tree is None:
+                print(
+                    "❌ Cannot resolve the merge base in CI; refusing to classify "
+                    "against an unknown tree.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            numstat_cmd = ["git", "diff", f"{base_tree}..HEAD", "--numstat"]
+            status_cmd = ["git", "diff", f"{base_tree}..HEAD", "--name-status"]
         else:
             # Local: check staged files
             numstat_cmd = ["git", "diff", "--cached", "--numstat"]
@@ -431,16 +441,74 @@ def _classify_file_facet(path: str, content: str | None = None) -> str | None:
     return "ROUTINE_CODE"
 
 
-def _rename_base_rev() -> str:
-    """Revision holding the PRE-rename content of a renamed file.
+def _resolve_base_tree_rev() -> str | None:
+    """SINGLE SOURCE OF TRUTH for the tree the PR diff is taken against.
 
-    Mirrors the branch split already made by :func:`get_changed_files`: under CI
-    the diff is ``{GITHUB_BASE_REF}...HEAD``, so the old blob lives at the base
-    ref; locally the diff is ``--cached`` (index vs HEAD), so it lives at HEAD.
+    Both changed-file collection and old-side rename classification MUST use
+    this. The #161 round-3 defect existed precisely because two sites
+    independently decided which tree the diff was against and disagreed.
+
+    - Local: the diff is ``--cached`` (index vs HEAD), so the pre-change tree is
+      ``HEAD``.
+    - CI: the diff is ``{base_ref}...HEAD``. Three dots means the left-hand tree
+      is ``merge-base(base_ref, HEAD)`` -- NOT the base_ref tip, which has
+      usually advanced since divergence. ``git diff A...B`` is exactly
+      ``git diff $(git merge-base A B) B``, so resolving the merge base here and
+      using it in both places is equivalent for the diff and *correct* for the
+      blob read.
+
+    Returns:
+        A revision string, or None when the merge base cannot be resolved.
+        None is a hard signal: callers MUST fail closed rather than fall back to
+        a different tree.
     """
-    if "CI" in os.environ:
-        return os.environ.get("GITHUB_BASE_REF", "origin/main")
-    return "HEAD"
+    if "CI" not in os.environ:
+        return "HEAD"
+    base_ref = os.environ.get("GITHUB_BASE_REF", "origin/main")
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", base_ref, "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _classify_renamed_old_side(previous_path: str) -> str | None:
+    """Classify the OLD side of a rename from the shared base tree, FAIL CLOSED.
+
+    Precise when the blob resolves; conservative only when it does not. These are
+    different cases and must not be collapsed: the blanket rule "treat every
+    missing old .oct.md as executable" was rejected for the RESOLVABLE case,
+    where the precise base-blob read is correct. Here, on the ERROR path,
+    conservatism is correct -- once rename metadata has identified an old path,
+    an inability to resolve the base tree or read the blob must NOT silently
+    downgrade an executable specification to governance/self-review, because
+    TIER_1_SELF excludes EXECUTABLE_SPEC but not GOVERNANCE.
+
+    GOVERNANCE is the exact fallback a failed content sniff produces, and the
+    sniff is the ONLY thing that can upgrade an .oct.md to EXECUTABLE_SPEC.
+    So an unreadable blob whose path-only classification lands on GOVERNANCE is
+    precisely the ambiguous case, and only that case escalates. Every other
+    branch of the classifier is path-only and is left untouched.
+    """
+    base_tree = _resolve_base_tree_rev()
+    content = _git_show_file(base_tree, previous_path) if base_tree else None
+    facet = _classify_file_facet(previous_path, content)
+    if content is None and facet == "GOVERNANCE":
+        print(
+            f"⚠️  Could not read the pre-rename content of {previous_path}; "
+            "classifying it as EXECUTABLE_SPEC (fail-closed) rather than "
+            "downgrading it to GOVERNANCE.",
+            file=sys.stderr,
+        )
+        return "EXECUTABLE_SPEC"
+    return facet
 
 
 def classify_pr_facets(
@@ -499,21 +567,22 @@ def classify_pr_facets(
         # GOVERNANCE -- and TIER_1_SELF excludes EXECUTABLE_SPEC but NOT
         # GOVERNANCE, leaving the zero-external-reviewer outcome reachable. The
         # blob read follows the existing precedent in
-        # _collect_bitemporal_declarations (the base_path / _git_show_file site).
-        # A missing blob returns None and degrades to today's behaviour.
+        # _collect_bitemporal_declarations (the base_path / _git_show_file site),
+        # and uses the SHARED base tree from _resolve_base_tree_rev.
         #
         # Critical-Engineer: consulted for review-gate rename classification and
         # fail-closed metadata disqualification
-        candidates: list[tuple[str, str | None]] = [(f["path"], None)]
+        file_facets = set()
+        new_facet = _classify_file_facet(f["path"])
+        if new_facet is not None:
+            file_facets.add(new_facet)
+
         previous_path = f.get("previous_path")
         if previous_path and previous_path != f["path"]:
-            candidates.append((previous_path, _git_show_file(_rename_base_rev(), previous_path)))
+            old_facet = _classify_renamed_old_side(previous_path)
+            if old_facet is not None:
+                file_facets.add(old_facet)
 
-        file_facets = {
-            facet
-            for facet in (_classify_file_facet(p, content) for p, content in candidates)
-            if facet is not None
-        }
         if file_facets:
             facets |= file_facets
             non_exempt_files.append(f)

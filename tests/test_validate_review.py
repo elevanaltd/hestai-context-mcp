@@ -147,11 +147,22 @@ class TestForkPRSupport:
     """Validate fork PR support (already fixed in PR #193)."""
 
     def test_get_changed_files_uses_base_ref_in_ci(self, ci_environment, monkeypatch):
-        """CI mode: Uses GITHUB_BASE_REF for fork PRs."""
+        """CI mode: Uses GITHUB_BASE_REF for fork PRs.
+
+        The base ref is now consumed via `git merge-base <base_ref> HEAD`, and
+        the diff runs against that resolved tree. `git diff A...HEAD` is exactly
+        `git diff $(git merge-base A HEAD) HEAD`, so this is equivalent for the
+        diff -- but it names the tree explicitly, so old-side rename
+        classification can read the SAME tree instead of guessing (issue #161
+        round 3). This test previously pinned the literal "origin/main...HEAD";
+        that spelling encoded the defect, the fork-PR intent it guarded does not.
+        """
         calls = []
 
         def mock_run(cmd, *args, **kwargs):
             calls.append(cmd)
+            if cmd[:2] == ["git", "merge-base"]:
+                return MagicMock(stdout="deadbeef\n", stderr="", returncode=0)
             return MagicMock(
                 stdout="10\t5\tsrc/core.py\n", stderr="", returncode=0, check=lambda: None
             )
@@ -160,9 +171,12 @@ class TestForkPRSupport:
 
         validate_review.get_changed_files()
 
-        # Verify git diff command uses base_ref
-        assert len(calls) > 0
-        assert any("origin/main...HEAD" in " ".join(cmd) for cmd in calls)
+        # The base ref is still what drives CI mode (fork PR support) ...
+        assert ["git", "merge-base", "origin/main", "HEAD"] in calls
+        # ... and the diff runs against the tree that resolved from it.
+        assert any("deadbeef..HEAD" in " ".join(cmd) for cmd in calls)
+        # Never the local staged path.
+        assert not any("--cached" in cmd for cmd in calls)
 
     def test_get_changed_files_uses_cached_locally(self, local_environment, monkeypatch):
         """Local mode: Uses --cached for staged files."""
