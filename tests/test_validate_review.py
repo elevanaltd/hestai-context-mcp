@@ -82,7 +82,9 @@ class TestFailClosedBehavior:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
 
         # Mock check_pr_comments to return False (missing review)
@@ -131,7 +133,9 @@ class TestLocalModePermissiveness:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
 
         # Mock check_emergency_bypass to return False
@@ -211,7 +215,9 @@ class TestEmergencyBypassAudit:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
 
         # Mock check_emergency_bypass to return True
@@ -246,7 +252,9 @@ class TestEmergencyBypassAudit:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
         monkeypatch.setattr(validate_review, "check_emergency_bypass", lambda: True)
         monkeypatch.setattr(Path, "cwd", lambda: tmp_path)
@@ -1703,7 +1711,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -1737,7 +1747,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -1762,7 +1774,7 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [
+            lambda *_a, **_k: [
                 {
                     "path": "scripts/validate_review.py",
                     "added": 10,
@@ -1798,7 +1810,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -1827,7 +1841,7 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "README.md", "added": 5, "deleted": 2, "total_changed": 7}],
+            lambda *_a, **_k: [{"path": "README.md", "added": 5, "deleted": 2, "total_changed": 7}],
         )
 
         validate_review.main()
@@ -1856,7 +1870,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         # Simulate 2 of 3 approvals present: TMG approved, CRS approved, CE missing
         monkeypatch.setattr(
@@ -1894,7 +1910,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         # All 3 roles missing
         monkeypatch.setattr(
@@ -1926,7 +1944,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -1955,7 +1975,9 @@ class TestStructuredJsonOutput:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2142,7 +2164,9 @@ class TestStructuredMissingRoles:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         # Mock returns structured data: CE is missing, CRS and TMG approved
         monkeypatch.setattr(
@@ -2187,7 +2211,9 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2221,7 +2247,9 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2253,7 +2281,9 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2286,7 +2316,7 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "README.md", "added": 5, "deleted": 2, "total_changed": 7}],
+            lambda *_a, **_k: [{"path": "README.md", "added": 5, "deleted": 2, "total_changed": 7}],
         )
         original_run = subprocess.run
 
@@ -2312,7 +2342,9 @@ class TestShaTrackingInJsonSummary:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2484,7 +2516,9 @@ class TestCommentEventFastPath:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2514,7 +2548,9 @@ class TestCommentEventFastPath:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 50, "deleted": 20, "total_changed": 70}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2562,7 +2598,7 @@ class TestCommentEventFastPath:
         # get_changed_files MUST be called when SHA mismatches (fallback path)
         get_changed_files_called = False
 
-        def mock_get_changed_files():
+        def mock_get_changed_files(*_a, **_k):
             nonlocal get_changed_files_called
             get_changed_files_called = True
             return [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}]
@@ -2613,7 +2649,9 @@ class TestCommentEventFastPath:
         monkeypatch.setattr(
             validate_review,
             "get_changed_files",
-            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+            lambda *_a, **_k: [
+                {"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}
+            ],
         )
         monkeypatch.setattr(
             validate_review,
@@ -2665,7 +2703,7 @@ class TestCommentEventFastPath:
         # get_changed_files MUST be called when base ref mismatches
         get_changed_files_called = False
 
-        def mock_get_changed_files():
+        def mock_get_changed_files(*_a, **_k):
             nonlocal get_changed_files_called
             get_changed_files_called = True
             return [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}]
@@ -2766,7 +2804,7 @@ class TestCommentEventFastPath:
 
         get_changed_files_called = False
 
-        def mock_get_changed_files():
+        def mock_get_changed_files(*_a, **_k):
             nonlocal get_changed_files_called
             get_changed_files_called = True
             return [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}]
@@ -2815,7 +2853,7 @@ class TestCommentEventFastPath:
 
         get_changed_files_called = False
 
-        def mock_get_changed_files():
+        def mock_get_changed_files(*_a, **_k):
             nonlocal get_changed_files_called
             get_changed_files_called = True
             return [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}]

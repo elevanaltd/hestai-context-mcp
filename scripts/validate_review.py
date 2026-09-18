@@ -50,7 +50,7 @@ _BOT_LOGIN_SET: frozenset[str] = frozenset(
 )
 
 
-def get_changed_files() -> list[dict[str, Any]]:
+def get_changed_files(base_tree: str | None = None) -> list[dict[str, Any]]:
     """Get list of changed files with line counts and file status.
 
     Each returned dict includes:
@@ -63,15 +63,24 @@ def get_changed_files() -> list[dict[str, Any]]:
 
     For renamed files, ``previous_path`` is populated so that callers can
     fetch the BASE blob using the old path (issue #417).
+
+    Args:
+        base_tree: The already-resolved CI base tree revision. :func:`main`
+            resolves it ONCE and passes the SAME VALUE here and to
+            :func:`classify_pr_facets`, so collection and classification cannot
+            disagree about which tree the diff was taken against (issue #161).
+            When None (direct callers and tests) it is resolved here instead;
+            that is a second resolution, so the production path must pass it.
+            Ignored outside CI, where the diff is ``--cached`` against HEAD.
     """
     try:
         # In CI, compare against base branch; locally use cached
         if "CI" in os.environ:
-            # Resolve the base tree ONCE, here, and let classification reuse the
-            # same answer (issue #161 round 3). `{base_ref}...HEAD` is exactly
-            # `merge-base(base_ref, HEAD)..HEAD`, so this is equivalent for the
-            # diff while making the tree explicit and shareable.
-            base_tree = _resolve_base_tree_rev()
+            # `{base_ref}...HEAD` is exactly `merge-base(base_ref, HEAD)..HEAD`,
+            # so diffing the resolved tree is equivalent -- and it makes the tree
+            # an explicit VALUE that classification can be handed.
+            if base_tree is None:
+                base_tree = _resolve_base_tree_rev()
             if base_tree is None:
                 print(
                     "❌ Cannot resolve the merge base in CI; refusing to classify "
@@ -326,6 +335,15 @@ def _sniff_octave_type(path: str, content: str | None = None) -> str:
     # possibility of drift rather than patching one side of it.
     # newline=None gives StringIO the same universal-newline translation that
     # open() applies by default, so \r and \r\n behave identically too.
+    #
+    # PARITY IS LINE-SPLITTING ONLY, NOT DECODING. The filesystem read here is
+    # strict UTF-8, while blob content arrives from _git_show_file decoded with
+    # errors="replace". Malformed UTF-8 can therefore still make the two inputs
+    # disagree. That residual gap cannot reopen the downgrade path: a mangled
+    # byte can only destroy a TYPE:: match, never fabricate one, so it can only
+    # make _classify_renamed_old_side fall to its conservative EXECUTABLE_SPEC
+    # branch. Narrowed deliberately rather than claiming a parity that does not
+    # hold (see the decode-policy note on issue #161).
     try:
         with open(path, encoding="utf-8") if content is None else io.StringIO(content, None) as f:
             for _ in range(50):
@@ -487,8 +505,13 @@ def _resolve_base_tree_rev() -> str | None:
     return result.stdout.strip() or None
 
 
-def _classify_renamed_old_side(previous_path: str) -> str | None:
-    """Classify the OLD side of a rename from the shared base tree, FAIL CLOSED.
+def _classify_renamed_old_side(previous_path: str, base_tree: str | None) -> str | None:
+    """Classify the OLD side of a rename from the given base tree, FAIL CLOSED.
+
+    ``base_tree`` is passed IN, never resolved here: resolving it again would
+    recreate the defect this parameter exists to prevent (issue #161 cycle 3).
+    A None value means the caller could not resolve it, which is itself a
+    fail-closed trigger below.
 
     Precise when the blob resolves; conservative only when it does not. These are
     different cases and must not be collapsed: the blanket rule "treat every
@@ -505,7 +528,6 @@ def _classify_renamed_old_side(previous_path: str) -> str | None:
     precisely the ambiguous case, and only that case escalates. Every other
     branch of the classifier is path-only and is left untouched.
     """
-    base_tree = _resolve_base_tree_rev()
     content = _git_show_file(base_tree, previous_path) if base_tree else None
     facet = _classify_file_facet(previous_path, content)
     if content is None and facet == "GOVERNANCE":
@@ -522,6 +544,7 @@ def _classify_renamed_old_side(previous_path: str) -> str | None:
 def classify_pr_facets(
     files: list[dict[str, Any]],
     declared_roles: set[str] | None = None,
+    base_tree: str | None = None,
 ) -> tuple[set[str], set[str], str, str]:
     """Classify PR files into content facets and compute required reviewers.
 
@@ -543,6 +566,11 @@ def classify_pr_facets(
         declared_roles: Optional set of escalation roles unioned in BEFORE the
             early returns. Must already be whitelist-filtered. Defaults to None
             (no declaration -> unchanged diff-shape behaviour).
+        base_tree: The already-resolved revision the PR diff was taken against,
+            used to read the OLD side of a rename. Pass the SAME value given to
+            :func:`get_changed_files`. Defaults to None, which resolves it here
+            (only if a rename needs it) -- acceptable for direct callers, but
+            the production path threads one resolved value instead.
 
     Returns:
         Tuple of (facets, required_roles, tier_label, reason):
@@ -552,6 +580,18 @@ def classify_pr_facets(
         - reason: Human-readable explanation
     """
     declared: set[str] = set(declared_roles) if declared_roles else set()
+
+    # base_tree is normally passed IN by main(), which resolves it ONCE per
+    # validation run and hands the SAME VALUE to get_changed_files and to both
+    # calls of this function. Direct callers (and tests) may omit it, in which
+    # case it is resolved here -- but only when a rename actually needs it, and
+    # at most once per call. The production path must pass it: resolving
+    # independently is precisely how collection and classification came to
+    # disagree about which tree the diff was taken against (issue #161 cycle 3).
+    if base_tree is None and any(
+        f.get("previous_path") and f.get("previous_path") != f.get("path") for f in files
+    ):
+        base_tree = _resolve_base_tree_rev()
 
     facets: set[str] = set()
     non_exempt_files = []
@@ -576,7 +616,8 @@ def classify_pr_facets(
         # GOVERNANCE, leaving the zero-external-reviewer outcome reachable. The
         # blob read follows the existing precedent in
         # _collect_bitemporal_declarations (the base_path / _git_show_file site),
-        # and uses the SHARED base tree from _resolve_base_tree_rev.
+        # and reads it from `base_tree` -- the revision resolved ONCE by main()
+        # and threaded through both this call and get_changed_files.
         #
         # Critical-Engineer: consulted for review-gate rename classification and
         # fail-closed metadata disqualification
@@ -587,7 +628,7 @@ def classify_pr_facets(
 
         previous_path = f.get("previous_path")
         if previous_path and previous_path != f["path"]:
-            old_facet = _classify_renamed_old_side(previous_path)
+            old_facet = _classify_renamed_old_side(previous_path, base_tree)
             if old_facet is not None:
                 file_facets.add(old_facet)
 
@@ -1509,8 +1550,16 @@ def main() -> int:
         if isinstance(cached_prov, dict):
             provenance = {k: list(v) for k, v in cached_prov.items()}
     else:
+        # Resolve the base tree ONCE for this validation run, then thread that
+        # exact revision through collection AND both classification calls below
+        # (issue #161 cycle 3). Resolving per call site let a ref movement or a
+        # concurrent fetch give collection tree A and classification tree B,
+        # which downgraded a renamed executable spec to GOVERNANCE ->
+        # TIER_1_SELF -> zero external reviewers. One resolution, passed down.
+        base_tree = _resolve_base_tree_rev()
+
         # Get changed files
-        files = get_changed_files()
+        files = get_changed_files(base_tree)
         if not files:
             print("✓ No files changed")
             return 0
@@ -1539,13 +1588,13 @@ def main() -> int:
         # Classify PR content into facets and compute required reviewers,
         # unioning the (whitelist-filtered) declared roles BEFORE early returns.
         _facets, required_roles, tier, reason = classify_pr_facets(
-            files, declared_roles=declared_roles
+            files, declared_roles=declared_roles, base_tree=base_tree
         )
 
         # Compute the diff/facet-only role floor (no declaration) so provenance
         # can attribute DIFF independently of any declared source. A role that is
         # BOTH diff-required AND declared must show ALL its sources.
-        _df, diff_roles, _dt, _dr = classify_pr_facets(files)
+        _df, diff_roles, _dt, _dr = classify_pr_facets(files, base_tree=base_tree)
 
         # Build the provenance map: every required role gets a source list. A
         # role's sources are the UNION of its declaration origins (HEAD/BASE/
