@@ -3987,3 +3987,112 @@ class TestRenameOldSideFailsClosedWhenUnreadable:
         ), f"silently downgraded an unreadable old side to GOVERNANCE: {reason}"
         assert required_roles, f"ZERO required reviewers on the error path: {reason}"
         assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+
+# Characters str.splitlines() treats as line boundaries but readline() does not.
+# The next one someone thinks of should already be covered by this list.
+_SPLITLINES_ONLY_SEPARATORS = [
+    "\x0b",  # line tabulation
+    "\x0c",  # form feed
+    "\x1c",  # file separator
+    "\x1d",  # group separator
+    "\x1e",  # record separator
+    "\x85",  # next line (NEL)
+    " ",  # line separator
+    " ",  # paragraph separator
+]
+
+
+@pytest.mark.security
+class TestSniffSemanticsAgreeAcrossInputs:
+    """cubic P2: one rule, two implementations, drifting.
+
+    _sniff_octave_type read a file with readline() (splits on \\n) but a blob
+    with str.splitlines() (ALSO splits on \\x0b \\x0c \\x1c \\x1d \\x1e \\x85
+    \\u2028 \\u2029). More than 50 such separators before TYPE:: truncated the
+    blob path while the file path still found it.
+
+    Since the OLD side of a rename is now ALWAYS read as a blob, an
+    out-of-library AGENT_DEFINITION or SKILL shaped this way classified
+    GOVERNANCE, fell into TIER_1_SELF and reached zero external reviewers --
+    the #161 outcome, reachable through the #161 fix. The old blob is
+    attacker-authorable: whoever wrote the file chooses its bytes.
+
+    This is the same shape as the merge-base defect: two code paths
+    independently deciding what should be a single rule.
+    """
+
+    @staticmethod
+    def _write(tmp_path, content: str) -> str:
+        rel = "governance/dynamic.oct.md"
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8", newline="\n")
+        return rel
+
+    @pytest.mark.parametrize("sep", _SPLITLINES_ONLY_SEPARATORS)
+    def test_sniff_agrees_between_file_and_blob(self, tmp_path, sep, monkeypatch):
+        """PROPERTY: identical bytes must sniff identically from either input."""
+        content = ("A" + sep) * 60 + "TYPE::AGENT_DEFINITION\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        from_file = validate_review._sniff_octave_type(rel)
+        from_blob = validate_review._sniff_octave_type(rel, content=content)
+
+        assert from_blob == from_file, (
+            f"separator {sep!r}: file sniff gave {from_file!r} but blob sniff "
+            f"gave {from_blob!r} for identical content"
+        )
+        assert from_file == "AGENT_DEFINITION"
+
+    @pytest.mark.parametrize("sep", _SPLITLINES_ONLY_SEPARATORS)
+    def test_facet_agrees_between_file_and_blob(self, tmp_path, sep, monkeypatch):
+        """END TO END: the facet is where the harm lands, so assert the facet."""
+        content = ("A" + sep) * 60 + "TYPE::AGENT_DEFINITION\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        from_file = validate_review._classify_file_facet(rel)
+        from_blob = validate_review._classify_file_facet(rel, content=content)
+
+        assert from_blob == from_file, (
+            f"separator {sep!r}: same bytes classified {from_file} from the file "
+            f"but {from_blob} from the blob"
+        )
+        assert from_file == "EXECUTABLE_SPEC", (
+            "an out-of-library AGENT_DEFINITION must not be downgraded; "
+            "GOVERNANCE falls into TIER_1_SELF and reaches zero external reviewers"
+        )
+
+    def test_skill_type_agrees_too(self, tmp_path, monkeypatch):
+        """TYPE::SKILL is the other executable-spec type."""
+        content = ("A\x0c") * 60 + "TYPE::SKILL\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        assert (
+            validate_review._classify_file_facet(rel, content=content)
+            == validate_review._classify_file_facet(rel)
+            == "EXECUTABLE_SPEC"
+        )
+
+    def test_blank_line_before_type_does_not_truncate_either_input(self, tmp_path, monkeypatch):
+        """REGRESSION: a blank line is '\\n' (truthy) to readline and must not be
+        read as end-of-input by either path."""
+        content = "===DOC===\nMETA:\n\n\n  TYPE::AGENT_DEFINITION\n===END===\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        assert validate_review._sniff_octave_type(rel) == "AGENT_DEFINITION"
+        assert validate_review._sniff_octave_type(rel, content=content) == "AGENT_DEFINITION"
+
+    def test_fifty_line_scan_limit_is_the_same_for_both_inputs(self, tmp_path, monkeypatch):
+        """The cap must be counted in the same units on both paths: TYPE:: beyond
+        the 50th real line is found by neither."""
+        content = "filler\n" * 60 + "  TYPE::AGENT_DEFINITION\n"
+        rel = self._write(tmp_path, content)
+        monkeypatch.chdir(tmp_path)
+
+        assert validate_review._sniff_octave_type(rel) == ""
+        assert validate_review._sniff_octave_type(rel, content=content) == ""
