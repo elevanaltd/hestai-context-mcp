@@ -3359,14 +3359,24 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
 
 
 def _git_fixture_env():
-    """Identity via env vars: works where CI has no git identity (exit 128) and
-    where user.useConfigOnly is set."""
+    """Hermetic git environment for fixture repos.
+
+    Identity via env vars: works where CI has no git identity (exit 128) and
+    where user.useConfigOnly is set.
+
+    GIT_CONFIG_GLOBAL/SYSTEM are neutralised because a developer's global
+    core.hooksPath can refuse `git switch` in a scratch repo ("Cannot switch
+    branches in main repo"), which would break the advancing-base fixtures
+    non-deterministically depending on whose machine runs them.
+    """
     return {
         **os.environ,
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@t.t",
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t.t",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
     }
 
 
@@ -3759,3 +3769,207 @@ class TestDisqualificationSurfacedOnSelfReviewPath:
         assert (
             "spoofing" in message.lower()
         ), f"metadata self-review exit lost the disqualification notice. Got: {message}"
+
+
+def _git_advancing_base_repro(
+    tmp_path,
+    old_path: str,
+    new_path: str,
+    old_content: str,
+    base_action: str = "modify",
+    advanced_content: str = "===RULE===\nMETA:\n  TYPE::RULE\n===END===\n",
+):
+    """Repo with a REAL NAMED base branch that ADVANCES after divergence.
+
+    A SHA-pinned fixture cannot express this defect: pinning GITHUB_BASE_REF to
+    the pre-rename commit makes the base tip equal the merge base by
+    construction. Only a named branch that has moved on since divergence
+    distinguishes `base_tip:<old_path>` from `merge_base:<old_path>`.
+
+    Layout::
+
+        M (basebranch, old_path = old_content)   <- merge base
+        |\\
+        | R (testwork, HEAD: old_path renamed to new_path + edited)
+        A (basebranch tip: old_path modified or deleted)
+
+    Returns (repo, base_branch_name).
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = _git_fixture_env()
+
+    def git(*args):
+        sp.run(["git", *args], cwd=repo, check=True, env=env)
+
+    git("init", "-q", "-b", "basebranch")
+    git("config", "user.name", "t")
+    git("config", "user.email", "t@t.t")
+
+    src = repo / old_path
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(old_content)
+    git("add", "-A")
+    git("commit", "-qm", "merge base")
+
+    # Feature branch: the rename plus a content edit in the same commit.
+    git("switch", "-qc", "testwork")
+    (repo / new_path).parent.mkdir(parents=True, exist_ok=True)
+    git("mv", old_path, new_path)
+    with (repo / new_path).open("a") as fh:
+        fh.write("appended by the same commit\n")
+    git("add", "-A")
+    git("commit", "-qm", "rename")
+
+    # Base branch advances AFTER divergence, touching the very path the
+    # feature branch renamed away.
+    git("switch", "-q", "basebranch")
+    if base_action == "delete":
+        git("rm", "-q", old_path)
+    else:
+        src.write_text(advanced_content)
+        git("add", "-A")
+    git("commit", "-qm", "base advances")
+
+    git("switch", "-q", "testwork")
+    return repo, "basebranch"
+
+
+@pytest.mark.security
+class TestRenameClassifiedFromMergeBaseNotBaseTip:
+    """Issue #161 (round 3): three-dot diff semantics.
+
+    get_changed_files diffs ``{base_ref}...HEAD``. Three dots means the
+    left-hand tree is ``merge-base(base_ref, HEAD)`` -- NOT the base_ref tip.
+    Classifying the old side against the base TIP reads the wrong tree on any
+    PR whose base has advanced since divergence, which is the normal case, and
+    the zero-external-reviewer outcome becomes reachable again.
+    """
+
+    def test_advanced_base_still_classifies_old_side_from_merge_base(self, tmp_path, monkeypatch):
+        """Base branch changed the old path to TYPE::RULE after divergence.
+
+        Merge base still holds TYPE::AGENT_DEFINITION, so the rename must
+        classify EXECUTABLE_SPEC. Reading the base tip yields GOVERNANCE and
+        drops to zero external reviewers.
+        """
+        repo, base_branch = _git_advancing_base_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            _OCT_AGENT_DEFINITION,
+            base_action="modify",
+        )
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_branch)
+
+        files = _changed_files_in(repo)
+
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+        assert files[0]["previous_path"] == "governance/dynamic.oct.md"
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert "EXECUTABLE_SPEC" in facets, (
+            "old side was classified against the base TIP, not the merge base "
+            f"the diff actually used: {reason}"
+        )
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_base_deleted_old_path_still_classifies_from_merge_base(self, tmp_path, monkeypatch):
+        """Base branch DELETED the old path after divergence.
+
+        The merge base still holds the blob, so this must classify precisely
+        (not via the conservative error path).
+        """
+        repo, base_branch = _git_advancing_base_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            _OCT_AGENT_DEFINITION,
+            base_action="delete",
+        )
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_branch)
+
+        files = _changed_files_in(repo)
+        assert files[0]["status"] == "R", f"fixture did not produce a rename: {files}"
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert "EXECUTABLE_SPEC" in facets, reason
+        assert required_roles, f"ZERO required reviewers: {tier_label} / {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
+
+    def test_advanced_base_does_not_over_escalate_an_ordinary_rule(self, tmp_path, monkeypatch):
+        """REGRESSION: reading the merge base must stay PRECISE for a genuine
+        TYPE::RULE, even when the base tip has since made it an AGENT_DEFINITION.
+
+        Guards the inverse error: escalating everything unreadable-or-changed.
+        """
+        repo, base_branch = _git_advancing_base_repro(
+            tmp_path,
+            "governance/rule.oct.md",
+            "notes.md",
+            "===RULE===\nMETA:\n  TYPE::RULE\n===END===\n",
+            base_action="modify",
+            advanced_content=_OCT_AGENT_DEFINITION,
+        )
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", base_branch)
+
+        files = _changed_files_in(repo)
+        facets, _, _, reason = _classify_in(repo, files)
+
+        assert facets == {"GOVERNANCE"}, f"over-escalated an ordinary rule rename: {reason}"
+
+
+@pytest.mark.security
+class TestRenameOldSideFailsClosedWhenUnreadable:
+    """Once rename metadata has identified an old path, an inability to resolve
+    the base tree or read the blob must NOT silently downgrade an executable
+    specification to governance/self-review.
+
+    Precise when resolvable; conservative only on the ERROR path. This does not
+    contradict the rejected blanket fix, which concerned the resolvable case.
+    """
+
+    def test_unresolvable_base_ref_does_not_downgrade(self, tmp_path, monkeypatch):
+        """An unresolvable base ref must fail CLOSED, not fall back to GOVERNANCE.
+
+        NOTE: the file dict here is constructed rather than produced by
+        get_changed_files, because an unresolvable base ref makes collection
+        itself fail closed and return nothing to classify. The rename SHAPE is
+        proven against real git elsewhere in this file; what is under test here
+        is the classifier's behaviour when the blob cannot be read.
+        """
+        repo, _ = _git_advancing_base_repro(
+            tmp_path,
+            "governance/dynamic.oct.md",
+            "notes.md",
+            _OCT_AGENT_DEFINITION,
+        )
+        monkeypatch.setenv("CI", "true")
+        monkeypatch.setenv("GITHUB_BASE_REF", "no-such-branch-exists")
+
+        files = [
+            {
+                "path": "notes.md",
+                "added": 1,
+                "deleted": 0,
+                "total_changed": 1,
+                "status": "R",
+                "previous_path": "governance/dynamic.oct.md",
+            }
+        ]
+
+        facets, required_roles, tier_label, reason = _classify_in(repo, files)
+
+        assert (
+            "GOVERNANCE" not in facets
+        ), f"silently downgraded an unreadable old side to GOVERNANCE: {reason}"
+        assert required_roles, f"ZERO required reviewers on the error path: {reason}"
+        assert tier_label not in ("TIER_0_EXEMPT", "TIER_1_SELF"), reason
