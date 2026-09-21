@@ -1,8 +1,13 @@
 """Git Orchestrator (Linker) for governance intake.
 
 Accepts a ValidationResult + raw OCTAVE content, then:
+  0. Fetches origin fresh and checks whether the TOKEN is already in flight
+     (an unmerged origin/governance/* branch for its slug, any date -- issue
+     #173 slice 1 / operator ruling 2026-09-21). If so, refuses: no worktree,
+     no branch, no push, no PR -- see ``check_in_flight_token``.
   1. Creates a DEDICATED git worktree on a fresh ``governance/{date}-{token-slug}``
-     branch based off ``origin/main`` (after a ``git fetch origin``)
+     branch based off ``origin/main`` (after a second, redundant ``git fetch
+     origin`` internal to ``_create_worktree`` -- left as-is; cheap/idempotent)
   2. Writes OCTAVE content to the computed target_path INSIDE that worktree
   3. Commits with: chore(governance): add {token} [{card_type}]
   4. Updates MANIFEST (write_manifest)
@@ -28,8 +33,10 @@ that previously copied this logic from submit_review). It is re-exported here as
 (patchable in tests).
 """
 
+import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -195,6 +202,199 @@ def _push_branch(working_dir: Path, branch_name: str) -> str | None:
     if code != 0:
         return f"Failed to push branch '{branch_name}' to origin: {stderr}"
     return None
+
+
+# ---------------------------------------------------------------------------
+# In-flight TOKEN detection (issue #173 slice 1; operator ruling 2026-09-21,
+# HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921)
+#
+# "In flight" = a governance branch for the TOKEN's slug that exists on
+# origin, ANY date prefix, and is NOT merged into origin/main -- OR an open PR
+# for it. A remote branch is the authoritative, git-only signal (no GitHub API
+# needed): an open PR's head branch always lives on origin (gh requires a
+# pushed branch to open a PR at all), so the unmerged-ref test alone decides
+# in-flight status. A MERGED-but-undeleted origin branch is explicitly
+# excluded -- it is no longer in flight even though the ref still exists
+# (origin keeps merged governance branches; see issue #173 diagnosis point 4).
+#
+# Fetch-before-check (not after): the OLD flow ran Check 6 (local-only
+# lookup_token_deterministic) before ``_create_worktree``'s fetch, so a
+# same-day or later-day in-flight branch was invisible until AFTER validation
+# already passed. ``check_in_flight_token`` fetches fresh remote state itself
+# and is called from ``run_linker`` BEFORE any worktree/branch/push, closing
+# that ordering gap.
+# ---------------------------------------------------------------------------
+
+_GOVERNANCE_REMOTE_REF_PREFIX = "refs/remotes/origin/governance/"
+
+
+def _fetch_origin(working_dir: Path) -> str | None:
+    """Fetch fresh remote state from origin, pruning stale remote-tracking refs.
+
+    MUST run before any remote-branch-based in-flight check: detection must
+    see refs that exist on origin RIGHT NOW, not whatever the local
+    remote-tracking namespace last held from a previous fetch (or never held,
+    for a branch pushed by a different session/clone).
+
+    Returns an error string on failure, None on success.
+    """
+    code, _, stderr = _run_git(["fetch", "origin", "--prune"], working_dir)
+    if code != 0:
+        return f"git fetch origin failed: {stderr}"
+    return None
+
+
+def _list_remote_governance_branches_for_slug(working_dir: Path, slug: str) -> list[str]:
+    """List origin governance branches matching ``slug``, ANY date prefix.
+
+    Returns SHORT branch names (``governance/<8-digit-date>-<slug>``), not the
+    ``origin/`` remote-tracking prefix. Requires a prior ``_fetch_origin`` call
+    to see current remote state -- this function does not fetch.
+    """
+    code, out, _ = _run_git(
+        ["for-each-ref", "--format=%(refname:short)", _GOVERNANCE_REMOTE_REF_PREFIX],
+        working_dir,
+    )
+    if code != 0 or not out:
+        return []
+
+    # Full-name anchored: governance/<8 digits>-<exact slug>, nothing else --
+    # a longer slug that merely ENDS with this slug must not match.
+    pattern = re.compile(rf"^origin/governance/\d{{8}}-{re.escape(slug)}$")
+    matches = [
+        line.strip().removeprefix("origin/")
+        for line in out.splitlines()
+        if pattern.match(line.strip())
+    ]
+    return sorted(matches)
+
+
+def _is_merged_into_origin_main(working_dir: Path, branch: str) -> bool:
+    """True iff ``origin/<branch>`` is an ancestor of ``origin/main`` (merged).
+
+    Fail-safe: any git error (e.g. an unexpected missing ref) is treated as
+    NOT merged, so an unverifiable branch is reported as in-flight rather than
+    silently permitting a second PR for a token we could not confirm was
+    closed out.
+    """
+    code, _, _ = _run_git(
+        ["merge-base", "--is-ancestor", f"origin/{branch}", "origin/main"],
+        working_dir,
+    )
+    return code == 0
+
+
+def find_in_flight_branches(working_dir: Path, token: str) -> tuple[list[str], str | None]:
+    """Fetch fresh remote state, then find UNMERGED origin governance branches
+    for ``token``'s slug (any date prefix -- covers both the same-day push
+    collision and the later-day second-PR case, issue #173).
+
+    Returns ``(branch_names, error)``. ``branch_names`` is sorted and empty
+    when ``error`` is set (a fetch failure) or when nothing is in flight.
+    """
+    fetch_err = _fetch_origin(working_dir)
+    if fetch_err:
+        return [], fetch_err
+
+    slug = _token_to_slug(token)
+    candidates = _list_remote_governance_branches_for_slug(working_dir, slug)
+    in_flight = [b for b in candidates if not _is_merged_into_origin_main(working_dir, b)]
+    return sorted(in_flight), None
+
+
+def _resolve_open_pr_urls(
+    working_dir: Path, branches: list[str], gh_token: str | None
+) -> dict[str, str]:
+    """Best-effort: resolve open-PR URLs for ``branches`` via ONE ``gh`` call.
+
+    A pushed branch does not, by itself, carry a discoverable PR URL in the
+    local git ref namespace (GitHub does not expose PR pseudo-refs without
+    opt-in fetch config); resolving the URL genuinely requires the GitHub API.
+    Kept to a SINGLE ``gh pr list`` call regardless of how many branches are
+    in flight (network-cost discipline -- issue #173 asks this be minimal).
+    Never raises: gh missing/unauthenticated/timeout all degrade to an empty
+    mapping so in-flight detection (the git-only, authoritative signal) is
+    never blocked by a GitHub API hiccup.
+    """
+    if not branches:
+        return {}
+
+    env = dict(os.environ)
+    if gh_token:
+        env["GH_TOKEN"] = gh_token
+
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "headRefName,url",
+                "--limit",
+                "100",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(working_dir),
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return {}
+
+    if result.returncode != 0:
+        return {}
+
+    try:
+        records = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+    if not isinstance(records, list):
+        return {}
+
+    branch_set = set(branches)
+    urls: dict[str, str] = {}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        head = rec.get("headRefName")
+        url = rec.get("url")
+        if head in branch_set and isinstance(url, str):
+            urls[head] = url
+    return urls
+
+
+def check_in_flight_token(
+    working_dir: Path, token: str, gh_token: str | None = None
+) -> dict[str, Any]:
+    """Structured in-flight check for ``token`` (issue #173 slice 1).
+
+    Fetches origin fresh, then reports whether ``token`` is already in
+    flight: an unmerged origin governance branch for its slug, same-day or
+    later-day. Detection itself is git-only and authoritative; PR URLs are
+    best-effort via a single ``gh`` lookup, resolved only when at least one
+    in-flight branch was found.
+
+    Returns a dict with keys: ``in_flight`` (bool), ``branches`` (list[str]),
+    ``pr_urls`` (dict[str, str], branch -> PR URL where resolvable), and
+    ``error`` (str | None -- set only on a fetch failure, in which case
+    ``in_flight`` is False and the caller cannot trust that as a real answer).
+    """
+    branches, fetch_error = find_in_flight_branches(working_dir, token)
+    if fetch_error:
+        return {"in_flight": False, "branches": [], "pr_urls": {}, "error": fetch_error}
+
+    pr_urls = _resolve_open_pr_urls(working_dir, branches, gh_token) if branches else {}
+    return {
+        "in_flight": bool(branches),
+        "branches": branches,
+        "pr_urls": pr_urls,
+        "error": None,
+    }
 
 
 def _write_file(target_path: Path, content: str) -> str | None:
@@ -394,16 +594,25 @@ def run_linker(
 
     Returns:
         Dict with keys: token, card_type, target_path, branch, pr_url, error,
-        dry_run, staged_uncommitted, and ``adr_target_path`` (the
-        ``docs/adr/<token>.md`` path when ``adr_prose`` is supplied, else None).
+        dry_run, staged_uncommitted, ``adr_target_path`` (the
+        ``docs/adr/<token>.md`` path when ``adr_prose`` is supplied, else None),
+        and the issue #173 slice-1 in-flight signal: ``in_flight`` (bool),
+        ``in_flight_branches`` (list[str], unmerged origin governance branches
+        found for this token's slug), and ``in_flight_pr_urls`` (dict[str, str],
+        branch -> open PR URL where resolvable).
 
         ``branch`` is the would-be branch name on ``dry_run``; on a live run it
         is non-None ONLY when the branch actually reached ``origin`` (a push
         succeeded), and None when a pre-push failure rolled the local branch back
-        (no misleading name for a branch that was never persisted — issue #108).
+        (no misleading name for a branch that was never persisted — issue #108)
+        OR when the token was found in flight (no branch was ever created).
         ``staged_uncommitted`` is always False on the live path: every git
         mutation happens inside a throwaway worktree that is always removed, so
         nothing is ever left staged in the operator's working tree.
+
+        dry_run performs NEITHER the fetch NOR the in-flight check (see the
+        ``if dry_run:`` branch below for the full rationale): ``in_flight`` is
+        always False and the branch/url lists always empty on that path.
     """
     token = validation.token or ""
     card_type = validation.card_type or ""
@@ -420,6 +629,13 @@ def run_linker(
     adr_target_path_str = str(adr_target_path.relative_to(working_dir)) if adr_target_path else None
 
     if dry_run:
+        # dry_run performs NEITHER the fetch NOR the in-flight check (issue
+        # #173 slice 1 design decision): both are network operations that
+        # mutate local remote-tracking refs, which is a side effect dry_run
+        # must stay free of (module docstring: "dry_run=True: skips all
+        # git/file operations"). in_flight/in_flight_branches/in_flight_pr_urls
+        # are present with inert defaults for I4 shape stability across every
+        # return path, but on dry_run they were never actually checked.
         return {
             "token": token,
             "card_type": card_type,
@@ -427,6 +643,9 @@ def run_linker(
             "adr_target_path": adr_target_path_str,
             "branch": branch_name,
             "pr_url": None,
+            "in_flight": False,
+            "in_flight_branches": [],
+            "in_flight_pr_urls": {},
             "error": None,
             "staged_uncommitted": False,
             "dry_run": True,
@@ -445,6 +664,9 @@ def run_linker(
             "adr_target_path": adr_target_path_str,
             "branch": None,
             "pr_url": None,
+            "in_flight": False,
+            "in_flight_branches": [],
+            "in_flight_pr_urls": {},
             "error": "target_path is None -- cannot write file",
             "staged_uncommitted": False,
             "dry_run": False,
@@ -469,6 +691,9 @@ def run_linker(
                 "adr_target_path": adr_target_path_str,
                 "branch": None,
                 "pr_url": None,
+                "in_flight": False,
+                "in_flight_branches": [],
+                "in_flight_pr_urls": {},
                 "error": (
                     f"target_path {guarded} is outside working_dir {working_dir} "
                     "-- path traversal rejected"
@@ -476,6 +701,53 @@ def run_linker(
                 "staged_uncommitted": False,
                 "dry_run": False,
             }
+
+    # 0. In-flight TOKEN check (issue #173 slice 1) -- FETCH FRESH REMOTE STATE
+    #    THEN check, BEFORE any worktree/branch/push/PR. An unmerged origin
+    #    governance branch for this token's slug (same-day collision OR
+    #    later-day second-PR case) means the token is already in flight:
+    #    submit_governance must refuse to open a second branch/PR rather than
+    #    racing `_create_worktree`'s own (later, redundant) fetch.
+    gh_token = _resolve_github_token()
+    in_flight_status = check_in_flight_token(working_dir, token, gh_token)
+    if in_flight_status["error"]:
+        # Could not establish fresh remote state at all (e.g. network down):
+        # fail closed -- nothing created, nothing staged.
+        return {
+            "token": token,
+            "card_type": card_type,
+            "target_path": target_path_str,
+            "adr_target_path": adr_target_path_str,
+            "branch": None,
+            "pr_url": None,
+            "in_flight": False,
+            "in_flight_branches": [],
+            "in_flight_pr_urls": {},
+            "error": in_flight_status["error"],
+            "staged_uncommitted": False,
+            "dry_run": False,
+        }
+    if in_flight_status["in_flight"]:
+        in_flight_branches = in_flight_status["branches"]
+        in_flight_pr_urls = in_flight_status["pr_urls"]
+        return {
+            "token": token,
+            "card_type": card_type,
+            "target_path": target_path_str,
+            "adr_target_path": adr_target_path_str,
+            "branch": None,
+            "pr_url": None,
+            "in_flight": True,
+            "in_flight_branches": in_flight_branches,
+            "in_flight_pr_urls": in_flight_pr_urls,
+            "error": (
+                f"TOKEN '{token}' is already in flight on origin "
+                f"(unmerged governance branch(es): {', '.join(in_flight_branches)}); "
+                "no new branch or PR was opened."
+            ),
+            "staged_uncommitted": False,
+            "dry_run": False,
+        }
 
     # 1. Create the dedicated worktree on a fresh branch off origin/main. The
     #    operator's own working tree (whatever branch it is on) is NEVER touched.
@@ -489,6 +761,9 @@ def run_linker(
             "adr_target_path": adr_target_path_str,
             "branch": None,
             "pr_url": None,
+            "in_flight": False,
+            "in_flight_branches": [],
+            "in_flight_pr_urls": {},
             "error": err,
             "staged_uncommitted": False,
             "dry_run": False,
@@ -551,9 +826,9 @@ def run_linker(
             else:
                 pushed_ok = True
 
-        # 6. Open PR.
+        # 6. Open PR. Reuses the ``gh_token`` already resolved for the
+        #    in-flight PR-URL lookup above (single resolution, no re-fetch).
         if not errors:
-            gh_token = _resolve_github_token()
             pr_url, pr_err = _open_pr(worktree_path, branch_name, token, card_type, gh_token)
             if pr_err:
                 errors.append(pr_err)
@@ -583,6 +858,11 @@ def run_linker(
         "adr_target_path": adr_target_path_str,
         "branch": persisted_branch,
         "pr_url": pr_url,
+        # Reached the worktree/push/PR stage, so the in-flight check above
+        # already confirmed no unmerged branch existed for this token.
+        "in_flight": False,
+        "in_flight_branches": [],
+        "in_flight_pr_urls": {},
         # Hermetic model: the worktree is always removed and nothing is ever
         # staged in the operator's working tree, so this is always False.
         # Retained for I4 shape stability.

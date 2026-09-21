@@ -83,6 +83,12 @@ def _empty_result(
         "adr_target_path": adr_target_path,
         "branch": None,
         "pr_url": None,
+        # issue #173 slice 1: these early-abort paths never reach run_linker
+        # (Gate A/B rejected before the linker is invoked), so in-flight status
+        # was never checked -- inert defaults kept for I4 shape stability.
+        "in_flight": False,
+        "in_flight_branches": [],
+        "in_flight_pr_urls": {},
         "validation_errors": errors,
         "octave_validation": octave_validation,
         "real_validation_available": real_validation_available,
@@ -459,6 +465,13 @@ async def _submit_octave_content(
         "adr_target_path": linker_output.get("adr_target_path"),
         "branch": linker_output.get("branch"),
         "pr_url": linker_output.get("pr_url"),
+        # issue #173 slice 1: names the in-flight branch(es)/PR URL so a
+        # future amendment-routing lane can target the existing PR instead of
+        # opening a second one. Detection-and-return only in this slice --
+        # the amendment write path itself is explicitly out of scope.
+        "in_flight": linker_output.get("in_flight", False),
+        "in_flight_branches": linker_output.get("in_flight_branches", []),
+        "in_flight_pr_urls": linker_output.get("in_flight_pr_urls", {}),
         "validation_errors": errors,
         "octave_validation": octave_validation,
         "real_validation_available": real_validation_available,

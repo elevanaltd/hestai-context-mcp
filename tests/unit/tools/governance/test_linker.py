@@ -425,6 +425,10 @@ def _drive_live(
         def p(name: str, **kw: object) -> MagicMock:
             return stack.enter_context(patch(f"{_LINKER}.{name}", **kw))
 
+        p(
+            "check_in_flight_token",
+            return_value={"in_flight": False, "branches": [], "pr_urls": {}, "error": None},
+        )
         p("_create_worktree", return_value=wt_ret)
         remove = p("_remove_worktree")
         delete = p("_delete_branch")
@@ -499,6 +503,10 @@ class TestRunLinkerLivePath:
         """A write_manifest exception is logged, not fatal; commit/PR proceed."""
         target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         with (
+            patch(
+                f"{_LINKER}.check_in_flight_token",
+                return_value={"in_flight": False, "branches": [], "pr_urls": {}, "error": None},
+            ),
             patch(f"{_LINKER}._create_worktree", return_value=(tmp_path / "wt", None)),
             patch(f"{_LINKER}._remove_worktree"),
             patch(f"{_LINKER}._delete_branch"),
@@ -536,6 +544,10 @@ class TestRunLinkerLivePath:
         """
         target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         with (
+            patch(
+                f"{_LINKER}.check_in_flight_token",
+                return_value={"in_flight": False, "branches": [], "pr_urls": {}, "error": None},
+            ),
             patch(f"{_LINKER}._create_worktree", return_value=(tmp_path / "wt", None)),
             patch(f"{_LINKER}._remove_worktree") as remove,
             patch(f"{_LINKER}._delete_branch") as delete,
@@ -643,6 +655,10 @@ class TestRunLinkerLivePath:
         """Happy live path: worktree + write + manifest + commit + push + PR all succeed."""
         target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         with (
+            patch(
+                f"{_LINKER}.check_in_flight_token",
+                return_value={"in_flight": False, "branches": [], "pr_urls": {}, "error": None},
+            ),
             patch(f"{_LINKER}._create_worktree", return_value=(tmp_path / "wt", None)),
             patch(f"{_LINKER}._remove_worktree") as remove,
             patch(f"{_LINKER}._delete_branch") as delete,

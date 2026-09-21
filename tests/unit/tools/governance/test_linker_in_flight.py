@@ -84,13 +84,11 @@ def _push_governance_branch(
     The primary clone (``repo`` in each test) never sees this push locally
     until it fetches -- exactly the cross-session race issue #173 describes.
     """
-    subprocess.run(
-        ["git", "clone", str(bare), str(scratch)], check=True, capture_output=True
-    )
+    subprocess.run(["git", "clone", str(bare), str(scratch)], check=True, capture_output=True)
     _run(["config", "core.hooksPath", str(scratch / ".git" / "no-hooks")], scratch)
     _run(["config", "user.email", "test2@test.com"], scratch)
     _run(["config", "user.name", "Test2"], scratch)
-    _run(["checkout", "-b", branch_name], scratch)
+    _run(["checkout", "-b", branch_name, "origin/main"], scratch)
     marker = scratch / f"marker-{branch_name.replace('/', '-')}.txt"
     marker.write_text("governance marker")
     _run(["add", "."], scratch)
@@ -147,9 +145,7 @@ class TestFindInFlightBranches:
         _init_isolated_clone(repo, bare)
 
         merged_branch = f"governance/20260102-{_SLUG}"
-        _push_governance_branch(
-            bare, tmp_path / "scratch-c", merged_branch, merge_into_main=True
-        )
+        _push_governance_branch(bare, tmp_path / "scratch-c", merged_branch, merge_into_main=True)
 
         branches, error = find_in_flight_branches(repo, _TOKEN)
 

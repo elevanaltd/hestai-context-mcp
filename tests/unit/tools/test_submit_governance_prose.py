@@ -150,9 +150,10 @@ class TestProseMode:
 
 
 class TestOctaveContentBackCompat:
-    """The octave_content path keeps its post-#70 return shape, plus the single
-    additive #108.4 Option-L ``real_validation_available`` signal (no pre-existing
-    key removed/renamed, and still no ``metrics`` key on this path)."""
+    """The octave_content path keeps its post-#70 return shape, plus the
+    additive #108.4 Option-L ``real_validation_available`` signal and the
+    additive issue #173 slice-1 in-flight signal (no pre-existing key
+    removed/renamed, and still no ``metrics`` key on this path)."""
 
     _POST_70_KEYS = {
         "success",
@@ -162,6 +163,11 @@ class TestOctaveContentBackCompat:
         "adr_target_path",
         "branch",
         "pr_url",
+        # issue #173 slice 1: names the in-flight branch(es)/PR URL when a
+        # TOKEN collides with an unmerged origin governance branch.
+        "in_flight",
+        "in_flight_branches",
+        "in_flight_pr_urls",
         "validation_errors",
         "octave_validation",
         "real_validation_available",
