@@ -627,3 +627,128 @@ class TestSRCheckerGRBackwardCompat:
             required_roles={"SR"}, tier="TIER_2_STANDARD"
         )
         assert approved is True, f"SR should accept legacy GR APPROVED comments, got: {message}"
+
+
+# ---------------------------------------------------------------------------
+# 8. Issue #157 Finding 1: the ^tests/ exemption must not swallow .oct.md
+#    typing or the META_CONTROL_PLANE check
+# ---------------------------------------------------------------------------
+_AGENT_SPEC = '===ROGUE===\nMETA:\n  TYPE::AGENT_DEFINITION\n  VERSION::"1.0"\n===END===\n'
+_SKILL_SPEC = '===ROGUE_SKILL===\nMETA:\n  TYPE::SKILL\n  VERSION::"1.0"\n===END===\n'
+
+
+@pytest.mark.unit
+class TestTestsExemptionDoesNotSwallowOctaveSpecs:
+    """Issue #157 Finding 1 (Finding 1 only -- Findings 2 and 3 are separate).
+
+    The ``^tests/.*$`` exempt pattern used to return None before the
+    META_CONTROL_PLANE check and the ``.oct.md`` TYPE sniff ran, so an agent
+    or skill spec placed under ``tests/`` (and ``tests/review-requirements.oct.md``,
+    the top control-plane tier) classified as exempt -- zero reviewers.
+
+    ``_sniff_octave_type`` opens the path relative to the current working
+    directory, so each on-disk case writes the file under ``tmp_path`` and
+    chdirs there; the classifier sees the same repo-relative path it sees in CI.
+    """
+
+    @staticmethod
+    def _write(root: Path, rel: str, content: str) -> None:
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    def test_agent_definition_under_tests_is_executable_spec(self, tmp_path, monkeypatch) -> None:
+        """tests/<name>.oct.md carrying TYPE::AGENT_DEFINITION -> EXECUTABLE_SPEC."""
+        rel = "tests/malicious_agent.oct.md"
+        self._write(tmp_path, rel, _AGENT_SPEC)
+        monkeypatch.chdir(tmp_path)
+        assert validate_review._classify_file_facet(rel) == "EXECUTABLE_SPEC"
+
+    def test_skill_under_tests_is_executable_spec(self, tmp_path, monkeypatch) -> None:
+        """tests/<dir>/<name>.oct.md carrying TYPE::SKILL -> EXECUTABLE_SPEC."""
+        rel = "tests/fixtures/rogue_skill.oct.md"
+        self._write(tmp_path, rel, _SKILL_SPEC)
+        monkeypatch.chdir(tmp_path)
+        assert validate_review._classify_file_facet(rel) == "EXECUTABLE_SPEC"
+
+    def test_unsniffable_oct_md_under_tests_is_governance(self, tmp_path, monkeypatch) -> None:
+        """tests/<name>.oct.md absent from disk -> GOVERNANCE (reviewed), not exempt.
+
+        The sniff reads the file; with nothing on disk it returns "" and the
+        .oct.md branch falls to GOVERNANCE. (Whether an unsniffable file
+        should be EXECUTABLE_SPEC is #157 Finding 3 -- not asserted here.)
+        """
+        monkeypatch.chdir(tmp_path)
+        assert validate_review._classify_file_facet("tests/absent_spec.oct.md") == "GOVERNANCE"
+
+    def test_review_requirements_under_tests_is_meta_control_plane(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """tests/review-requirements.oct.md -> META_CONTROL_PLANE (top tier), not exempt."""
+        monkeypatch.chdir(tmp_path)
+        assert (
+            validate_review._classify_file_facet("tests/review-requirements.oct.md")
+            == "META_CONTROL_PLANE"
+        )
+
+    def test_review_requirements_under_tests_keeps_meta_over_sniffed_type(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """META_CONTROL_PLANE still outranks the .oct.md sniff under tests/.
+
+        Guards the relative order of the two moved blocks: even when the file
+        on disk carries TYPE::AGENT_DEFINITION, review-requirements.oct.md is
+        META_CONTROL_PLANE.
+        """
+        rel = "tests/review-requirements.oct.md"
+        self._write(tmp_path, rel, _AGENT_SPEC)
+        monkeypatch.chdir(tmp_path)
+        assert validate_review._classify_file_facet(rel) == "META_CONTROL_PLANE"
+
+    def test_agent_spec_only_pr_under_tests_is_not_tier0_exempt(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Tier level: a PR whose ONLY change is a tests/ agent spec needs reviewers.
+
+        Deliberately a tiny (3-line) modification so the TIER_1_SELF short-circuit
+        would apply to any non-EXECUTABLE_SPEC facet: the spec must not self-clear.
+        """
+        rel = "tests/agents/rogue.oct.md"
+        self._write(tmp_path, rel, _AGENT_SPEC)
+        monkeypatch.chdir(tmp_path)
+        files = [{"path": rel, "added": 2, "deleted": 1, "total_changed": 3, "status": "M"}]
+        facets, roles, tier, _ = validate_review.classify_pr_facets(files)
+        assert tier != "TIER_0_EXEMPT", f"tests/ agent spec must not be exempt, got {tier}"
+        assert roles, "tests/ agent spec PR must have a non-empty required-role set"
+        assert facets == {"EXECUTABLE_SPEC"}, f"expected EXECUTABLE_SPEC, got {facets}"
+        assert roles == validate_review.FACET_ROLE_MAP["EXECUTABLE_SPEC"]
+
+
+@pytest.mark.unit
+class TestTestsExemptionStaysNarrow:
+    """REGRESSION GUARDS for issue #157 Finding 1 -- green BEFORE and AFTER the fix.
+
+    The #157 F1 fix moves ONLY the META_CONTROL_PLANE and .oct.md blocks ahead
+    of the ``^tests/.*$`` exemption. Ordinary test code must stay exempt. These
+    paths are exactly the ones a BROADER reorder (tests exemption moved down to
+    just before the code-extension defaults) would over-escalate:
+    ``/shared/`` architecture pattern, ``auth/`` security pattern, ``.sql`` and
+    non-generated JSON. Widening SECURITY/architecture/.sql/JSON precedence
+    over tests/ is an unruled operator policy call; if someone broadens the
+    reorder, these fail.
+    """
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tests/test_plain.py",
+            "tests/unit/tools/shared/test_x.py",
+            "tests/auth/test_login.py",
+            "tests/foo.sql",
+            "tests/fixtures/data.json",
+        ],
+    )
+    def test_ordinary_test_paths_stay_exempt(self, path: str, tmp_path, monkeypatch) -> None:
+        """Ordinary tests/ paths classify as None (exempt) -- unchanged by the fix."""
+        monkeypatch.chdir(tmp_path)
+        assert validate_review._classify_file_facet(path) is None
