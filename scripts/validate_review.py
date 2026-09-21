@@ -961,26 +961,36 @@ def check_pr_comments(
         # --- Metadata extraction and cross-validation ---
         # Extract structured metadata from all texts for machine-readable checks.
         # When metadata IS present, also run regex on the same comment.
-        # If regex-extracted verdict contradicts metadata verdict, FAIL
-        # (prevents spoofing: visible "BLOCKED" with hidden metadata "APPROVED").
+        # If regex-extracted verdict contradicts metadata verdict, the comment is
+        # DISQUALIFIED (prevents spoofing: visible "BLOCKED" with hidden metadata
+        # "APPROVED").
+        #
+        # DISQUALIFY, DO NOT ABORT (issue #155, fail-CLOSED half): this block used
+        # to `return (False, ...)` on the first mismatch, ending the run before any
+        # role checker executed. Because anyone who can comment on a PR can post
+        # such a comment, that turned a spoofing guard into a denial-of-service --
+        # one comment blocked EVERY approval on the PR, including a revert of a bad
+        # main. The offending text is instead dropped from BOTH `searchable_texts`
+        # and `metadata_entries`, so it can satisfy neither the regex matchers nor
+        # `_meta_has`, and validation continues over the remaining comments. The
+        # security property is unchanged: a spoofed comment still clears nothing.
         metadata_entries: list[dict[str, str | None]] = []
+        validated_texts: list[str] = []
+        disqualified: list[str] = []
         for text in searchable_texts:
             meta = _parse_review_metadata(text)
             if meta is not None:
-                metadata_entries.append(meta)
                 # CROSS-VALIDATION: If metadata says a role gave an approval
                 # verdict, the visible text in the same comment MUST also
-                # match that approval via regex. Otherwise reject.
+                # match that approval via regex. Otherwise disqualify.
                 meta_role = meta.get("role")
                 meta_verdict = meta.get("verdict")
-                if meta_role and meta_verdict:
-                    # Only cross-validate recognized review roles.
-                    # Unrecognized roles (e.g., agent names like
-                    # "code-review-specialist") cannot satisfy any gate
-                    # check, so mismatched metadata is irrelevant -- not
-                    # a spoofing vector.
-                    if meta_role not in _VALID_ROLES:
-                        continue
+                # Only cross-validate recognized review roles.
+                # Unrecognized roles (e.g., agent names like
+                # "code-review-specialist") cannot satisfy any gate
+                # check, so mismatched metadata is irrelevant -- not
+                # a spoofing vector.
+                if meta_role and meta_verdict and meta_role in _VALID_ROLES:
                     # Only cross-validate approval verdicts (not BLOCKED/CONDITIONAL)
                     approval_keywords = {"APPROVED", "SELF-REVIEWED", "REVIEWED", "GO"}
                     if meta_verdict in approval_keywords:
@@ -996,13 +1006,35 @@ def check_pr_comments(
                             visible_text, meta_role, meta_verdict
                         )
                         if not regex_agrees:
-                            return (
-                                False,
-                                f"❌ Cross-validation failure: metadata says "
-                                f"{meta_role} {meta_verdict} but visible text "
-                                f"does not match. Possible spoofing detected.",
-                                [],
-                            )
+                            disqualified.append(f"{meta_role} {meta_verdict}")
+                            continue
+                metadata_entries.append(meta)
+            validated_texts.append(text)
+
+        searchable_texts = validated_texts
+
+        # Surface the disqualification: a wedge attempt must be visible, not fatal.
+        # `_reason` decorates EVERY verdict message below, so the notice cannot be
+        # lost by adding or reordering an exit. It previously reached only the
+        # role-check returns and the TIER_1_SELF failure return, leaving the six
+        # successful self-review exits silent -- the security property held, but
+        # the wedge attempt was invisible in the tier with the fewest reviewers.
+        disqualified_note = ""
+        if disqualified:
+            detail = ", ".join(sorted(set(disqualified)))
+            print(
+                f"   ⚠️  Disqualified {len(disqualified)} comment(s) whose metadata "
+                f"contradicts their visible text ({detail}). Possible spoofing "
+                f"detected; these comments clear nothing. Validation continues."
+            )
+            disqualified_note = (
+                f" [⚠️ {len(disqualified)} comment(s) disqualified by cross-validation "
+                f"({detail}) - possible spoofing detected; they cleared nothing]"
+            )
+
+        def _reason(text: str) -> str:
+            """Decorate a verdict message with the disqualification notice (if any)."""
+            return f"{text}{disqualified_note}"
 
         def _meta_has(
             role: str,
@@ -1040,18 +1072,18 @@ def check_pr_comments(
         if tier == "TIER_1_SELF" and (required_roles is None or len(required_roles) == 0):
             for entry in metadata_entries:
                 if entry.get("verdict") == "SELF-REVIEWED":
-                    return True, "✓ Self-review found (metadata)", []
+                    return True, _reason("✓ Self-review found (metadata)"), []
             if _meta_has("HO", "REVIEWED"):
-                return True, "✓ HO supervisory review found (metadata)", []
+                return True, _reason("✓ HO supervisory review found (metadata)"), []
             if _meta_has("CRS", "APPROVED"):
-                return True, "✓ CRS approval satisfies self-review (metadata)", []
+                return True, _reason("✓ CRS approval satisfies self-review (metadata)"), []
             if _has_self_review(searchable_texts):
-                return True, "✓ Self-review found", []
+                return True, _reason("✓ Self-review found"), []
             if _has_approval(searchable_texts, "HO", "REVIEWED"):
-                return True, "✓ HO supervisory review found", []
+                return True, _reason("✓ HO supervisory review found"), []
             if _has_crs_approval(searchable_texts):
-                return True, "✓ CRS approval satisfies self-review requirement", []
-            return False, "❌ Missing: SELF-REVIEWED or HO REVIEWED comment", []
+                return True, _reason("✓ CRS approval satisfies self-review requirement"), []
+            return False, _reason("❌ Missing: SELF-REVIEWED or HO REVIEWED comment"), []
 
         # Determine effective roles to check
         effective_roles = required_roles if required_roles is not None else set()
@@ -1067,7 +1099,7 @@ def check_pr_comments(
             }
             effective_roles = _tier_role_map.get(tier, set())
             if not effective_roles:
-                return False, f"❌ Unrecognized tier: {tier}", []
+                return False, _reason(f"❌ Unrecognized tier: {tier}"), []
 
         # Check each required role (SECURITY: fail-closed for unknown roles)
         missing_roles: list[str] = []
@@ -1080,9 +1112,9 @@ def check_pr_comments(
 
         if not missing_roles:
             role_names = ", ".join(sorted(effective_roles))
-            return True, f"✓ All required approvals found ({role_names})", []
+            return True, _reason(f"✓ All required approvals found ({role_names})"), []
 
-        return False, f"❌ Missing: {', '.join(missing_display)}", missing_roles
+        return False, _reason(f"❌ Missing: {', '.join(missing_display)}"), missing_roles
 
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
         # SECURITY FIX: Fail closed in CI, permissive locally
