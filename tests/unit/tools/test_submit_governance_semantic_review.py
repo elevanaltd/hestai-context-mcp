@@ -234,6 +234,7 @@ class TestOctaveContentStage5:
             "in_flight",
             "in_flight_branches",
             "in_flight_pr_urls",
+            "in_flight_pr_lookup_error",
         }
 
 

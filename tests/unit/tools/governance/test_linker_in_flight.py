@@ -22,6 +22,7 @@ Coverage (minimum required by the brief):
 
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -32,6 +33,8 @@ from hestai_context_mcp.tools.governance.linker import (
     run_linker,
 )
 from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+
+_LINKER = "hestai_context_mcp.tools.governance.linker"
 
 # Fake AGR record identifier for fixtures (non-secret governance identifier).
 _TOKEN = "HO-CONTEXT-MCP-INFLIGHT-20260921"
@@ -68,6 +71,16 @@ def _init_isolated_clone(repo: Path, bare: Path) -> None:
     _run(["branch", "-M", "main"], repo)
 
     subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    # TMG finding (PR #179 rework round 1, item 3): git init --bare inherits
+    # whatever init.defaultBranch the environment provides. On a system where
+    # that is "master" (not "main"), the bare repo's HEAD points at a
+    # nonexistent ref -- "warning: remote HEAD refers to nonexistent ref,
+    # unable to checkout" on every subsequent `git clone` of this bare, and a
+    # `checkout -b <branch>` with no explicit start point would create a root
+    # commit with no ancestry link to main ("refusing to merge unrelated
+    # histories"). Pin the bare's HEAD explicitly so this fixture is
+    # hermetic regardless of the environment's init.defaultBranch.
+    _run(["symbolic-ref", "HEAD", "refs/heads/main"], bare)
     _run(["remote", "add", "origin", str(bare)], repo)
     _run(["push", "-u", "origin", "main"], repo)
 
@@ -113,8 +126,12 @@ class TestFindInFlightBranches:
         repo.mkdir()
         _init_isolated_clone(repo, bare)
 
+        # A fixed, hard-coded date distinct from today's computed branch name
+        # BY CONSTRUCTION (cubic finding): the test's purpose is "a DIFFERENT
+        # date prefix is still detected," which the docstring's hard-coded
+        # date already guarantees without a wall-clock-coupled assertion that
+        # would fail if the suite ever runs on that exact date.
         later_day_branch = f"governance/20260101-{_SLUG}"
-        assert later_day_branch != _compute_branch_name(_TOKEN)
         _push_governance_branch(bare, tmp_path / "scratch-a", later_day_branch)
 
         branches, error = find_in_flight_branches(repo, _TOKEN)
@@ -199,6 +216,10 @@ class TestRunLinkerRefusesWhenInFlight:
     """run_linker must NOT create a worktree/branch/push/PR when in flight."""
 
     def test_run_linker_no_branch_no_pr_no_push_when_in_flight(self, tmp_path: Path) -> None:
+        """Hermetic: gh is stubbed (TMG / cubic finding) so this test makes
+        ZERO real gh CLI calls -- not `gh auth token`, not `gh pr list`. The
+        real git fetch/for-each-ref/merge-base calls remain unstubbed (that
+        IS the thing under test); only the GitHub-API boundary is faked."""
         repo = tmp_path / "repo"
         bare = tmp_path / "origin.git"
         repo.mkdir()
@@ -210,17 +231,29 @@ class TestRunLinkerRefusesWhenInFlight:
         validation = validate_octave_content(repo, _DECISION_RECORD_OCTAVE)
         assert validation.valid is True, validation.errors
 
-        output = run_linker(
-            working_dir=repo,
-            validation=validation,
-            octave_content=_DECISION_RECORD_OCTAVE,
-            dry_run=False,
-        )
+        with (
+            patch(f"{_LINKER}._resolve_github_token", return_value=None),
+            patch(f"{_LINKER}._resolve_open_pr_urls", return_value=({}, None)) as pr_urls,
+        ):
+            output = run_linker(
+                working_dir=repo,
+                validation=validation,
+                octave_content=_DECISION_RECORD_OCTAVE,
+                dry_run=False,
+            )
+
+        # The stub proves no real `gh` subprocess was ever attempted for the
+        # PR-URL lookup (it was still CALLED -- with the real in-flight
+        # branch list -- just not allowed to shell out).
+        pr_urls.assert_called_once()
+        assert pr_urls.call_args.args[1] == [in_flight_branch]
 
         assert output["branch"] is None
         assert output["pr_url"] is None
         assert output["in_flight"] is True
         assert output["in_flight_branches"] == [in_flight_branch]
+        assert output["in_flight_pr_urls"] == {}
+        assert output["in_flight_pr_lookup_error"] is None
         assert output["error"] is not None
         assert in_flight_branch in output["error"]
 
@@ -233,3 +266,61 @@ class TestRunLinkerRefusesWhenInFlight:
             text=True,
         ).stdout
         assert local_branches.strip() == ""
+
+
+@pytest.mark.integration
+class TestSquashMergeExcluded:
+    """PR #179 rework round 1, item 5 (cubic P2 / CE HIGH finding):
+    ``merge-base --is-ancestor`` alone cannot see a squash or rebase merge --
+    GitHub's squash/rebase strategies never leave the head branch as an
+    ancestor of main. A branch whose content already landed on ``origin/main``
+    via ANY merge strategy must be excluded from in-flight status."""
+
+    def test_squash_merged_branch_is_not_in_flight(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        bare = tmp_path / "origin.git"
+        repo.mkdir()
+        _init_isolated_clone(repo, bare)
+
+        squash_branch = f"governance/20260104-{_SLUG}"
+        # The governance branch itself stays unmerged forever (never an
+        # ancestor of main) -- exactly what GitHub's squash-merge leaves
+        # behind on the ORIGINAL branch ref.
+        _push_governance_branch(bare, tmp_path / "scratch-squash-branch", squash_branch)
+
+        # Simulate "squash and merge": a SEPARATE, independent commit lands
+        # directly on main carrying the TOKEN's record at its canonical
+        # path -- main never merges the branch itself.
+        target_rel = f".hestai/decisions/{_TOKEN}.oct.md"
+        squash_scratch = tmp_path / "scratch-squash-main"
+        subprocess.run(
+            ["git", "clone", str(bare), str(squash_scratch)], check=True, capture_output=True
+        )
+        _run(["config", "core.hooksPath", str(squash_scratch / ".git" / "no-hooks")], squash_scratch)
+        _run(["config", "user.email", "test-squash@test.com"], squash_scratch)
+        _run(["config", "user.name", "TestSquash"], squash_scratch)
+        _run(["checkout", "main"], squash_scratch)
+        record_file = squash_scratch / target_rel
+        record_file.parent.mkdir(parents=True, exist_ok=True)
+        record_file.write_text(_DECISION_RECORD_OCTAVE)
+        _run(["add", "."], squash_scratch)
+        _run(["commit", "-m", f"chore(governance): squash-merge {_TOKEN}"], squash_scratch)
+        _run(["push", "origin", "main"], squash_scratch)
+
+        # Sanity precondition: the branch really is NOT an ancestor of main
+        # (this is what a bare ancestor-only test would get wrong).
+        not_ancestor = subprocess.run(
+            ["git", "fetch", "origin", "--prune"], cwd=str(repo), check=True, capture_output=True
+        )
+        del not_ancestor
+        ancestor_check = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", f"origin/{squash_branch}", "origin/main"],
+            cwd=str(repo),
+            capture_output=True,
+        )
+        assert ancestor_check.returncode != 0, "fixture invalid: branch IS an ancestor of main"
+
+        branches, error = find_in_flight_branches(repo, _TOKEN, target_rel)
+
+        assert error is None
+        assert branches == []

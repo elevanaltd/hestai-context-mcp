@@ -14,6 +14,7 @@ subprocess boundary (git / gh) and the filesystem write layer:
     a throwaway worktree, so run_linker never moves the invoking tree's HEAD.
 """
 
+import json
 import subprocess
 from contextlib import ExitStack
 from pathlib import Path
@@ -29,8 +30,11 @@ from hestai_context_mcp.tools.governance.linker import (
     _git_add_and_commit,
     _open_pr,
     _push_branch,
+    _resolve_open_pr_urls,
     _run_git,
     _write_file,
+    check_in_flight_token,
+    find_in_flight_branches,
     run_linker,
 )
 from hestai_context_mcp.tools.governance.type_checker import ValidationResult
@@ -657,7 +661,13 @@ class TestRunLinkerLivePath:
         with (
             patch(
                 f"{_LINKER}.check_in_flight_token",
-                return_value={"in_flight": False, "branches": [], "pr_urls": {}, "error": None},
+                return_value={
+                    "in_flight": False,
+                    "branches": [],
+                    "pr_urls": {},
+                    "pr_lookup_error": None,
+                    "error": None,
+                },
             ),
             patch(f"{_LINKER}._create_worktree", return_value=(tmp_path / "wt", None)),
             patch(f"{_LINKER}._remove_worktree") as remove,
@@ -674,6 +684,13 @@ class TestRunLinkerLivePath:
         assert out["pr_url"] == "http://pr/1"
         assert out["branch"].startswith("governance/")
         assert out["staged_uncommitted"] is False
+        # DETERMINED False (not undetermined None): the in-flight check ran
+        # to completion above and found nothing (cubic finding: the I4
+        # in_flight* fields must propagate on the happy live path too).
+        assert out["in_flight"] is False
+        assert out["in_flight_branches"] == []
+        assert out["in_flight_pr_urls"] == {}
+        assert out["in_flight_pr_lookup_error"] is None
         # The branch was pushed before the PR was opened.
         push.assert_called_once()
         # The worktree is always cleaned up; a successful push leaves the branch.
@@ -756,3 +773,153 @@ class TestBranchPersistenceContract:
 def test_linker_module_exposes_run_linker() -> None:
     """Smoke: public entry point is importable and callable."""
     assert callable(linker.run_linker)
+
+
+# ---------------------------------------------------------------------------
+# PR #179 rework round 1: fail-closed detection + tri-state in_flight
+# (items 1, 2; addendum A). Mocked _run_git -- no real git process, so the
+# fetch vs. ref-enumeration failure can be isolated deterministically via
+# side_effect ordering.
+# ---------------------------------------------------------------------------
+
+
+class TestFailClosedDetection:
+    @pytest.mark.unit
+    def test_fetch_failure_is_undetermined_not_measured_false(self, tmp_path: Path) -> None:
+        """(item 2) A fetch failure must be reported UNDETERMINED (None), never
+        a measured False -- TMG: no prior test exercised this path at all."""
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "network down")):
+            branches, error = find_in_flight_branches(tmp_path, _LIVE_RECORD_ID)
+        assert branches == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+        assert "fetch" in error.lower()
+
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "network down")):
+            status = check_in_flight_token(tmp_path, _LIVE_RECORD_ID)
+        assert status["in_flight"] is None
+        assert status["branches"] == []
+        assert status["error"] is not None
+        assert status["error"].startswith("IN_FLIGHT_UNDETERMINED: ")
+
+    @pytest.mark.unit
+    def test_ref_enumeration_failure_fails_closed_undetermined(self, tmp_path: Path) -> None:
+        """(item 1 -- CRS/CE BLOCKING finding) A `git for-each-ref` failure MUST
+        propagate as an error, not silently collapse to an empty (== "nothing
+        in flight") list. Fetch succeeds; for-each-ref fails."""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[(0, "", ""), (1, "", "ref db corrupted")],
+        ):
+            branches, error = find_in_flight_branches(tmp_path, _LIVE_RECORD_ID)
+        assert branches == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+        assert "for-each-ref" in error
+
+    @pytest.mark.unit
+    def test_run_linker_fails_closed_on_ref_enumeration_error(self, tmp_path: Path) -> None:
+        """(item 1) run_linker must open NO worktree/branch/PR when detection
+        could not complete, and must surface the UNDETERMINED shape."""
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        with (
+            patch(
+                f"{_LINKER}._run_git",
+                side_effect=[(0, "", ""), (1, "", "ref db corrupted")],
+            ),
+            patch(f"{_LINKER}._create_worktree") as create_worktree,
+        ):
+            out = run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", False)
+        assert out["branch"] is None
+        assert out["pr_url"] is None
+        assert out["in_flight"] is None
+        assert out["in_flight_branches"] == []
+        assert out["in_flight_pr_urls"] == {}
+        assert out["error"] is not None
+        assert out["error"].startswith("IN_FLIGHT_UNDETERMINED: ")
+        create_worktree.assert_not_called()
+
+    @pytest.mark.unit
+    def test_run_linker_undetermined_on_dry_run(self, tmp_path: Path) -> None:
+        """(addendum A) dry_run never runs detection -- in_flight must be the
+        UNDETERMINED shape (None), not a measured False."""
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        out = run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", True)
+        assert out["dry_run"] is True
+        assert out["in_flight"] is None
+        assert out["in_flight_branches"] == []
+        assert out["in_flight_pr_urls"] == {}
+
+
+# ---------------------------------------------------------------------------
+# PR #179 rework round 1, item 6: per-branch gh pr list lookup (replaces the
+# single `--limit 100` list that could silently truncate).
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOpenPrUrls:
+    @pytest.mark.unit
+    def test_no_branches_makes_no_subprocess_call(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}.subprocess.run") as run:
+            urls, err = _resolve_open_pr_urls(tmp_path, [], None)
+        assert urls == {}
+        assert err is None
+        run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_success_resolves_url_per_branch_via_head_filter(self, tmp_path: Path) -> None:
+        """ONE `gh pr list --head <branch>` call PER branch, not a single
+        shared `--limit N` list (truncation-proof by construction)."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            calls.append(cmd)
+            assert cmd[:3] == ["gh", "pr", "list"]
+            assert "--limit" not in cmd or cmd[cmd.index("--limit") + 1] == "1"
+            branch = cmd[cmd.index("--head") + 1]
+            return _fake_completed(0, stdout=json.dumps([{"url": f"http://pr/{branch}"}]))
+
+        with patch(f"{_LINKER}.subprocess.run", side_effect=fake_run):
+            urls, err = _resolve_open_pr_urls(
+                tmp_path, ["governance/a", "governance/b"], None
+            )
+        assert urls == {
+            "governance/a": "http://pr/governance/a",
+            "governance/b": "http://pr/governance/b",
+        }
+        assert err is None
+        assert len(calls) == 2
+
+    @pytest.mark.unit
+    def test_one_branch_gh_failure_is_surfaced_others_still_resolve(
+        self, tmp_path: Path
+    ) -> None:
+        """A per-branch lookup failure is NAMED in pr_lookup_error, not
+        silently swallowed (CRS/CE/cubic finding); the other branch's lookup
+        still succeeds -- detection is unaffected either way."""
+
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            branch = cmd[cmd.index("--head") + 1]
+            if branch == "governance/bad":
+                return _fake_completed(1, stderr="gh: not found")
+            return _fake_completed(0, stdout=json.dumps([{"url": "http://pr/ok"}]))
+
+        with patch(f"{_LINKER}.subprocess.run", side_effect=fake_run):
+            urls, err = _resolve_open_pr_urls(
+                tmp_path, ["governance/bad", "governance/ok"], None
+            )
+        assert urls == {"governance/ok": "http://pr/ok"}
+        assert err is not None
+        assert "governance/bad" in err
+
+    @pytest.mark.unit
+    def test_no_pr_found_for_branch_is_not_an_error(self, tmp_path: Path) -> None:
+        """An empty JSON array (no open PR for this branch) is success with
+        no URL, not a failure."""
+        with patch(
+            f"{_LINKER}.subprocess.run",
+            return_value=_fake_completed(0, stdout="[]"),
+        ):
+            urls, err = _resolve_open_pr_urls(tmp_path, ["governance/none"], None)
+        assert urls == {}
+        assert err is None
