@@ -230,19 +230,37 @@ def _push_branch(working_dir: Path, branch_name: str) -> str | None:
 # and escalate rather than silently trusting the ref test -- do not paper
 # over it with a per-submission network call.
 #
-# MERGED classification (two independent, git-only signals; item 5 of the
-# rework): a MERGED-but-undeleted origin branch is excluded from in-flight
-# status even though the ref still exists (origin keeps merged governance
-# branches; issue #173 diagnosis point 4). "Merged" is decided by EITHER of:
+# MERGED classification (two independent, PER-CANDIDATE-BRANCH, git-only
+# signals; item 5 of round 1, CORRECTED in round 2 -- see the note below): a
+# MERGED-but-undeleted origin branch is excluded from in-flight status even
+# though the ref still exists (origin keeps merged governance branches;
+# issue #173 diagnosis point 4). A branch is "merged" iff EITHER of:
 #   (1) ``merge-base --is-ancestor`` -- correct for merge-commit (--no-ff)
 #       merges, but CANNOT see a squash or rebase merge (the head branch is
 #       never an ancestor of main under those strategies); OR
-#   (2) whether the TOKEN's own record file already exists at
-#       ``origin/main:<target_path>`` -- strategy-independent, because the
-#       record's CONTENT is what actually lands on main regardless of how
-#       the merge happened. No extra network call: reads the already-fetched
-#       local remote-tracking ref via ``git cat-file -e``.
-# A branch is excluded if EITHER signal says merged.
+#   (2) THAT BRANCH's OWN copy of the record at the token's target_path is
+#       byte-identical to origin/main's copy -- a git BLOB-HASH comparison
+#       (``git rev-parse --verify -q <ref>:<path>``): two blobs share a SHA
+#       iff their content is identical, so this is strategy-independent --
+#       the record's CONTENT is what actually lands on main regardless of
+#       how the merge happened. No extra network call: reads the
+#       already-fetched local remote-tracking refs.
+# A branch is excluded if EITHER signal, evaluated for THAT branch, says
+# merged.
+#
+# ROUND-2 CORRECTION (cubic review 5265518720, reproduced by the coordinator
+# at af01c13d): the round-1 implementation evaluated signal (2) ONCE, for the
+# whole TOKEN -- "does ANY copy of the record exist anywhere on
+# origin/main?" -- and if so, short-circuited every candidate branch to
+# "nothing in flight." That does not match the docstring's own rule above
+# (which is stated per BRANCH) and is wrong whenever TWO different branches
+# exist for the same token's slug: if branch A was squash-merged (so its
+# content now matches main) but branch B is a LATER, genuinely unmerged
+# branch with DIFFERENT (diverged) content, the token-wide short-circuit
+# wrongly cleared B too. Signal (2) is now evaluated independently for EACH
+# candidate branch via ``_branch_record_matches_origin_main`` -- only a
+# branch whose OWN content matches main is excluded by this signal; a
+# sibling branch with different content is unaffected.
 #
 # POST-MERGE RE-FILING IS UNCHANGED BY THIS SLICE: what happens when the SAME
 # token is re-submitted AFTER its record already landed on origin/main is
@@ -350,9 +368,9 @@ def _is_merged_into_origin_main(working_dir: Path, branch: str) -> bool:
 
     Ancestor-only signal 1 of 2 (see the module-level MERGED-classification
     note): correct for merge-commit (``--no-ff``) merges, blind to squash/
-    rebase merges -- ``find_in_flight_branches`` pairs this with
-    ``_token_record_exists_on_origin_main`` (signal 2) so either one deciding
-    "merged" is enough to exclude a branch.
+    rebase merges -- ``find_in_flight_branches`` pairs this, PER BRANCH, with
+    ``_branch_record_matches_origin_main`` (signal 2) so either one deciding
+    "merged" is enough to exclude THAT branch.
 
     Fail-safe: any git error (e.g. an unexpected missing ref) is treated as
     NOT merged, so an unverifiable branch is reported as in-flight rather than
@@ -366,26 +384,84 @@ def _is_merged_into_origin_main(working_dir: Path, branch: str) -> bool:
     return code == 0
 
 
-def _token_record_exists_on_origin_main(working_dir: Path, target_path: str | None) -> bool:
-    """True iff the TOKEN's own record already exists at ``origin/main:<target_path>``.
+def _blob_sha_at(working_dir: Path, ref_and_path: str) -> tuple[str | None, str | None]:
+    """Resolve the git blob SHA for ``<ref>:<path>`` (e.g.
+    ``origin/main:.hestai/decisions/TOKEN.oct.md``) via
+    ``git rev-parse --verify -q``.
 
-    Strategy-independent merged signal 2 of 2 (rework round 1, item 5): a
+    Returns ``(sha, error)``:
+      - ``(sha, None)`` -- the path exists at that ref; ``sha`` is its blob
+        hash (git hashes CONTENT, so two paths with the same sha have
+        byte-identical content).
+      - ``(None, None)`` -- the path (or the ref itself) does NOT exist
+        there. ``--verify -q`` SUPPRESSES the "fatal: ... does not exist"
+        message for exactly this case, so it resolves with an EMPTY stderr --
+        that is how this is told apart from a genuine failure below. This is
+        a normal, MEASURED outcome, not a failure.
+      - ``(None, error)`` -- ``git rev-parse`` itself failed unexpectedly
+        (corrupted repo, git binary missing, timeout, ...); because ``-q``
+        suppresses the routine "does not exist" message, any STDERR that
+        still comes back here is a real failure, not a routine miss.
+        ``error`` is ``IN_FLIGHT_UNDETERMINED``-prefixed, consistent with
+        every other detection-could-not-run path in this module.
+    """
+    code, out, stderr = _run_git(["rev-parse", "--verify", "-q", ref_and_path], working_dir)
+    if code == 0:
+        return out.strip(), None
+    if stderr:
+        return (
+            None,
+            f"{_IN_FLIGHT_UNDETERMINED_PREFIX}"
+            f"git rev-parse --verify {ref_and_path} failed: {stderr}",
+        )
+    return None, None
+
+
+def _branch_record_matches_origin_main(
+    working_dir: Path, branch: str, target_path: str | None
+) -> tuple[bool, str | None]:
+    """True iff ``origin/<branch>``'s OWN copy of ``target_path`` is
+    byte-identical to ``origin/main``'s copy -- a blob-hash comparison (see
+    ``_blob_sha_at``).
+
+    Strategy-independent merged signal 2 of 2, evaluated PER BRANCH (rework
+    round 1 item 5, CORRECTED in round 2 -- see the module-level
+    ROUND-2 CORRECTION note: this must never be evaluated token-wide). A
     squash or rebase merge never leaves the governance branch as an ancestor
     of ``origin/main``, so ``_is_merged_into_origin_main`` alone
     misclassifies a squash/rebase-merged-but-undeleted branch as permanently
-    in flight (cubic P2 / CE HIGH finding). Checking whether the record's OWN
-    content already landed at its canonical path on ``origin/main`` is
-    independent of merge strategy: if it is there, the branch's purpose has
-    been fulfilled regardless of how it got there. ``target_path`` is the
-    repo-relative canonical path ``type_checker`` computed for this TOKEN
-    (e.g. ``.hestai/decisions/<TOKEN>.oct.md``); pass ``None`` to skip this
-    signal (falls back to the ancestor-only test alone). No extra network
-    call: reads the already-fetched local remote-tracking ref.
+    in flight. Checking whether THIS branch's OWN record content already
+    matches what's on ``origin/main`` is independent of merge strategy: if it
+    does, this branch's purpose has been fulfilled regardless of how.
+
+    Returns ``(matches, error)``. ``matches`` is ``False`` (not merged via
+    THIS signal -- the ancestor test in ``_is_merged_into_origin_main`` still
+    applies independently) in every case where identity legitimately could
+    NOT be established, none of which is a failure:
+      (a) the branch has no file at ``target_path``,
+      (b) ``origin/main`` has no file at ``target_path``,
+      (c) ``target_path`` is ``None`` (nothing to compare).
+    ``error`` (``IN_FLIGHT_UNDETERMINED``-prefixed) is set ONLY when
+    ``git rev-parse`` itself failed unexpectedly while resolving a blob --
+    see ``_blob_sha_at``. No extra network call: reads the already-fetched
+    local remote-tracking refs.
     """
     if not target_path:
-        return False
-    code, _, _ = _run_git(["cat-file", "-e", f"origin/main:{target_path}"], working_dir)
-    return code == 0
+        return False, None  # (c)
+
+    branch_sha, branch_err = _blob_sha_at(working_dir, f"origin/{branch}:{target_path}")
+    if branch_err:
+        return False, branch_err
+    if branch_sha is None:
+        return False, None  # (a)
+
+    main_sha, main_err = _blob_sha_at(working_dir, f"origin/main:{target_path}")
+    if main_err:
+        return False, main_err
+    if main_sha is None:
+        return False, None  # (b)
+
+    return branch_sha == main_sha, None
 
 
 def find_in_flight_branches(
@@ -397,11 +473,13 @@ def find_in_flight_branches(
 
     ``target_path`` is the TOKEN's own canonical record path (repo-relative),
     used ONLY for the strategy-independent merged signal -- see
-    ``_token_record_exists_on_origin_main``.
+    ``_branch_record_matches_origin_main``, evaluated PER CANDIDATE BRANCH
+    (round 2 correction: NEVER as a token-wide short-circuit).
 
     Returns ``(branch_names, error)``. FAILS CLOSED (item 1): ``error`` is
     non-None, prefixed ``IN_FLIGHT_UNDETERMINED: ``, whenever detection could
-    NOT run to completion (fetch failure OR ref-enumeration failure); in that
+    NOT run to completion (fetch failure, ref-enumeration failure, OR a
+    genuine git failure while comparing a branch's record to main); in that
     case ``branch_names`` is always ``[]`` and the caller MUST NOT read that
     empty list as "nothing in flight" -- pair it with the error, or (as
     ``check_in_flight_token`` does) surface ``in_flight: None``.
@@ -415,13 +493,19 @@ def find_in_flight_branches(
     if list_err:
         return [], list_err
 
-    if _token_record_exists_on_origin_main(working_dir, target_path):
-        # The record itself already landed on main (any merge strategy) --
-        # nothing for this token is in flight, regardless of a leftover
-        # unmerged branch ref (item 5).
-        return [], None
+    in_flight: list[str] = []
+    for branch in candidates:
+        if _is_merged_into_origin_main(working_dir, branch):
+            continue
 
-    in_flight = [b for b in candidates if not _is_merged_into_origin_main(working_dir, b)]
+        matches, match_err = _branch_record_matches_origin_main(working_dir, branch, target_path)
+        if match_err:
+            return [], match_err
+        if matches:
+            continue
+
+        in_flight.append(branch)
+
     return sorted(in_flight), None
 
 

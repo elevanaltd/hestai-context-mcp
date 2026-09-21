@@ -941,9 +941,7 @@ class TestBranchRecordMatchesOriginMain:
     def test_target_path_none_is_no_match_no_error(self, tmp_path: Path) -> None:
         """(c) target_path=None: nothing to compare -- a measured False (this
         signal doesn't apply), never an error."""
-        matches, error = linker._branch_record_matches_origin_main(
-            tmp_path, "governance/x", None
-        )
+        matches, error = linker._branch_record_matches_origin_main(tmp_path, "governance/x", None)
         assert matches is False
         assert error is None
 

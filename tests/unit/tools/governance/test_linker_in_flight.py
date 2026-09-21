@@ -277,37 +277,37 @@ class TestSquashMergeExcluded:
     via ANY merge strategy must be excluded from in-flight status."""
 
     def test_squash_merged_branch_is_not_in_flight(self, tmp_path: Path) -> None:
+        """The branch's OWN commit writes the record at its canonical path
+        (round 2 correction: the per-branch content comparison requires the
+        CANDIDATE branch itself to carry the matching content, not merely
+        SOME branch/commit anywhere -- see TestPerBranchMergedSignal for the
+        case where a DIFFERENT branch's content must NOT be cleared by this
+        one's squash-merge)."""
         repo = tmp_path / "repo"
         bare = tmp_path / "origin.git"
         repo.mkdir()
         _init_isolated_clone(repo, bare)
 
+        target_rel = f".hestai/decisions/{_TOKEN}.oct.md"
         squash_branch = f"governance/20260104-{_SLUG}"
         # The governance branch itself stays unmerged forever (never an
         # ancestor of main) -- exactly what GitHub's squash-merge leaves
-        # behind on the ORIGINAL branch ref.
-        _push_governance_branch(bare, tmp_path / "scratch-squash-branch", squash_branch)
+        # behind on the ORIGINAL branch ref. Its OWN commit carries the real
+        # record content at its canonical path.
+        _push_branch_with_record(
+            bare,
+            tmp_path / "scratch-squash-branch",
+            squash_branch,
+            target_rel,
+            _DECISION_RECORD_OCTAVE,
+        )
 
         # Simulate "squash and merge": a SEPARATE, independent commit lands
-        # directly on main carrying the TOKEN's record at its canonical
-        # path -- main never merges the branch itself.
-        target_rel = f".hestai/decisions/{_TOKEN}.oct.md"
-        squash_scratch = tmp_path / "scratch-squash-main"
-        subprocess.run(
-            ["git", "clone", str(bare), str(squash_scratch)], check=True, capture_output=True
+        # directly on main carrying the SAME content at the SAME path --
+        # main never merges the branch itself.
+        _squash_merge_record_into_main(
+            bare, tmp_path / "scratch-squash-main", target_rel, _DECISION_RECORD_OCTAVE, _TOKEN
         )
-        _run(
-            ["config", "core.hooksPath", str(squash_scratch / ".git" / "no-hooks")], squash_scratch
-        )
-        _run(["config", "user.email", "test-squash@test.com"], squash_scratch)
-        _run(["config", "user.name", "TestSquash"], squash_scratch)
-        _run(["checkout", "main"], squash_scratch)
-        record_file = squash_scratch / target_rel
-        record_file.parent.mkdir(parents=True, exist_ok=True)
-        record_file.write_text(_DECISION_RECORD_OCTAVE)
-        _run(["add", "."], squash_scratch)
-        _run(["commit", "-m", f"chore(governance): squash-merge {_TOKEN}"], squash_scratch)
-        _run(["push", "origin", "main"], squash_scratch)
 
         # Sanity precondition: the branch really is NOT an ancestor of main
         # (this is what a bare ancestor-only test would get wrong).
