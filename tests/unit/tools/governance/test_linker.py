@@ -820,13 +820,19 @@ class TestFailClosedDetection:
     @pytest.mark.unit
     def test_run_linker_fails_closed_on_ref_enumeration_error(self, tmp_path: Path) -> None:
         """(item 1) run_linker must open NO worktree/branch/PR when detection
-        could not complete, and must surface the UNDETERMINED shape."""
+        could not complete, and must surface the UNDETERMINED shape.
+
+        (round 2, cubic P3) ``_resolve_github_token`` is stubbed so this test
+        makes ZERO real `gh` calls -- it previously fell through to a real
+        `gh auth token` subprocess since run_linker resolves the token
+        unconditionally before the in-flight check."""
         target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         with (
             patch(
                 f"{_LINKER}._run_git",
                 side_effect=[(0, "", ""), (1, "", "ref db corrupted")],
             ),
+            patch(f"{_LINKER}._resolve_github_token", return_value=None),
             patch(f"{_LINKER}._create_worktree") as create_worktree,
         ):
             out = run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", False)
@@ -917,3 +923,97 @@ class TestResolveOpenPrUrls:
             urls, err = _resolve_open_pr_urls(tmp_path, ["governance/none"], None)
         assert urls == {}
         assert err is None
+
+
+# ---------------------------------------------------------------------------
+# PR #179 rework round 2 (cubic review 5265518720): the strategy-independent
+# merged signal must be evaluated PER CANDIDATE BRANCH (via a new
+# ``_branch_record_matches_origin_main`` blob-hash comparison), never as a
+# token-wide short-circuit. These unit tests cover the (a)/(b)/(c) edge cases
+# the coordinator called out, deterministically via mocked ``_run_git`` --
+# the real-git reproduction of the generating bug lives in
+# test_linker_in_flight.py::TestPerBranchMergedSignal.
+# ---------------------------------------------------------------------------
+
+
+class TestBranchRecordMatchesOriginMain:
+    @pytest.mark.unit
+    def test_target_path_none_is_no_match_no_error(self, tmp_path: Path) -> None:
+        """(c) target_path=None: nothing to compare -- a measured False (this
+        signal doesn't apply), never an error."""
+        matches, error = linker._branch_record_matches_origin_main(
+            tmp_path, "governance/x", None
+        )
+        assert matches is False
+        assert error is None
+
+    @pytest.mark.unit
+    def test_branch_missing_file_is_no_match_no_error(self, tmp_path: Path) -> None:
+        """(a) the branch has no file at target_path: `git rev-parse --verify
+        -q` exits non-zero with EMPTY stderr for a missing path -- that is a
+        routine, MEASURED miss, not a git failure."""
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "")):
+            matches, error = linker._branch_record_matches_origin_main(
+                tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
+            )
+        assert matches is False
+        assert error is None
+
+    @pytest.mark.unit
+    def test_main_missing_file_is_no_match_no_error(self, tmp_path: Path) -> None:
+        """(b) origin/main has no file at target_path: branch resolves fine,
+        main's lookup misses (empty stderr) -- still a measured False, not an
+        error."""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[(0, "abc123", ""), (1, "", "")],
+        ):
+            matches, error = linker._branch_record_matches_origin_main(
+                tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
+            )
+        assert matches is False
+        assert error is None
+
+    @pytest.mark.unit
+    def test_identical_blobs_match(self, tmp_path: Path) -> None:
+        """Same blob SHA on both sides -- byte-identical content -- matches."""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[(0, "abc123", ""), (0, "abc123", "")],
+        ):
+            matches, error = linker._branch_record_matches_origin_main(
+                tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
+            )
+        assert matches is True
+        assert error is None
+
+    @pytest.mark.unit
+    def test_different_blobs_do_not_match(self, tmp_path: Path) -> None:
+        """Different blob SHAs -- content diverged -- does not match, so the
+        branch stays subject to the ancestor test (this is the exact
+        squash-A-then-diverged-B scenario, at the unit level)."""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[(0, "abc123", ""), (0, "def456", "")],
+        ):
+            matches, error = linker._branch_record_matches_origin_main(
+                tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
+            )
+        assert matches is False
+        assert error is None
+
+    @pytest.mark.unit
+    def test_git_hard_failure_is_undetermined(self, tmp_path: Path) -> None:
+        """A genuine git failure (non-empty stderr survives `-q`, e.g. a
+        corrupted repo) fails CLOSED: IN_FLIGHT_UNDETERMINED, not a silent
+        False that could wrongly clear a branch."""
+        with patch(
+            f"{_LINKER}._run_git",
+            return_value=(128, "", "fatal: not a git repository"),
+        ):
+            matches, error = linker._branch_record_matches_origin_main(
+                tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
+            )
+        assert matches is False
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")

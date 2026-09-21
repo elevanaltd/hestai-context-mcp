@@ -326,3 +326,89 @@ class TestSquashMergeExcluded:
 
         assert error is None
         assert branches == []
+
+
+def _push_branch_with_record(
+    bare: Path, scratch: Path, branch_name: str, target_rel: str, content: str
+) -> None:
+    """Push a governance branch that writes ``content`` at ``target_rel`` --
+    the TOKEN's REAL canonical record path (not just a marker file), needed
+    for the per-branch content-comparison tests (round 2)."""
+    subprocess.run(["git", "clone", str(bare), str(scratch)], check=True, capture_output=True)
+    _run(["config", "core.hooksPath", str(scratch / ".git" / "no-hooks")], scratch)
+    _run(["config", "user.email", "test-branch@test.com"], scratch)
+    _run(["config", "user.name", "TestBranch"], scratch)
+    _run(["checkout", "-b", branch_name, "origin/main"], scratch)
+    record_file = scratch / target_rel
+    record_file.parent.mkdir(parents=True, exist_ok=True)
+    record_file.write_text(content)
+    _run(["add", "."], scratch)
+    _run(["commit", "-m", f"chore(governance): {branch_name}"], scratch)
+    _run(["push", "origin", branch_name], scratch)
+
+
+def _squash_merge_record_into_main(
+    bare: Path, scratch: Path, target_rel: str, content: str, token: str
+) -> None:
+    """Simulate GitHub's "squash and merge": a SEPARATE, independent commit
+    lands directly on main carrying ``content`` at ``target_rel`` -- main
+    never merges the source branch's history, so the branch is NOT an
+    ancestor of main afterwards."""
+    subprocess.run(["git", "clone", str(bare), str(scratch)], check=True, capture_output=True)
+    _run(["config", "core.hooksPath", str(scratch / ".git" / "no-hooks")], scratch)
+    _run(["config", "user.email", "test-squash@test.com"], scratch)
+    _run(["config", "user.name", "TestSquash"], scratch)
+    _run(["checkout", "main"], scratch)
+    record_file = scratch / target_rel
+    record_file.parent.mkdir(parents=True, exist_ok=True)
+    record_file.write_text(content)
+    _run(["add", "."], scratch)
+    _run(["commit", "-m", f"chore(governance): squash-merge {token}"], scratch)
+    _run(["push", "origin", "main"], scratch)
+
+
+@pytest.mark.integration
+class TestPerBranchMergedSignal:
+    """PR #179 rework round 2 (cubic review 5265518720, reproduced at af01c13d):
+    ``_token_record_exists_on_origin_main`` short-circuited the WHOLE token to
+    "nothing in flight" the moment ANY copy of the record existed on
+    origin/main, even when a DIFFERENT, still-genuinely-unmerged branch for
+    the SAME token had diverging content. The module docstring's own rule
+    ("a branch is excluded if EITHER signal says merged") is PER BRANCH -- the
+    round-1 code did not match its own doc. The strategy-independent merged
+    signal must be evaluated per CANDIDATE BRANCH: a branch is excluded only
+    when ITS OWN copy of the record matches what's on main."""
+
+    def test_squash_merged_a_plus_unmerged_b_reports_only_b(self, tmp_path: Path) -> None:
+        """Exact reproduction from the coordinator's report:
+        1. Branch A adds the record (v1), is pushed, then SQUASH-merged into
+           main (v1 lands on main; A itself is never an ancestor of main).
+        2. Branch B changes the record to v2, is pushed, and stays unmerged.
+        3. Fresh clone / fresh detection.
+        CORRECT: only B is in flight -- A's own content matches what's on
+        main (excluded); B's content has since diverged (still in flight)."""
+        repo = tmp_path / "repo"
+        bare = tmp_path / "origin.git"
+        repo.mkdir()
+        _init_isolated_clone(repo, bare)
+
+        target_rel = f".hestai/decisions/{_TOKEN}.oct.md"
+        branch_a = f"governance/20260101-{_SLUG}"
+        branch_b = f"governance/20260921-{_SLUG}"
+        record_v1 = _DECISION_RECORD_OCTAVE
+        record_v2 = _DECISION_RECORD_OCTAVE.replace(
+            'DECISION::"Test decision for in-flight detection coverage."',
+            'DECISION::"Test decision v2 -- CHANGED after the squash-merge."',
+        )
+        assert record_v1 != record_v2  # fixture sanity
+
+        _push_branch_with_record(bare, tmp_path / "scratch-a", branch_a, target_rel, record_v1)
+        _squash_merge_record_into_main(
+            bare, tmp_path / "scratch-a-squash", target_rel, record_v1, _TOKEN
+        )
+        _push_branch_with_record(bare, tmp_path / "scratch-b", branch_b, target_rel, record_v2)
+
+        branches, error = find_in_flight_branches(repo, _TOKEN, target_rel)
+
+        assert error is None
+        assert branches == [branch_b]
