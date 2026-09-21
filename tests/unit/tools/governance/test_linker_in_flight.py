@@ -296,7 +296,9 @@ class TestSquashMergeExcluded:
         subprocess.run(
             ["git", "clone", str(bare), str(squash_scratch)], check=True, capture_output=True
         )
-        _run(["config", "core.hooksPath", str(squash_scratch / ".git" / "no-hooks")], squash_scratch)
+        _run(
+            ["config", "core.hooksPath", str(squash_scratch / ".git" / "no-hooks")], squash_scratch
+        )
         _run(["config", "user.email", "test-squash@test.com"], squash_scratch)
         _run(["config", "user.name", "TestSquash"], squash_scratch)
         _run(["checkout", "main"], squash_scratch)

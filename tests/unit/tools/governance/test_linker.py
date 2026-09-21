@@ -880,9 +880,7 @@ class TestResolveOpenPrUrls:
             return _fake_completed(0, stdout=json.dumps([{"url": f"http://pr/{branch}"}]))
 
         with patch(f"{_LINKER}.subprocess.run", side_effect=fake_run):
-            urls, err = _resolve_open_pr_urls(
-                tmp_path, ["governance/a", "governance/b"], None
-            )
+            urls, err = _resolve_open_pr_urls(tmp_path, ["governance/a", "governance/b"], None)
         assert urls == {
             "governance/a": "http://pr/governance/a",
             "governance/b": "http://pr/governance/b",
@@ -891,9 +889,7 @@ class TestResolveOpenPrUrls:
         assert len(calls) == 2
 
     @pytest.mark.unit
-    def test_one_branch_gh_failure_is_surfaced_others_still_resolve(
-        self, tmp_path: Path
-    ) -> None:
+    def test_one_branch_gh_failure_is_surfaced_others_still_resolve(self, tmp_path: Path) -> None:
         """A per-branch lookup failure is NAMED in pr_lookup_error, not
         silently swallowed (CRS/CE/cubic finding); the other branch's lookup
         still succeeds -- detection is unaffected either way."""
@@ -905,9 +901,7 @@ class TestResolveOpenPrUrls:
             return _fake_completed(0, stdout=json.dumps([{"url": "http://pr/ok"}]))
 
         with patch(f"{_LINKER}.subprocess.run", side_effect=fake_run):
-            urls, err = _resolve_open_pr_urls(
-                tmp_path, ["governance/bad", "governance/ok"], None
-            )
+            urls, err = _resolve_open_pr_urls(tmp_path, ["governance/bad", "governance/ok"], None)
         assert urls == {"governance/ok": "http://pr/ok"}
         assert err is not None
         assert "governance/bad" in err
