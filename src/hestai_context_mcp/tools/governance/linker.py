@@ -206,16 +206,61 @@ def _push_branch(working_dir: Path, branch_name: str) -> str | None:
 
 # ---------------------------------------------------------------------------
 # In-flight TOKEN detection (issue #173 slice 1; operator ruling 2026-09-21,
-# HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921)
+# HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921; rework round 1 per CRS/CE/
+# TMG/cubic review of PR #179)
 #
 # "In flight" = a governance branch for the TOKEN's slug that exists on
 # origin, ANY date prefix, and is NOT merged into origin/main -- OR an open PR
-# for it. A remote branch is the authoritative, git-only signal (no GitHub API
-# needed): an open PR's head branch always lives on origin (gh requires a
-# pushed branch to open a PR at all), so the unmerged-ref test alone decides
-# in-flight status. A MERGED-but-undeleted origin branch is explicitly
-# excluded -- it is no longer in flight even though the ref still exists
-# (origin keeps merged governance branches; see issue #173 diagnosis point 4).
+# for it.
+#
+# ASSUMPTION -- "open PR" coverage without an independent GitHub query: the
+# unmerged-origin-branch test is treated as covering "open PR" too, WITHOUT a
+# per-submission GitHub API query for open PRs (that would be built, not
+# documented, per the rework brief -- explicitly deferred). This holds
+# because governance PRs are SAME-REPO by construction: ``_push_branch``
+# always pushes to ``origin`` and ``_open_pr`` runs ``gh pr create`` from
+# inside that same pushed worktree, so a governance PR's head branch is NEVER
+# a fork ref -- it is always ``origin/governance/<date>-<slug>``. A GitHub PR
+# requires its head branch to exist; deleting that branch auto-closes the PR.
+# So "an unmerged origin/governance/*-<slug> branch exists" and "an open PR
+# for this token exists" are the same fact observed from two angles, FOR THIS
+# REPO'S governance flow specifically. If this assumption is ever found
+# false (e.g. a future slice opens governance PRs from forks, or a branch is
+# deleted without closing/merging its PR through some out-of-band path), STOP
+# and escalate rather than silently trusting the ref test -- do not paper
+# over it with a per-submission network call.
+#
+# MERGED classification (two independent, git-only signals; item 5 of the
+# rework): a MERGED-but-undeleted origin branch is excluded from in-flight
+# status even though the ref still exists (origin keeps merged governance
+# branches; issue #173 diagnosis point 4). "Merged" is decided by EITHER of:
+#   (1) ``merge-base --is-ancestor`` -- correct for merge-commit (--no-ff)
+#       merges, but CANNOT see a squash or rebase merge (the head branch is
+#       never an ancestor of main under those strategies); OR
+#   (2) whether the TOKEN's own record file already exists at
+#       ``origin/main:<target_path>`` -- strategy-independent, because the
+#       record's CONTENT is what actually lands on main regardless of how
+#       the merge happened. No extra network call: reads the already-fetched
+#       local remote-tracking ref via ``git cat-file -e``.
+# A branch is excluded if EITHER signal says merged.
+#
+# POST-MERGE RE-FILING IS UNCHANGED BY THIS SLICE: what happens when the SAME
+# token is re-submitted AFTER its record already landed on origin/main is
+# governed ENTIRELY by Check 6 (``type_checker._validate_impl`` ->
+# ``lexer.lookup_token_deterministic``), which rejects a re-file ONLY if the
+# record is visible in the CALLER's OWN local ``working_dir`` tree
+# (MANIFEST.md, then a filesystem walk of ``.hestai/decisions/`` and
+# ``.hestai/context/concepts/``) -- it does NOT consult origin/main. If the
+# caller's local checkout is stale (has not pulled the commit that merged the
+# token), Check 6 will not see it, and THIS in-flight check does not fill
+# that gap either: the ``origin/main`` cat-file signal above only EXCLUDES an
+# already-landed branch from being misreported "in flight" -- it is not a
+# new duplicate-rejection path, and it never touches Check 6. A
+# stale-checkout-safe re-file rejection, or an amendment path for an
+# already-merged token, is explicitly deferred to a later slice (routing an
+# amendment to "the agent that instigated it" is the still-unresolved
+# question the original brief scoped out of slice 1). This slice only
+# prevents duplicate BRANCHES/PRs for a token that has NOT yet merged.
 #
 # Fetch-before-check (not after): the OLD flow ran Check 6 (local-only
 # lookup_token_deterministic) before ``_create_worktree``'s fetch, so a
@@ -223,9 +268,27 @@ def _push_branch(working_dir: Path, branch_name: str) -> str | None:
 # already passed. ``check_in_flight_token`` fetches fresh remote state itself
 # and is called from ``run_linker`` BEFORE any worktree/branch/push, closing
 # that ordering gap.
+#
+# TRI-STATE ``in_flight`` (rework round 1 addendum A): a fetch or
+# ref-enumeration failure means detection COULD NOT RUN -- a different fact
+# from "detection ran and found nothing." Collapsing both to
+# ``in_flight: False`` would let a caller read an undetermined result as a
+# measured "safe to proceed" (the exact CRS/CE fail-open finding). So
+# ``in_flight`` is ``bool | None`` EVERYWHERE this module and its callers
+# surface it:
+#   - ``None``  -- UNDETERMINED: detection did not run (``dry_run``) or could
+#     not complete (fetch/ref-enumeration failure). The paired ``error``
+#     string is prefixed ``IN_FLIGHT_UNDETERMINED: `` so callers can branch
+#     on it without parsing the whole message.
+#   - ``True``  -- DETERMINED: at least one unmerged branch was found.
+#   - ``False`` -- DETERMINED: detection ran to completion and found nothing.
 # ---------------------------------------------------------------------------
 
 _GOVERNANCE_REMOTE_REF_PREFIX = "refs/remotes/origin/governance/"
+
+# Stable prefix so callers can branch on "detection could not run" without
+# parsing the full message (rework round 1 addendum A).
+_IN_FLIGHT_UNDETERMINED_PREFIX = "IN_FLIGHT_UNDETERMINED: "
 
 
 def _fetch_origin(working_dir: Path) -> str | None:
@@ -236,27 +299,40 @@ def _fetch_origin(working_dir: Path) -> str | None:
     remote-tracking namespace last held from a previous fetch (or never held,
     for a branch pushed by a different session/clone).
 
-    Returns an error string on failure, None on success.
+    Returns an ``IN_FLIGHT_UNDETERMINED``-prefixed error string on failure,
+    None on success.
     """
     code, _, stderr = _run_git(["fetch", "origin", "--prune"], working_dir)
     if code != 0:
-        return f"git fetch origin failed: {stderr}"
+        return f"{_IN_FLIGHT_UNDETERMINED_PREFIX}git fetch origin failed: {stderr}"
     return None
 
 
-def _list_remote_governance_branches_for_slug(working_dir: Path, slug: str) -> list[str]:
+def _list_remote_governance_branches_for_slug(
+    working_dir: Path, slug: str
+) -> tuple[list[str], str | None]:
     """List origin governance branches matching ``slug``, ANY date prefix.
 
-    Returns SHORT branch names (``governance/<8-digit-date>-<slug>``), not the
-    ``origin/`` remote-tracking prefix. Requires a prior ``_fetch_origin`` call
-    to see current remote state -- this function does not fetch.
+    Returns ``(branch_names, error)``: SHORT branch names
+    (``governance/<8-digit-date>-<slug>``), not the ``origin/`` remote-tracking
+    prefix. Requires a prior ``_fetch_origin`` call to see current remote
+    state -- this function does not fetch.
+
+    FAILS CLOSED (rework round 1, item 1 -- CRS/CE finding): a
+    ``git for-each-ref`` failure returns a non-None, ``IN_FLIGHT_UNDETERMINED``
+    -prefixed ``error``, NEVER an empty list with no error. An empty list must
+    mean "asked and there were none," not "could not ask" -- collapsing those
+    two cases previously let a transient ref-listing failure silently pass
+    the in-flight gate and open a duplicate branch/PR.
     """
-    code, out, _ = _run_git(
+    code, out, stderr = _run_git(
         ["for-each-ref", "--format=%(refname:short)", _GOVERNANCE_REMOTE_REF_PREFIX],
         working_dir,
     )
-    if code != 0 or not out:
-        return []
+    if code != 0:
+        return [], f"{_IN_FLIGHT_UNDETERMINED_PREFIX}git for-each-ref failed: {stderr}"
+    if not out:
+        return [], None
 
     # Full-name anchored: governance/<8 digits>-<exact slug>, nothing else --
     # a longer slug that merely ENDS with this slug must not match.
@@ -266,11 +342,17 @@ def _list_remote_governance_branches_for_slug(working_dir: Path, slug: str) -> l
         for line in out.splitlines()
         if pattern.match(line.strip())
     ]
-    return sorted(matches)
+    return sorted(matches), None
 
 
 def _is_merged_into_origin_main(working_dir: Path, branch: str) -> bool:
     """True iff ``origin/<branch>`` is an ancestor of ``origin/main`` (merged).
+
+    Ancestor-only signal 1 of 2 (see the module-level MERGED-classification
+    note): correct for merge-commit (``--no-ff``) merges, blind to squash/
+    rebase merges -- ``find_in_flight_branches`` pairs this with
+    ``_token_record_exists_on_origin_main`` (signal 2) so either one deciding
+    "merged" is enough to exclude a branch.
 
     Fail-safe: any git error (e.g. an unexpected missing ref) is treated as
     NOT merged, so an unverifiable branch is reported as in-flight rather than
@@ -284,115 +366,189 @@ def _is_merged_into_origin_main(working_dir: Path, branch: str) -> bool:
     return code == 0
 
 
-def find_in_flight_branches(working_dir: Path, token: str) -> tuple[list[str], str | None]:
+def _token_record_exists_on_origin_main(working_dir: Path, target_path: str | None) -> bool:
+    """True iff the TOKEN's own record already exists at ``origin/main:<target_path>``.
+
+    Strategy-independent merged signal 2 of 2 (rework round 1, item 5): a
+    squash or rebase merge never leaves the governance branch as an ancestor
+    of ``origin/main``, so ``_is_merged_into_origin_main`` alone
+    misclassifies a squash/rebase-merged-but-undeleted branch as permanently
+    in flight (cubic P2 / CE HIGH finding). Checking whether the record's OWN
+    content already landed at its canonical path on ``origin/main`` is
+    independent of merge strategy: if it is there, the branch's purpose has
+    been fulfilled regardless of how it got there. ``target_path`` is the
+    repo-relative canonical path ``type_checker`` computed for this TOKEN
+    (e.g. ``.hestai/decisions/<TOKEN>.oct.md``); pass ``None`` to skip this
+    signal (falls back to the ancestor-only test alone). No extra network
+    call: reads the already-fetched local remote-tracking ref.
+    """
+    if not target_path:
+        return False
+    code, _, _ = _run_git(["cat-file", "-e", f"origin/main:{target_path}"], working_dir)
+    return code == 0
+
+
+def find_in_flight_branches(
+    working_dir: Path, token: str, target_path: str | None = None
+) -> tuple[list[str], str | None]:
     """Fetch fresh remote state, then find UNMERGED origin governance branches
     for ``token``'s slug (any date prefix -- covers both the same-day push
     collision and the later-day second-PR case, issue #173).
 
-    Returns ``(branch_names, error)``. ``branch_names`` is sorted and empty
-    when ``error`` is set (a fetch failure) or when nothing is in flight.
+    ``target_path`` is the TOKEN's own canonical record path (repo-relative),
+    used ONLY for the strategy-independent merged signal -- see
+    ``_token_record_exists_on_origin_main``.
+
+    Returns ``(branch_names, error)``. FAILS CLOSED (item 1): ``error`` is
+    non-None, prefixed ``IN_FLIGHT_UNDETERMINED: ``, whenever detection could
+    NOT run to completion (fetch failure OR ref-enumeration failure); in that
+    case ``branch_names`` is always ``[]`` and the caller MUST NOT read that
+    empty list as "nothing in flight" -- pair it with the error, or (as
+    ``check_in_flight_token`` does) surface ``in_flight: None``.
     """
     fetch_err = _fetch_origin(working_dir)
     if fetch_err:
         return [], fetch_err
 
     slug = _token_to_slug(token)
-    candidates = _list_remote_governance_branches_for_slug(working_dir, slug)
+    candidates, list_err = _list_remote_governance_branches_for_slug(working_dir, slug)
+    if list_err:
+        return [], list_err
+
+    if _token_record_exists_on_origin_main(working_dir, target_path):
+        # The record itself already landed on main (any merge strategy) --
+        # nothing for this token is in flight, regardless of a leftover
+        # unmerged branch ref (item 5).
+        return [], None
+
     in_flight = [b for b in candidates if not _is_merged_into_origin_main(working_dir, b)]
     return sorted(in_flight), None
 
 
 def _resolve_open_pr_urls(
     working_dir: Path, branches: list[str], gh_token: str | None
-) -> dict[str, str]:
-    """Best-effort: resolve open-PR URLs for ``branches`` via ONE ``gh`` call.
+) -> tuple[dict[str, str], str | None]:
+    """Best-effort: resolve open-PR URLs for ``branches``.
 
-    A pushed branch does not, by itself, carry a discoverable PR URL in the
-    local git ref namespace (GitHub does not expose PR pseudo-refs without
-    opt-in fetch config); resolving the URL genuinely requires the GitHub API.
-    Kept to a SINGLE ``gh pr list`` call regardless of how many branches are
-    in flight (network-cost discipline -- issue #173 asks this be minimal).
-    Never raises: gh missing/unauthenticated/timeout all degrade to an empty
-    mapping so in-flight detection (the git-only, authoritative signal) is
-    never blocked by a GitHub API hiccup.
+    ONE ``gh pr list --state open --head <branch>`` call PER branch (rework
+    round 1, item 6 -- CRS/CE/cubic finding): there are normally 0 or 1 open
+    PRs per branch, and a per-branch lookup cannot silently truncate the way
+    a single shared ``gh pr list --limit N`` can on a repo with many open
+    PRs (a branch past the cutoff would get no URL, indistinguishable from
+    "no PR exists").
+
+    Returns ``(urls, pr_lookup_error)``. ``urls`` maps branch -> PR URL for
+    every branch a PR was found for. Detection (``in_flight`` /
+    ``in_flight_branches``) is NEVER blocked by a gh failure here -- only URL
+    enrichment is (fail-soft, matches ``check_in_flight_token``'s contract).
+    ``pr_lookup_error`` is None iff every lookup that ran succeeded;
+    otherwise it NAMES the branch(es) that failed and why, so the degrade is
+    surfaced in the structured result rather than silently indistinguishable
+    from "no open PR exists" (CRS/CE/cubic finding: failures must not be
+    swallowed).
     """
     if not branches:
-        return {}
+        return {}, None
 
     env = dict(os.environ)
     if gh_token:
         env["GH_TOKEN"] = gh_token
 
-    try:
-        result = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--state",
-                "open",
-                "--json",
-                "headRefName,url",
-                "--limit",
-                "100",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=str(working_dir),
-            env=env,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return {}
-
-    if result.returncode != 0:
-        return {}
-
-    try:
-        records = json.loads(result.stdout)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
-    if not isinstance(records, list):
-        return {}
-
-    branch_set = set(branches)
     urls: dict[str, str] = {}
-    for rec in records:
-        if not isinstance(rec, dict):
+    failures: list[str] = []
+    for branch in branches:
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "pr",
+                    "list",
+                    "--state",
+                    "open",
+                    "--head",
+                    branch,
+                    "--json",
+                    "url",
+                    "--limit",
+                    "1",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(working_dir),
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            failures.append(f"{branch}: {exc}")
             continue
-        head = rec.get("headRefName")
-        url = rec.get("url")
-        if head in branch_set and isinstance(url, str):
-            urls[head] = url
-    return urls
+
+        if result.returncode != 0:
+            failures.append(f"{branch}: gh pr list failed: {result.stderr.strip()}")
+            continue
+
+        try:
+            records = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError):
+            failures.append(f"{branch}: malformed gh pr list JSON output")
+            continue
+
+        if not isinstance(records, list):
+            failures.append(f"{branch}: unexpected gh pr list JSON shape")
+            continue
+
+        for rec in records:
+            if isinstance(rec, dict) and isinstance(rec.get("url"), str):
+                urls[branch] = rec["url"]
+                break
+
+    pr_lookup_error = "; ".join(failures) if failures else None
+    return urls, pr_lookup_error
 
 
 def check_in_flight_token(
-    working_dir: Path, token: str, gh_token: str | None = None
+    working_dir: Path,
+    token: str,
+    target_path: str | None = None,
+    gh_token: str | None = None,
 ) -> dict[str, Any]:
     """Structured in-flight check for ``token`` (issue #173 slice 1).
 
     Fetches origin fresh, then reports whether ``token`` is already in
     flight: an unmerged origin governance branch for its slug, same-day or
     later-day. Detection itself is git-only and authoritative; PR URLs are
-    best-effort via a single ``gh`` lookup, resolved only when at least one
+    best-effort per-branch ``gh`` lookups, resolved only when at least one
     in-flight branch was found.
 
-    Returns a dict with keys: ``in_flight`` (bool), ``branches`` (list[str]),
-    ``pr_urls`` (dict[str, str], branch -> PR URL where resolvable), and
-    ``error`` (str | None -- set only on a fetch failure, in which case
-    ``in_flight`` is False and the caller cannot trust that as a real answer).
+    Returns a dict with keys:
+      - ``in_flight``: ``bool | None``. ``None`` means UNDETERMINED (see the
+        module-level TRI-STATE note); ``True``/``False`` mean detection ran
+        to completion.
+      - ``branches``: list[str] of in-flight branch names (empty unless
+        ``in_flight is True``).
+      - ``pr_urls``: dict[str, str], branch -> open PR URL where resolvable.
+      - ``pr_lookup_error``: str | None -- set when at least one per-branch
+        ``gh pr list`` lookup failed; detection itself is unaffected.
+      - ``error``: str | None -- set (``IN_FLIGHT_UNDETERMINED``-prefixed)
+        ONLY when ``in_flight is None``.
     """
-    branches, fetch_error = find_in_flight_branches(working_dir, token)
+    branches, fetch_error = find_in_flight_branches(working_dir, token, target_path)
     if fetch_error:
-        return {"in_flight": False, "branches": [], "pr_urls": {}, "error": fetch_error}
+        return {
+            "in_flight": None,
+            "branches": [],
+            "pr_urls": {},
+            "pr_lookup_error": None,
+            "error": fetch_error,
+        }
 
-    pr_urls = _resolve_open_pr_urls(working_dir, branches, gh_token) if branches else {}
+    pr_urls, pr_lookup_error = (
+        _resolve_open_pr_urls(working_dir, branches, gh_token) if branches else ({}, None)
+    )
     return {
         "in_flight": bool(branches),
         "branches": branches,
         "pr_urls": pr_urls,
+        "pr_lookup_error": pr_lookup_error,
         "error": None,
     }
 
@@ -596,10 +752,13 @@ def run_linker(
         Dict with keys: token, card_type, target_path, branch, pr_url, error,
         dry_run, staged_uncommitted, ``adr_target_path`` (the
         ``docs/adr/<token>.md`` path when ``adr_prose`` is supplied, else None),
-        and the issue #173 slice-1 in-flight signal: ``in_flight`` (bool),
-        ``in_flight_branches`` (list[str], unmerged origin governance branches
-        found for this token's slug), and ``in_flight_pr_urls`` (dict[str, str],
-        branch -> open PR URL where resolvable).
+        and the issue #173 slice-1 in-flight signal: ``in_flight`` (``bool |
+        None`` -- see TRI-STATE below), ``in_flight_branches`` (list[str],
+        unmerged origin governance branches found for this token's slug),
+        ``in_flight_pr_urls`` (dict[str, str], branch -> open PR URL where
+        resolvable), and ``in_flight_pr_lookup_error`` (str | None -- set
+        when a per-branch ``gh pr list`` lookup failed; detection itself is
+        unaffected by that failure).
 
         ``branch`` is the would-be branch name on ``dry_run``; on a live run it
         is non-None ONLY when the branch actually reached ``origin`` (a push
@@ -610,9 +769,19 @@ def run_linker(
         mutation happens inside a throwaway worktree that is always removed, so
         nothing is ever left staged in the operator's working tree.
 
-        dry_run performs NEITHER the fetch NOR the in-flight check (see the
-        ``if dry_run:`` branch below for the full rationale): ``in_flight`` is
-        always False and the branch/url lists always empty on that path.
+        TRI-STATE ``in_flight`` (rework round 1 addendum A): ``None`` means
+        UNDETERMINED -- detection did not run (``dry_run``, or the
+        target_path/path-traversal guards rejected the submission BEFORE
+        detection was reached) or could not complete (a fetch or
+        ref-enumeration failure, ``error`` prefixed
+        ``IN_FLIGHT_UNDETERMINED: `` in that case). ``True``/``False`` mean
+        detection ran to completion and found something / found nothing,
+        respectively. A caller MUST NOT read ``None`` as "not in flight" --
+        that conflation is exactly the fail-open bug this rework fixes.
+        ``dry_run`` in particular performs NEITHER the fetch NOR the
+        in-flight check (both are network operations that mutate local
+        remote-tracking refs, a side effect dry_run must stay free of), so
+        its result is ALWAYS the undetermined shape, never a measured False.
     """
     token = validation.token or ""
     card_type = validation.card_type or ""
@@ -633,9 +802,10 @@ def run_linker(
         # #173 slice 1 design decision): both are network operations that
         # mutate local remote-tracking refs, which is a side effect dry_run
         # must stay free of (module docstring: "dry_run=True: skips all
-        # git/file operations"). in_flight/in_flight_branches/in_flight_pr_urls
-        # are present with inert defaults for I4 shape stability across every
-        # return path, but on dry_run they were never actually checked.
+        # git/file operations"). in_flight is therefore the UNDETERMINED
+        # shape (None), not a measured False (rework round 1 addendum A) --
+        # in_flight_branches/in_flight_pr_urls/in_flight_pr_lookup_error stay
+        # at their inert empty/None defaults for I4 shape stability.
         return {
             "token": token,
             "card_type": card_type,
@@ -643,9 +813,10 @@ def run_linker(
             "adr_target_path": adr_target_path_str,
             "branch": branch_name,
             "pr_url": None,
-            "in_flight": False,
+            "in_flight": None,
             "in_flight_branches": [],
             "in_flight_pr_urls": {},
+            "in_flight_pr_lookup_error": None,
             "error": None,
             "staged_uncommitted": False,
             "dry_run": True,
@@ -656,7 +827,8 @@ def run_linker(
 
     # target_path is required before we touch git.
     if target_path is None:
-        # Nothing created, nothing staged: no worktree, no branch.
+        # Nothing created, nothing staged: no worktree, no branch. Detection
+        # was never reached, so in_flight is UNDETERMINED (None), not False.
         return {
             "token": token,
             "card_type": card_type,
@@ -664,9 +836,10 @@ def run_linker(
             "adr_target_path": adr_target_path_str,
             "branch": None,
             "pr_url": None,
-            "in_flight": False,
+            "in_flight": None,
             "in_flight_branches": [],
             "in_flight_pr_urls": {},
+            "in_flight_pr_lookup_error": None,
             "error": "target_path is None -- cannot write file",
             "staged_uncommitted": False,
             "dry_run": False,
@@ -684,6 +857,7 @@ def run_linker(
             rels.append(guarded.resolve().relative_to(working_dir.resolve()))
         except (ValueError, RuntimeError, OSError):
             # Nothing created: no worktree, no branch, nothing staged.
+            # Detection was never reached, so in_flight is UNDETERMINED.
             return {
                 "token": token,
                 "card_type": card_type,
@@ -691,9 +865,10 @@ def run_linker(
                 "adr_target_path": adr_target_path_str,
                 "branch": None,
                 "pr_url": None,
-                "in_flight": False,
+                "in_flight": None,
                 "in_flight_branches": [],
                 "in_flight_pr_urls": {},
+                "in_flight_pr_lookup_error": None,
                 "error": (
                     f"target_path {guarded} is outside working_dir {working_dir} "
                     "-- path traversal rejected"
@@ -709,10 +884,13 @@ def run_linker(
     #    submit_governance must refuse to open a second branch/PR rather than
     #    racing `_create_worktree`'s own (later, redundant) fetch.
     gh_token = _resolve_github_token()
-    in_flight_status = check_in_flight_token(working_dir, token, gh_token)
+    in_flight_status = check_in_flight_token(working_dir, token, target_path_str, gh_token)
     if in_flight_status["error"]:
-        # Could not establish fresh remote state at all (e.g. network down):
-        # fail closed -- nothing created, nothing staged.
+        # Detection could NOT complete (fetch or ref-enumeration failure):
+        # fail CLOSED -- nothing created, nothing staged -- and report the
+        # UNDETERMINED shape (in_flight=None), never a measured False, so a
+        # caller can never mistake "we don't know" for "confirmed clear"
+        # (CRS/CE fail-open finding; rework round 1 addendum A).
         return {
             "token": token,
             "card_type": card_type,
@@ -720,9 +898,10 @@ def run_linker(
             "adr_target_path": adr_target_path_str,
             "branch": None,
             "pr_url": None,
-            "in_flight": False,
+            "in_flight": None,
             "in_flight_branches": [],
             "in_flight_pr_urls": {},
+            "in_flight_pr_lookup_error": None,
             "error": in_flight_status["error"],
             "staged_uncommitted": False,
             "dry_run": False,
@@ -730,6 +909,7 @@ def run_linker(
     if in_flight_status["in_flight"]:
         in_flight_branches = in_flight_status["branches"]
         in_flight_pr_urls = in_flight_status["pr_urls"]
+        in_flight_pr_lookup_error = in_flight_status["pr_lookup_error"]
         return {
             "token": token,
             "card_type": card_type,
@@ -740,6 +920,7 @@ def run_linker(
             "in_flight": True,
             "in_flight_branches": in_flight_branches,
             "in_flight_pr_urls": in_flight_pr_urls,
+            "in_flight_pr_lookup_error": in_flight_pr_lookup_error,
             "error": (
                 f"TOKEN '{token}' is already in flight on origin "
                 f"(unmerged governance branch(es): {', '.join(in_flight_branches)}); "
@@ -753,7 +934,9 @@ def run_linker(
     #    operator's own working tree (whatever branch it is on) is NEVER touched.
     worktree_path, err = _create_worktree(working_dir, branch_name)
     if err:
-        # Worktree creation failed: nothing created, nothing staged.
+        # Worktree creation failed: nothing created, nothing staged. Detection
+        # ran to completion above and determined False, so in_flight is the
+        # DETERMINED False shape here (not None) -- we DO know.
         return {
             "token": token,
             "card_type": card_type,
@@ -764,6 +947,7 @@ def run_linker(
             "in_flight": False,
             "in_flight_branches": [],
             "in_flight_pr_urls": {},
+            "in_flight_pr_lookup_error": None,
             "error": err,
             "staged_uncommitted": False,
             "dry_run": False,
@@ -859,10 +1043,12 @@ def run_linker(
         "branch": persisted_branch,
         "pr_url": pr_url,
         # Reached the worktree/push/PR stage, so the in-flight check above
-        # already confirmed no unmerged branch existed for this token.
+        # already confirmed (DETERMINED False, not undetermined) no unmerged
+        # branch existed for this token.
         "in_flight": False,
         "in_flight_branches": [],
         "in_flight_pr_urls": {},
+        "in_flight_pr_lookup_error": None,
         # Hermetic model: the worktree is always removed and nothing is ever
         # staged in the operator's working tree, so this is always False.
         # Retained for I4 shape stability.
