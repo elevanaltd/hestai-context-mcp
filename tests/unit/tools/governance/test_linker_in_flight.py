@@ -134,7 +134,13 @@ class TestFindInFlightBranches:
         later_day_branch = f"governance/20260101-{_SLUG}"
         _push_governance_branch(bare, tmp_path / "scratch-a", later_day_branch)
 
-        branches, error = find_in_flight_branches(repo, _TOKEN)
+        # round 3: target_path is now required once a candidate branch
+        # exists. The pushed branch never wrote content there (only a
+        # marker file), so this exercises the (a) "branch has no file at
+        # target_path" fallback-to-ancestor-test path -- same practical
+        # result as before, now via the full, required signal set.
+        target_rel = f".hestai/decisions/{_TOKEN}.oct.md"
+        branches, error = find_in_flight_branches(repo, _TOKEN, target_rel)
 
         assert error is None
         assert branches == [later_day_branch]
@@ -149,7 +155,8 @@ class TestFindInFlightBranches:
         same_day_branch = _compute_branch_name(_TOKEN)
         _push_governance_branch(bare, tmp_path / "scratch-b", same_day_branch)
 
-        branches, error = find_in_flight_branches(repo, _TOKEN)
+        target_rel = f".hestai/decisions/{_TOKEN}.oct.md"
+        branches, error = find_in_flight_branches(repo, _TOKEN, target_rel)
 
         assert error is None
         assert branches == [same_day_branch]
@@ -164,7 +171,8 @@ class TestFindInFlightBranches:
         merged_branch = f"governance/20260102-{_SLUG}"
         _push_governance_branch(bare, tmp_path / "scratch-c", merged_branch, merge_into_main=True)
 
-        branches, error = find_in_flight_branches(repo, _TOKEN)
+        target_rel = f".hestai/decisions/{_TOKEN}.oct.md"
+        branches, error = find_in_flight_branches(repo, _TOKEN, target_rel)
 
         assert error is None
         assert branches == []
@@ -193,7 +201,8 @@ class TestFindInFlightBranches:
         later_branch = f"governance/20260103-{_SLUG}"
         _push_governance_branch(bare, tmp_path / "scratch-d", later_branch)
 
-        branches, error = find_in_flight_branches(repo, _TOKEN)
+        target_rel = f".hestai/decisions/{_TOKEN}.oct.md"
+        branches, error = find_in_flight_branches(repo, _TOKEN, target_rel)
 
         assert error is None
         assert branches == [later_branch]

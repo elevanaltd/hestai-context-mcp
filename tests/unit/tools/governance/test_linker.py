@@ -947,10 +947,20 @@ class TestBranchRecordMatchesOriginMain:
 
     @pytest.mark.unit
     def test_branch_missing_file_is_no_match_no_error(self, tmp_path: Path) -> None:
-        """(a) the branch has no file at target_path: `git rev-parse --verify
-        -q` exits non-zero with EMPTY stderr for a missing path -- that is a
-        routine, MEASURED miss, not a git failure."""
-        with patch(f"{_LINKER}._run_git", return_value=(1, "", "")):
+        """(a) both refs resolve fine, but the branch has no FILE at
+        target_path: `git rev-parse --verify -q` exits non-zero with EMPTY
+        stderr for a missing path -- that is a routine, MEASURED miss, not a
+        git failure. (round 3: the two leading calls are the new
+        _verify_ref_resolves checks for the branch ref and origin/main,
+        both succeeding, BEFORE any path lookup runs.)"""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[
+                (0, "branchsha", ""),  # verify origin/governance/x^{commit}
+                (0, "mainsha", ""),  # verify origin/main^{commit}
+                (1, "", ""),  # blob lookup: branch has no file at target_path
+            ],
+        ):
             matches, error = linker._branch_record_matches_origin_main(
                 tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
             )
@@ -959,12 +969,16 @@ class TestBranchRecordMatchesOriginMain:
 
     @pytest.mark.unit
     def test_main_missing_file_is_no_match_no_error(self, tmp_path: Path) -> None:
-        """(b) origin/main has no file at target_path: branch resolves fine,
-        main's lookup misses (empty stderr) -- still a measured False, not an
-        error."""
+        """(b) both refs resolve fine, branch's file resolves, but origin/main
+        has no file at target_path -- still a measured False, not an error."""
         with patch(
             f"{_LINKER}._run_git",
-            side_effect=[(0, "abc123", ""), (1, "", "")],
+            side_effect=[
+                (0, "branchsha", ""),  # verify origin/governance/x^{commit}
+                (0, "mainsha", ""),  # verify origin/main^{commit}
+                (0, "abc123", ""),  # blob lookup: branch has the file
+                (1, "", ""),  # blob lookup: main has no file at target_path
+            ],
         ):
             matches, error = linker._branch_record_matches_origin_main(
                 tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
@@ -977,7 +991,12 @@ class TestBranchRecordMatchesOriginMain:
         """Same blob SHA on both sides -- byte-identical content -- matches."""
         with patch(
             f"{_LINKER}._run_git",
-            side_effect=[(0, "abc123", ""), (0, "abc123", "")],
+            side_effect=[
+                (0, "branchsha", ""),  # verify origin/governance/x^{commit}
+                (0, "mainsha", ""),  # verify origin/main^{commit}
+                (0, "abc123", ""),  # blob lookup: branch
+                (0, "abc123", ""),  # blob lookup: main
+            ],
         ):
             matches, error = linker._branch_record_matches_origin_main(
                 tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
@@ -992,7 +1011,12 @@ class TestBranchRecordMatchesOriginMain:
         squash-A-then-diverged-B scenario, at the unit level)."""
         with patch(
             f"{_LINKER}._run_git",
-            side_effect=[(0, "abc123", ""), (0, "def456", "")],
+            side_effect=[
+                (0, "branchsha", ""),  # verify origin/governance/x^{commit}
+                (0, "mainsha", ""),  # verify origin/main^{commit}
+                (0, "abc123", ""),  # blob lookup: branch
+                (0, "def456", ""),  # blob lookup: main
+            ],
         ):
             matches, error = linker._branch_record_matches_origin_main(
                 tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
@@ -1004,7 +1028,11 @@ class TestBranchRecordMatchesOriginMain:
     def test_git_hard_failure_is_undetermined(self, tmp_path: Path) -> None:
         """A genuine git failure (non-empty stderr survives `-q`, e.g. a
         corrupted repo) fails CLOSED: IN_FLIGHT_UNDETERMINED, not a silent
-        False that could wrongly clear a branch."""
+        False that could wrongly clear a branch. `return_value` applies to
+        every `_run_git` call uniformly, so (round 3) this now fails at the
+        FIRST call -- the new `_verify_ref_resolves` check for the branch's
+        own ref -- rather than at a blob lookup; the assertions are
+        unaffected either way."""
         with patch(
             f"{_LINKER}._run_git",
             return_value=(128, "", "fatal: not a git repository"),
@@ -1091,9 +1119,7 @@ class TestFindInFlightBranchesUndeterminedPropagation:
     branch list."""
 
     @pytest.mark.unit
-    def test_masked_ancestor_timeout_propagates_as_undetermined(
-        self, tmp_path: Path
-    ) -> None:
+    def test_masked_ancestor_timeout_propagates_as_undetermined(self, tmp_path: Path) -> None:
         """Reproduces the CRS-described bug directly: a masked ancestor-check
         timeout must NOT produce a determined in-flight branch list."""
         with patch(
@@ -1124,9 +1150,7 @@ class TestMissingRefIsUndetermined:
     give empty stderr + exit 1)."""
 
     @pytest.mark.unit
-    def test_missing_ref_is_undetermined_not_a_measured_miss(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_ref_is_undetermined_not_a_measured_miss(self, tmp_path: Path) -> None:
         """Every `_run_git` call (including the new ref-existence check)
         returns the "missing" shape (exit 1, empty stderr) -- indistinguishable,
         at the raw `rev-parse --verify -q` level, from a routine missing
@@ -1148,9 +1172,7 @@ class TestTargetPathNoneBoundary:
     (option (i), scoped to fire only when candidates is non-empty)."""
 
     @pytest.mark.unit
-    def test_target_path_none_with_candidates_is_undetermined(
-        self, tmp_path: Path
-    ) -> None:
+    def test_target_path_none_with_candidates_is_undetermined(self, tmp_path: Path) -> None:
         with patch(
             f"{_LINKER}._run_git",
             side_effect=[
@@ -1168,9 +1190,7 @@ class TestTargetPathNoneBoundary:
         assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
 
     @pytest.mark.unit
-    def test_target_path_none_with_no_candidates_stays_measured_empty(
-        self, tmp_path: Path
-    ) -> None:
+    def test_target_path_none_with_no_candidates_stays_measured_empty(self, tmp_path: Path) -> None:
         """Regression guard, not a RED case: ZERO candidate branches means
         there is nothing the missing content-match signal COULD have
         changed -- a fully measured "nothing in flight", not an error."""

@@ -363,7 +363,7 @@ def _list_remote_governance_branches_for_slug(
     return sorted(matches), None
 
 
-def _is_merged_into_origin_main(working_dir: Path, branch: str) -> bool:
+def _is_merged_into_origin_main(working_dir: Path, branch: str) -> tuple[bool, str | None]:
     """True iff ``origin/<branch>`` is an ancestor of ``origin/main`` (merged).
 
     Ancestor-only signal 1 of 2 (see the module-level MERGED-classification
@@ -372,16 +372,38 @@ def _is_merged_into_origin_main(working_dir: Path, branch: str) -> bool:
     ``_branch_record_matches_origin_main`` (signal 2) so either one deciding
     "merged" is enough to exclude THAT branch.
 
-    Fail-safe: any git error (e.g. an unexpected missing ref) is treated as
-    NOT merged, so an unverifiable branch is reported as in-flight rather than
-    silently permitting a second PR for a token we could not confirm was
-    closed out.
+    Returns ``(merged, error)`` -- MEASURED vs UNDETERMINED (PR #179 round 3,
+    CRS 5760485688: this used to collapse "measured not-merged" and "could
+    not measure at all" into a single ``False``, which let a downstream
+    caller read an unmeasured result as a determined answer):
+      - ``(True, None)``  -- exit 0: a genuine, MEASURED ancestor relationship.
+      - ``(False, None)`` -- exit 1 with EMPTY stderr: a genuine, MEASURED
+        "not an ancestor" (``git merge-base --is-ancestor`` prints nothing on
+        this exact outcome).
+      - ``(False, error)`` -- anything else, error UNDETERMINED-prefixed:
+        any exit code other than 0/1 (a real git failure, e.g. an invalid
+        ref), OR exit 1 WITH NON-EMPTY stderr. The latter case exists
+        specifically because ``_run_git`` reports a subprocess timeout (or a
+        missing git binary / OSError) as ``(1, "", "git command timed
+        out")`` -- THE SAME EXIT CODE as a genuine "not an ancestor" result,
+        but with a non-empty stderr message. A masked timeout must not
+        masquerade as a measured miss; stderr presence is what tells the two
+        apart, since a clean "not an ancestor" run is always silent.
     """
-    code, _, _ = _run_git(
+    code, _, stderr = _run_git(
         ["merge-base", "--is-ancestor", f"origin/{branch}", "origin/main"],
         working_dir,
     )
-    return code == 0
+    if code == 0:
+        return True, None
+    if code == 1 and not stderr:
+        return False, None
+    return (
+        False,
+        f"{_IN_FLIGHT_UNDETERMINED_PREFIX}"
+        f"git merge-base --is-ancestor origin/{branch} origin/main "
+        f"failed: {stderr or f'unexpected exit code {code}'}",
+    )
 
 
 def _blob_sha_at(working_dir: Path, ref_and_path: str) -> tuple[str | None, str | None]:
@@ -417,6 +439,30 @@ def _blob_sha_at(working_dir: Path, ref_and_path: str) -> tuple[str | None, str 
     return None, None
 
 
+def _verify_ref_resolves(working_dir: Path, ref: str) -> str | None:
+    """Verify ``ref`` resolves to a commit object (``git rev-parse --verify
+    -q <ref>^{commit}``).
+
+    PR #179 round 3, item 2 (CRS 5760485688): ``_blob_sha_at``'s own
+    ``rev-parse --verify -q <ref>:<path>`` exits 1 with EMPTY stderr for
+    BOTH a missing PATH at an existing ref AND a MISSING REF -- the two are
+    indistinguishable from that call alone. A missing ref (``origin/main``
+    itself, or a candidate branch's own remote-tracking ref) is NOT a
+    routine "no file here" miss the way a missing path is: it signals
+    something is seriously wrong (a race with a prune, a corrupted
+    remote-tracking namespace, ...), so it must fail closed rather than be
+    silently read as "path absent, no match, not merged."
+
+    Returns ``None`` when ``ref`` resolves; an ``IN_FLIGHT_UNDETERMINED``
+    -prefixed error string when it does not (or the check itself fails).
+    """
+    code, _, stderr = _run_git(["rev-parse", "--verify", "-q", f"{ref}^{{commit}}"], working_dir)
+    if code == 0:
+        return None
+    detail = f": {stderr}" if stderr else ""
+    return f"{_IN_FLIGHT_UNDETERMINED_PREFIX}ref '{ref}' does not resolve to a commit{detail}"
+
+
 def _branch_record_matches_origin_main(
     working_dir: Path, branch: str, target_path: str | None
 ) -> tuple[bool, str | None]:
@@ -437,19 +483,32 @@ def _branch_record_matches_origin_main(
     Returns ``(matches, error)``. ``matches`` is ``False`` (not merged via
     THIS signal -- the ancestor test in ``_is_merged_into_origin_main`` still
     applies independently) in every case where identity legitimately could
-    NOT be established, none of which is a failure:
-      (a) the branch has no file at ``target_path``,
-      (b) ``origin/main`` has no file at ``target_path``,
+    NOT be established, none of which is a failure -- these are all
+    MEASURED outcomes, not errors:
+      (a) the branch's ref resolves fine but has no FILE at ``target_path``,
+      (b) ``origin/main``'s ref resolves fine but has no FILE at
+          ``target_path``,
       (c) ``target_path`` is ``None`` (nothing to compare).
-    ``error`` (``IN_FLIGHT_UNDETERMINED``-prefixed) is set ONLY when
-    ``git rev-parse`` itself failed unexpectedly while resolving a blob --
-    see ``_blob_sha_at``. No extra network call: reads the already-fetched
+    ``error`` (``IN_FLIGHT_UNDETERMINED``-prefixed) is set when EITHER the
+    branch's OWN ref or ``origin/main`` does not resolve to a commit at all
+    (round 3, item 2 -- see ``_verify_ref_resolves``; this is checked BEFORE
+    any path lookup, so a missing ref is never misread as case (a)/(b)), or
+    when ``git rev-parse`` itself failed unexpectedly while resolving a blob
+    -- see ``_blob_sha_at``. No extra network call: reads the already-fetched
     local remote-tracking refs.
     """
     if not target_path:
         return False, None  # (c)
 
-    branch_sha, branch_err = _blob_sha_at(working_dir, f"origin/{branch}:{target_path}")
+    branch_ref = f"origin/{branch}"
+    branch_ref_err = _verify_ref_resolves(working_dir, branch_ref)
+    if branch_ref_err:
+        return False, branch_ref_err
+    main_ref_err = _verify_ref_resolves(working_dir, "origin/main")
+    if main_ref_err:
+        return False, main_ref_err
+
+    branch_sha, branch_err = _blob_sha_at(working_dir, f"{branch_ref}:{target_path}")
     if branch_err:
         return False, branch_err
     if branch_sha is None:
@@ -476,13 +535,31 @@ def find_in_flight_branches(
     ``_branch_record_matches_origin_main``, evaluated PER CANDIDATE BRANCH
     (round 2 correction: NEVER as a token-wide short-circuit).
 
+    ``target_path=None`` POLICY (round 3, item 3 -- CRS 5760485688; chosen
+    over the alternative of returning undetermined per-candidate): rejected
+    at the boundary, ONCE, but ONLY when there is at least one candidate
+    branch to evaluate -- mirroring ``run_linker``'s own precedent of
+    rejecting a missing required input before it can silently degrade
+    downstream logic, rather than letting each candidate discover the gap
+    independently. Without ``target_path`` the content-match signal can
+    never run for ANY candidate, so a squash/rebase-merged branch could
+    never be ruled out -- returning a "determined" branch list built on an
+    incomplete signal set would repeat exactly the CRS/CE finding this round
+    fixes for items 1 and 2, just at the boundary instead of inside a single
+    signal. This is scoped to fire ONLY when ``candidates`` is non-empty: a
+    ZERO-candidate result is a fully MEASURED "nothing in flight" (reached
+    via ref-enumeration alone) regardless of ``target_path`` -- there is
+    nothing the missing content-match signal COULD have changed, so treating
+    that case as undetermined would be needless over-caution, not integrity.
+
     Returns ``(branch_names, error)``. FAILS CLOSED (item 1): ``error`` is
     non-None, prefixed ``IN_FLIGHT_UNDETERMINED: ``, whenever detection could
-    NOT run to completion (fetch failure, ref-enumeration failure, OR a
-    genuine git failure while comparing a branch's record to main); in that
-    case ``branch_names`` is always ``[]`` and the caller MUST NOT read that
-    empty list as "nothing in flight" -- pair it with the error, or (as
-    ``check_in_flight_token`` does) surface ``in_flight: None``.
+    NOT run to completion (fetch failure, ref-enumeration failure, a missing
+    ``target_path`` with candidates present, OR a genuine git failure while
+    checking a branch's merged status); in that case ``branch_names`` is
+    always ``[]`` and the caller MUST NOT read that empty list as "nothing
+    in flight" -- pair it with the error, or (as ``check_in_flight_token``
+    does) surface ``in_flight: None``.
     """
     fetch_err = _fetch_origin(working_dir)
     if fetch_err:
@@ -493,9 +570,20 @@ def find_in_flight_branches(
     if list_err:
         return [], list_err
 
+    if candidates and not target_path:
+        return [], (
+            f"{_IN_FLIGHT_UNDETERMINED_PREFIX}target_path is required to evaluate "
+            f"{len(candidates)} candidate branch(es) for merged status (the "
+            "content-match signal cannot run without it, so a squash/rebase-"
+            "merged branch could not be ruled out)"
+        )
+
     in_flight: list[str] = []
     for branch in candidates:
-        if _is_merged_into_origin_main(working_dir, branch):
+        merged, merge_err = _is_merged_into_origin_main(working_dir, branch)
+        if merge_err:
+            return [], merge_err
+        if merged:
             continue
 
         matches, match_err = _branch_record_matches_origin_main(working_dir, branch, target_path)
