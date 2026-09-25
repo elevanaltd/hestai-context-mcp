@@ -695,3 +695,200 @@ class TestRecordedContentIsByteBounded:
         assert isinstance(content, str)
         assert content.startswith("TYPE::RULE")
         assert len(content) < 1024 * 1024, len(content)
+
+
+# ---------------------------------------------------------------------------
+# 10. A tracked .oct.md SYMLINK is conservatively an executable spec
+#     (CE BLOCKED on PR #187, rework round 1)
+# ---------------------------------------------------------------------------
+def _symlink(repo: Path, rel: str, target: str) -> None:
+    link = repo / rel
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    os.symlink(target, link)
+
+
+_SYMLINK_TARGETS = pytest.mark.parametrize(
+    "target",
+    [
+        "../lib/real_agent.oct.md",  # resolves to a real agent spec
+        "../lib/does_not_exist.oct.md",  # dangling
+    ],
+)
+
+
+@pytest.mark.behavior
+@pytest.mark.security
+class TestOctaveSymlinkIsExecutableSpec:
+    """In CI the new side is read as a git object, so a tracked ``.oct.md``
+    symlink used to be sniffed as its link-target TEXT (no TYPE::) and fall to
+    GOVERNANCE -- losing CE and CRS. The producer must take the object mode
+    from the diff it already runs and mark the side explicitly; classification
+    then treats an ``.oct.md`` symlink as EXECUTABLE_SPEC, with no I/O.
+
+    Scope: only ``.oct.md`` paths are content-classified, so only they are
+    affected. Symlinks under any other name keep their path classification.
+    """
+
+    @staticmethod
+    def _repo(hermetic_git: Path, files: dict[str, str | bytes] | None = None) -> Path:
+        return _base_repo(
+            hermetic_git / "repo",
+            {"lib/real_agent.oct.md": _AGENT_SPEC, "README.md": "readme\n", **(files or {})},
+        )
+
+    @MODES
+    @_SYMLINK_TARGETS
+    def test_new_octave_symlink_is_executable_spec(
+        self, mode: str, target: str, hermetic_git: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(hermetic_git)
+        if mode == "ci":
+            _feature_branch(repo)
+        _symlink(repo, "specs/link.oct.md", target)
+        _git(repo, "add", "-A")
+        _enter_mode(monkeypatch, repo, mode)
+
+        files = validate_review.get_changed_files()
+        facets, roles, tier, reason = validate_review.classify_pr_facets(files)
+        assert facets == {"EXECUTABLE_SPEC"}, f"got {facets} ({reason})"
+        assert {"CE", "CRS"} <= roles, roles
+        assert tier not in {"TIER_0_EXEMPT", "TIER_1_SELF"}, tier
+
+    @MODES
+    @pytest.mark.parametrize("change", ["retarget", "regular_to_symlink"])
+    def test_modified_octave_symlink_is_executable_spec(
+        self, mode: str, change: str, hermetic_git: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A modified symlink (new target), and a regular RULE file replaced by
+        a symlink (git status T), are symlinks on the new side too."""
+        if change == "retarget":
+            repo = self._repo(hermetic_git)
+            _symlink(repo, "specs/link.oct.md", "../lib/real_agent.oct.md")
+            _commit_all(repo, "base symlink")
+        else:
+            repo = self._repo(hermetic_git, {"specs/link.oct.md": _RULE_SPEC})
+        if mode == "ci":
+            _feature_branch(repo)
+        _symlink(repo, "specs/link.oct.md", "../lib/does_not_exist.oct.md")
+        _git(repo, "add", "-A")
+        _enter_mode(monkeypatch, repo, mode)
+
+        facets, roles, tier, reason = validate_review.classify_pr_facets(
+            validate_review.get_changed_files()
+        )
+        assert facets == {"EXECUTABLE_SPEC"}, f"got {facets} ({reason})"
+        assert {"CE", "CRS"} <= roles, roles
+
+    @MODES
+    def test_renamed_away_octave_symlink_old_side_is_executable_spec(
+        self, mode: str, hermetic_git: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = self._repo(hermetic_git)
+        _symlink(repo, "specs/link.oct.md", "../lib/real_agent.oct.md")
+        _commit_all(repo, "base symlink")
+        if mode == "ci":
+            _feature_branch(repo)
+        _rename_with_edit(repo, "specs/link.oct.md", "notes.md", edit=False)
+        _enter_mode(monkeypatch, repo, mode)
+
+        files = validate_review.get_changed_files()
+        record = _records_for("notes.md", files)
+        assert record.get("previous_path") == "specs/link.oct.md", record
+        facets, roles, tier, reason = validate_review.classify_pr_facets(files)
+        assert facets == {"EXECUTABLE_SPEC"}, f"got {facets} ({reason})"
+        assert {"CE", "CRS"} <= roles, roles
+        assert tier not in {"TIER_0_EXEMPT", "TIER_1_SELF"}, tier
+
+    @MODES
+    def test_producer_marks_symlink_sides_explicitly(
+        self, mode: str, hermetic_git: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mark is its OWN state -- never text, never CONTENT_UNAVAILABLE."""
+        repo = self._repo(hermetic_git)
+        _symlink(repo, "specs/old_link.oct.md", "../lib/real_agent.oct.md")
+        _commit_all(repo, "base symlink")
+        if mode == "ci":
+            _feature_branch(repo)
+        _rename_with_edit(repo, "specs/old_link.oct.md", "notes.md", edit=False)
+        _symlink(repo, "specs/new_link.oct.md", "../lib/real_agent.oct.md")
+        _git(repo, "add", "-A")
+        _enter_mode(monkeypatch, repo, mode)
+
+        files = validate_review.get_changed_files()
+        renamed = _records_for("notes.md", files)
+        added = _records_for("specs/new_link.oct.md", files)
+        assert renamed["old_content"] is validate_review.CONTENT_SYMLINK, renamed
+        assert added["new_content"] is validate_review.CONTENT_SYMLINK, added
+        assert validate_review.CONTENT_SYMLINK is not validate_review.CONTENT_UNAVAILABLE
+
+    @MODES
+    def test_regular_rule_octave_stays_governance(
+        self, mode: str, hermetic_git: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No over-escalation: a regular (non-symlink) TYPE::RULE file is GOVERNANCE."""
+        repo = self._repo(hermetic_git)
+        if mode == "ci":
+            _feature_branch(repo)
+        _write(repo, "docs/rules/naming.oct.md", _RULE_SPEC)
+        _git(repo, "add", "-A")
+        _enter_mode(monkeypatch, repo, mode)
+
+        facets, _, _, reason = validate_review.classify_pr_facets(
+            validate_review.get_changed_files()
+        )
+        # Facet only: whether a small GOVERNANCE-only change self-reviews is
+        # #180's question, and these commits must not depend on it.
+        assert facets == {"GOVERNANCE"}, f"got {facets} ({reason})"
+
+    @MODES
+    @pytest.mark.parametrize(
+        ("link", "target", "expected"),
+        [
+            ("src/link.py", "../lib/real_agent.oct.md", {"ROUTINE_CODE"}),
+            ("docs/link.md", "../README.md", set()),
+        ],
+    )
+    def test_non_octave_symlink_keeps_path_classification(
+        self,
+        mode: str,
+        link: str,
+        target: str,
+        expected: set[str],
+        hermetic_git: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = self._repo(hermetic_git)
+        if mode == "ci":
+            _feature_branch(repo)
+        _symlink(repo, link, target)
+        _git(repo, "add", "-A")
+        _enter_mode(monkeypatch, repo, mode)
+
+        facets, _, _, reason = validate_review.classify_pr_facets(
+            validate_review.get_changed_files()
+        )
+        assert facets == expected, f"got {facets} ({reason})"
+
+    @MODES
+    def test_symlink_classification_is_pure(
+        self, mode: str, hermetic_git: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The symlink mark is decided by the producer; classifying it does no I/O."""
+        repo = self._repo(hermetic_git)
+        _symlink(repo, "specs/old_link.oct.md", "../lib/real_agent.oct.md")
+        _commit_all(repo, "base symlink")
+        if mode == "ci":
+            _feature_branch(repo)
+        _rename_with_edit(repo, "specs/old_link.oct.md", "notes.md", edit=False)
+        _symlink(repo, "specs/new_link.oct.md", "../lib/does_not_exist.oct.md")
+        _git(repo, "add", "-A")
+        _enter_mode(monkeypatch, repo, mode)
+
+        files = validate_review.get_changed_files()
+        with _tripwires() as used:
+            facets, roles, _, reason = validate_review.classify_pr_facets(files)
+        assert used == [], f"classification touched git or the filesystem: {used}"
+        assert facets == {"EXECUTABLE_SPEC"}, f"got {facets} ({reason})"
+        assert {"CE", "CRS"} <= roles, roles
