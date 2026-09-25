@@ -1015,3 +1015,172 @@ class TestBranchRecordMatchesOriginMain:
         assert matches is False
         assert error is not None
         assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+
+# ---------------------------------------------------------------------------
+# PR #179 rework round 3 (final, bounded extra round -- CRS 5760485688,
+# verified empirically by CE): find_in_flight_branches could return a
+# DETERMINED in_flight True (error None) that it had not actually measured.
+# Three inputs, scoped exactly:
+#   1. _is_merged_into_origin_main used `code == 0`; any other exit code, OR
+#      a masked _run_git timeout (which returns code 1 -- the SAME code as a
+#      genuine "not an ancestor" measurement -- but with non-empty stderr),
+#      must be IN_FLIGHT_UNDETERMINED, not silently read as "not merged".
+#   2. _blob_sha_at's `rev-parse --verify -q <ref>:<path>` exits 1 with
+#      EMPTY stderr for a MISSING REF too, indistinguishable from a missing
+#      PATH at an existing ref. A missing ref (origin/main itself, or a
+#      candidate's own remote-tracking ref) must be IN_FLIGHT_UNDETERMINED.
+#   3. target_path=None on the public find_in_flight_branches/
+#      check_in_flight_token: rejected at the boundary (see the docstring
+#      update on find_in_flight_branches for the chosen policy and why).
+# ---------------------------------------------------------------------------
+
+
+class TestIsMergedIntoOriginMain:
+    """_is_merged_into_origin_main now returns tuple[bool, str | None] (was
+    a bare bool) -- exit 0 is a measured merge, exit 1 with EMPTY stderr is
+    a measured non-merge, and everything else (including a masked
+    `_run_git` timeout, which is ALSO exit 1 but with non-empty stderr) is
+    UNDETERMINED."""
+
+    @pytest.mark.unit
+    def test_exit_0_is_measured_merged(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}._run_git", return_value=(0, "", "")):
+            merged, error = linker._is_merged_into_origin_main(tmp_path, "governance/x")
+        assert merged is True
+        assert error is None
+
+    @pytest.mark.unit
+    def test_exit_1_empty_stderr_is_measured_not_merged(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "")):
+            merged, error = linker._is_merged_into_origin_main(tmp_path, "governance/x")
+        assert merged is False
+        assert error is None
+
+    @pytest.mark.unit
+    def test_exit_128_is_undetermined(self, tmp_path: Path) -> None:
+        with patch(
+            f"{_LINKER}._run_git",
+            return_value=(128, "", "fatal: Not a valid object name"),
+        ):
+            merged, error = linker._is_merged_into_origin_main(tmp_path, "governance/x")
+        assert merged is False
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+    @pytest.mark.unit
+    def test_masked_timeout_cannot_masquerade_as_exit_1(self, tmp_path: Path) -> None:
+        """A `_run_git` timeout returns EXACTLY (1, "", "git command timed
+        out") -- the same exit code as a genuine "not an ancestor"
+        measurement, but with non-empty stderr. This must be told apart and
+        reported UNDETERMINED, not silently read as "measured: not merged"
+        (the precise CRS/CE finding)."""
+        with patch(
+            f"{_LINKER}._run_git",
+            return_value=(1, "", "git command timed out"),
+        ):
+            merged, error = linker._is_merged_into_origin_main(tmp_path, "governance/x")
+        assert merged is False
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+
+class TestFindInFlightBranchesUndeterminedPropagation:
+    """End-to-end: internal signal failures must surface as
+    find_in_flight_branches' own error, never silently become a determined
+    branch list."""
+
+    @pytest.mark.unit
+    def test_masked_ancestor_timeout_propagates_as_undetermined(
+        self, tmp_path: Path
+    ) -> None:
+        """Reproduces the CRS-described bug directly: a masked ancestor-check
+        timeout must NOT produce a determined in-flight branch list."""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[
+                (0, "", ""),  # fetch origin
+                (
+                    0,
+                    "origin/governance/20260101-ho-context-mcp-live-20260101",
+                    "",
+                ),  # for-each-ref
+                (1, "", "git command timed out"),  # merge-base --is-ancestor (masked)
+                (1, "", ""),  # buffer: pre-fix code would reach blob_sha_at(branch)
+                (1, "", ""),  # buffer: pre-fix code would reach blob_sha_at(main)
+            ],
+        ):
+            branches, error = find_in_flight_branches(
+                tmp_path, _LIVE_RECORD_ID, ".hestai/decisions/T.oct.md"
+            )
+        assert branches == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+
+class TestMissingRefIsUndetermined:
+    """_branch_record_matches_origin_main must tell a MISSING REF apart from
+    a missing PATH at an existing ref -- `_blob_sha_at` alone cannot (both
+    give empty stderr + exit 1)."""
+
+    @pytest.mark.unit
+    def test_missing_ref_is_undetermined_not_a_measured_miss(
+        self, tmp_path: Path
+    ) -> None:
+        """Every `_run_git` call (including the new ref-existence check)
+        returns the "missing" shape (exit 1, empty stderr) -- indistinguishable,
+        at the raw `rev-parse --verify -q` level, from a routine missing
+        PATH. The ref itself must be verified separately; a ref that does
+        not resolve is UNDETERMINED, not a routine case (a)/(b) miss."""
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "")):
+            matches, error = linker._branch_record_matches_origin_main(
+                tmp_path, "governance/x", ".hestai/decisions/T.oct.md"
+            )
+        assert matches is False
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+
+class TestTargetPathNoneBoundary:
+    """PR #179 round 3, item 3: target_path=None on the PUBLIC
+    find_in_flight_branches is rejected at the boundary once there is
+    anything to evaluate -- see the docstring update for the chosen policy
+    (option (i), scoped to fire only when candidates is non-empty)."""
+
+    @pytest.mark.unit
+    def test_target_path_none_with_candidates_is_undetermined(
+        self, tmp_path: Path
+    ) -> None:
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[
+                (0, "", ""),  # fetch origin
+                (
+                    0,
+                    "origin/governance/20260101-ho-context-mcp-live-20260101",
+                    "",
+                ),  # for-each-ref: one candidate exists
+            ],
+        ):
+            branches, error = find_in_flight_branches(tmp_path, _LIVE_RECORD_ID)
+        assert branches == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+    @pytest.mark.unit
+    def test_target_path_none_with_no_candidates_stays_measured_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression guard, not a RED case: ZERO candidate branches means
+        there is nothing the missing content-match signal COULD have
+        changed -- a fully measured "nothing in flight", not an error."""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[
+                (0, "", ""),  # fetch origin
+                (0, "", ""),  # for-each-ref: no matching branches
+            ],
+        ):
+            branches, error = find_in_flight_branches(tmp_path, _LIVE_RECORD_ID)
+        assert branches == []
+        assert error is None
