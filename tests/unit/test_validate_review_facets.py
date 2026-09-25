@@ -493,47 +493,54 @@ class TestRoleBasedApproval:
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestSniffOctaveType:
-    """_sniff_octave_type() must read META.TYPE from .oct.md files."""
+    """_sniff_octave_type() must read META.TYPE from .oct.md text.
 
-    def test_agent_definition_detected(self, tmp_path) -> None:
-        """File with TYPE::AGENT_DEFINITION returns 'AGENT_DEFINITION'."""
-        f = tmp_path / "test.oct.md"
-        f.write_text('===TEST===\nMETA:\n  TYPE::AGENT_DEFINITION\n  VERSION::"1.0"\n')
-        result = validate_review._sniff_octave_type(str(f))
+    Issue #161 (option C): the sniff is text-only. It never opens a file; the
+    text arrives already recorded on the change record by get_changed_files.
+    """
+
+    def test_agent_definition_detected(self) -> None:
+        """Text with TYPE::AGENT_DEFINITION returns 'AGENT_DEFINITION'."""
+        text = '===TEST===\nMETA:\n  TYPE::AGENT_DEFINITION\n  VERSION::"1.0"\n'
+        result = validate_review._sniff_octave_type(text)
         assert result == "AGENT_DEFINITION"
 
-    def test_rule_detected(self, tmp_path) -> None:
-        """File with TYPE::RULE returns 'RULE'."""
-        f = tmp_path / "test.oct.md"
-        f.write_text('===TEST===\nMETA:\n  TYPE::RULE\n  VERSION::"1.0"\n')
-        result = validate_review._sniff_octave_type(str(f))
+    def test_rule_detected(self) -> None:
+        """Text with TYPE::RULE returns 'RULE'."""
+        text = '===TEST===\nMETA:\n  TYPE::RULE\n  VERSION::"1.0"\n'
+        result = validate_review._sniff_octave_type(text)
         assert result == "RULE"
 
-    def test_skill_detected(self, tmp_path) -> None:
-        """File with TYPE::SKILL returns 'SKILL'."""
-        f = tmp_path / "test.oct.md"
-        f.write_text('===TEST===\nMETA:\n  TYPE::SKILL\n  VERSION::"1.0"\n')
-        result = validate_review._sniff_octave_type(str(f))
+    def test_skill_detected(self) -> None:
+        """Text with TYPE::SKILL returns 'SKILL'."""
+        text = '===TEST===\nMETA:\n  TYPE::SKILL\n  VERSION::"1.0"\n'
+        result = validate_review._sniff_octave_type(text)
         assert result == "SKILL"
 
-    def test_empty_file_returns_empty(self, tmp_path) -> None:
-        """Empty file returns empty string."""
-        f = tmp_path / "test.oct.md"
-        f.write_text("")
-        result = validate_review._sniff_octave_type(str(f))
+    def test_empty_file_returns_empty(self) -> None:
+        """Empty text returns empty string."""
+        result = validate_review._sniff_octave_type("")
         assert result == ""
 
-    def test_no_type_field_returns_empty(self, tmp_path) -> None:
-        """File without TYPE:: returns empty string."""
-        f = tmp_path / "test.oct.md"
-        f.write_text("===TEST===\nMETA:\n  VERSION::1.0\n")
-        result = validate_review._sniff_octave_type(str(f))
+    def test_no_type_field_returns_empty(self) -> None:
+        """Text without TYPE:: returns empty string."""
+        result = validate_review._sniff_octave_type("===TEST===\nMETA:\n  VERSION::1.0\n")
         assert result == ""
 
     def test_nonexistent_file_returns_empty(self) -> None:
-        """Nonexistent file returns empty string (fail-safe)."""
-        result = validate_review._sniff_octave_type("/nonexistent/path.oct.md")
-        assert result == ""
+        """Unreadable content is fail-safe: never sniffed, falls to GOVERNANCE.
+
+        Reading moved to the producer (get_changed_files), which records
+        CONTENT_UNAVAILABLE when a side cannot be read. The classifier treats
+        that as "no TYPE found" -- the same outcome the old unreadable-file
+        path produced -- so the .oct.md is reviewed (GOVERNANCE), not exempt.
+        """
+        assert (
+            validate_review._classify_file_facet(
+                "docs/nonexistent.oct.md", validate_review.CONTENT_UNAVAILABLE
+            )
+            == "GOVERNANCE"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -646,77 +653,72 @@ class TestTestsExemptionDoesNotSwallowOctaveSpecs:
     or skill spec placed under ``tests/`` (and ``tests/review-requirements.oct.md``,
     the top control-plane tier) classified as exempt -- zero reviewers.
 
-    ``_sniff_octave_type`` opens the path relative to the current working
-    directory, so each on-disk case writes the file under ``tmp_path`` and
-    chdirs there; the classifier sees the same repo-relative path it sees in CI.
+    Issue #161 (option C): the classifier no longer opens the path. The file's
+    text is supplied the way get_changed_files records it on the change record
+    (``content`` for a direct call, ``new_content`` on a record), so these
+    cases pass the spec text instead of writing it under a chdir'd tmp_path.
     """
 
-    @staticmethod
-    def _write(root: Path, rel: str, content: str) -> None:
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-
-    def test_agent_definition_under_tests_is_executable_spec(self, tmp_path, monkeypatch) -> None:
+    def test_agent_definition_under_tests_is_executable_spec(self) -> None:
         """tests/<name>.oct.md carrying TYPE::AGENT_DEFINITION -> EXECUTABLE_SPEC."""
         rel = "tests/malicious_agent.oct.md"
-        self._write(tmp_path, rel, _AGENT_SPEC)
-        monkeypatch.chdir(tmp_path)
-        assert validate_review._classify_file_facet(rel) == "EXECUTABLE_SPEC"
+        assert validate_review._classify_file_facet(rel, _AGENT_SPEC) == "EXECUTABLE_SPEC"
 
-    def test_skill_under_tests_is_executable_spec(self, tmp_path, monkeypatch) -> None:
+    def test_skill_under_tests_is_executable_spec(self) -> None:
         """tests/<dir>/<name>.oct.md carrying TYPE::SKILL -> EXECUTABLE_SPEC."""
         rel = "tests/fixtures/rogue_skill.oct.md"
-        self._write(tmp_path, rel, _SKILL_SPEC)
-        monkeypatch.chdir(tmp_path)
-        assert validate_review._classify_file_facet(rel) == "EXECUTABLE_SPEC"
+        assert validate_review._classify_file_facet(rel, _SKILL_SPEC) == "EXECUTABLE_SPEC"
 
-    def test_unsniffable_oct_md_under_tests_is_governance(self, tmp_path, monkeypatch) -> None:
-        """tests/<name>.oct.md absent from disk -> GOVERNANCE (reviewed), not exempt.
+    def test_unsniffable_oct_md_under_tests_is_governance(self) -> None:
+        """tests/<name>.oct.md whose content is unavailable -> GOVERNANCE (reviewed), not exempt.
 
-        The sniff reads the file; with nothing on disk it returns "" and the
-        .oct.md branch falls to GOVERNANCE. (Whether an unsniffable file
-        should be EXECUTABLE_SPEC is #157 Finding 3 -- not asserted here.)
+        With no text to sniff the .oct.md branch falls to GOVERNANCE. (Whether
+        an unsniffable file should be EXECUTABLE_SPEC is #157 Finding 3 -- not
+        asserted here.)
         """
-        monkeypatch.chdir(tmp_path)
-        assert validate_review._classify_file_facet("tests/absent_spec.oct.md") == "GOVERNANCE"
-
-    def test_review_requirements_under_tests_is_meta_control_plane(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """tests/review-requirements.oct.md -> META_CONTROL_PLANE (top tier), not exempt."""
-        monkeypatch.chdir(tmp_path)
         assert (
-            validate_review._classify_file_facet("tests/review-requirements.oct.md")
+            validate_review._classify_file_facet(
+                "tests/absent_spec.oct.md", validate_review.CONTENT_UNAVAILABLE
+            )
+            == "GOVERNANCE"
+        )
+
+    def test_review_requirements_under_tests_is_meta_control_plane(self) -> None:
+        """tests/review-requirements.oct.md -> META_CONTROL_PLANE (top tier), not exempt."""
+        assert (
+            validate_review._classify_file_facet(
+                "tests/review-requirements.oct.md", validate_review.CONTENT_UNAVAILABLE
+            )
             == "META_CONTROL_PLANE"
         )
 
-    def test_review_requirements_under_tests_keeps_meta_over_sniffed_type(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    def test_review_requirements_under_tests_keeps_meta_over_sniffed_type(self) -> None:
         """META_CONTROL_PLANE still outranks the .oct.md sniff under tests/.
 
-        Guards the relative order of the two moved blocks: even when the file
-        on disk carries TYPE::AGENT_DEFINITION, review-requirements.oct.md is
+        Guards the relative order of the two moved blocks: even when the file's
+        text carries TYPE::AGENT_DEFINITION, review-requirements.oct.md is
         META_CONTROL_PLANE.
         """
         rel = "tests/review-requirements.oct.md"
-        self._write(tmp_path, rel, _AGENT_SPEC)
-        monkeypatch.chdir(tmp_path)
-        assert validate_review._classify_file_facet(rel) == "META_CONTROL_PLANE"
+        assert validate_review._classify_file_facet(rel, _AGENT_SPEC) == "META_CONTROL_PLANE"
 
-    def test_agent_spec_only_pr_under_tests_is_not_tier0_exempt(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    def test_agent_spec_only_pr_under_tests_is_not_tier0_exempt(self) -> None:
         """Tier level: a PR whose ONLY change is a tests/ agent spec needs reviewers.
 
         Deliberately a tiny (3-line) modification so the TIER_1_SELF short-circuit
         would apply to any non-EXECUTABLE_SPEC facet: the spec must not self-clear.
         """
         rel = "tests/agents/rogue.oct.md"
-        self._write(tmp_path, rel, _AGENT_SPEC)
-        monkeypatch.chdir(tmp_path)
-        files = [{"path": rel, "added": 2, "deleted": 1, "total_changed": 3, "status": "M"}]
+        files = [
+            {
+                "path": rel,
+                "added": 2,
+                "deleted": 1,
+                "total_changed": 3,
+                "status": "M",
+                "new_content": _AGENT_SPEC,
+            }
+        ]
         facets, roles, tier, _ = validate_review.classify_pr_facets(files)
         assert tier != "TIER_0_EXEMPT", f"tests/ agent spec must not be exempt, got {tier}"
         assert roles, "tests/ agent spec PR must have a non-empty required-role set"

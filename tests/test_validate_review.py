@@ -160,9 +160,14 @@ class TestForkPRSupport:
 
         validate_review.get_changed_files()
 
-        # Verify git diff command uses base_ref
+        # Verify the comparison point is resolved from base_ref: one explicit
+        # merge base of GITHUB_BASE_REF and HEAD (issue #161 option C), and no
+        # symmetric "A...B" range that would make git resolve it again itself.
         assert len(calls) > 0
-        assert any("origin/main...HEAD" in " ".join(cmd) for cmd in calls)
+        merge_base_calls = [cmd for cmd in calls if cmd[:2] == ["git", "merge-base"]]
+        assert len(merge_base_calls) == 1, calls
+        assert "origin/main" in merge_base_calls[0], merge_base_calls
+        assert not any("..." in arg for cmd in calls for arg in cmd[1:]), calls
 
     def test_get_changed_files_uses_cached_locally(self, local_environment, monkeypatch):
         """Local mode: Uses --cached for staged files."""
