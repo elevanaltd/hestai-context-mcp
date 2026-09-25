@@ -344,24 +344,6 @@ def _classify_file_facet(path: str) -> str | None:
     if "/library/patterns/" in path and path.endswith(".md"):
         return "EXECUTABLE_SPEC"
 
-    # Exempt patterns
-    exempt_patterns = [
-        r".*(?<!\.oct)\.md$",  # Markdown exempt, but NOT .oct.md
-        r"^tests/.*$",
-        r".*\.lock$",
-    ]
-
-    # Check standard exempt patterns
-    if any(re.match(pattern, path) for pattern in exempt_patterns):
-        return None
-
-    # JSON: only generated ones are exempt
-    if path.endswith(".json"):
-        if _is_generated_json(path):
-            return None
-        # Non-generated JSON is ROUTINE_CODE
-        return "ROUTINE_CODE"
-
     # META_CONTROL_PLANE: hardcoded paths
     if path in _META_CONTROL_PLANE_PATHS:
         return "META_CONTROL_PLANE"
@@ -381,6 +363,24 @@ def _classify_file_facet(path: str) -> str | None:
             return "EXECUTABLE_SPEC"
         # All other .oct.md (RULE, STANDARD, NORTH_STAR_SUMMARY, unknown) -> GOVERNANCE
         return "GOVERNANCE"
+
+    # Exempt patterns
+    exempt_patterns = [
+        r".*(?<!\.oct)\.md$",  # Markdown exempt, but NOT .oct.md
+        r"^tests/.*$",
+        r".*\.lock$",
+    ]
+
+    # Check standard exempt patterns
+    if any(re.match(pattern, path) for pattern in exempt_patterns):
+        return None
+
+    # JSON: only generated ones are exempt
+    if path.endswith(".json"):
+        if _is_generated_json(path):
+            return None
+        # Non-generated JSON is ROUTINE_CODE
+        return "ROUTINE_CODE"
 
     # Security paths
     if any(re.search(pattern, path) for pattern in _SECURITY_PATTERNS):
