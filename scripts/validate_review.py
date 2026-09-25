@@ -760,6 +760,7 @@ def classify_pr_facets(
         and "SECURITY" not in facets
         and "META_CONTROL_PLANE" not in facets
         and "EXECUTABLE_SPEC" not in facets
+        and "GOVERNANCE" not in facets
     ):
         return (
             facets,
