@@ -1,6 +1,6 @@
 # ADR-RFC-ARCH-004 — Agent-Readable Governance Records (AGR) — Format, Lifecycle, Tool Contracts
 
-- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13). **Schema v1.1** — MINOR-additive amendment transcribing HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED): §1.2 `DECISION`/`BECAUSE` bytecode density (≤40 words, no newline), §1.5 v1.1 semantics, §4.1 #13 value-level guard, `HUMAN_ADR_REF` greppable-TOKEN form. No structural parser change; v1.0 records remain valid. **Schema v1.2** — MINOR-additive amendment transcribing HO-GOVERNANCE-AMEND-IN-PLACE-20260926 (2026-09-26, operator-ruled): §1.2 optional `REVISION` field (one line per in-place amendment; never bumps `VERSION`), §1.6 in-place-amendment reading of the `AMENDS` edge. No structural parser change; v1.0/v1.1 records remain valid.
+- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13). **Schema v1.1** — MINOR-additive amendment transcribing HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED): §1.2 `DECISION`/`BECAUSE` bytecode density (≤40 words, no newline), §1.5 v1.1 semantics, §4.1 #13 value-level guard, `HUMAN_ADR_REF` greppable-TOKEN form. No structural parser change; v1.0 records remain valid. **Schema v1.2** — MINOR-additive amendment transcribing HO-GOVERNANCE-AMEND-IN-PLACE-20260926 (2026-09-26, operator-ruled): §1.2 optional `REVISION` field (one line per in-place amendment; never bumps `VERSION`), §1.6 in-place-amendment reading of the `AMENDS` edge, §0.2 intro reworded from "immutable in PR-D scope and not re-debated" to "fixed inputs for PR-D scope; amendable later only via proper governance" (no live clause claims permanent immutability). No structural parser change; v1.0/v1.1 records remain valid.
 - **Ratified-by**: standards-reviewer + critical-implementation-validator (stamped close-out 2026-06-11), HO-orchestrated, operator-authorised
 - **Date**: 2026-05-19
 - **Scope**: `hestai-context-mcp` repository. Specifies the L1 AGR record format and consumer-side MCP tool contracts. Specification only; code implementation is deferred to a successor PR (PR-D′ / PR-H) routed via oa-router to implementation-lead.
@@ -28,7 +28,7 @@ The AGR layer composes with PR-B's defenses: AGR files inherit governance-class 
 
 ### 0.2 Immutable operator-ratified inputs
 
-The following are immutable in PR-D scope and not re-debated:
+The following are fixed inputs for PR-D scope; amendable later only via proper governance:
 
 1. **RFC #40's three-layer model**: L0 human ADRs (unchanged), L1 AGRs (this ADR), L1S Facet ABI (RFC #38 / PR-B). Operator-ratified 2026-05-13.
 2. **Substrate-not-registry binding** (ADR-0013): the AGR canonical store is plain committed files at `.hestai/decisions/`; PSS is substrate, never the registry. Any write tool is a broker that creates a PR; no tool mutates the canonical store directly.

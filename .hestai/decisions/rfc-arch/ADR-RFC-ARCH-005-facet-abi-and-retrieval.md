@@ -31,7 +31,7 @@ This ADR composes with the PR-α / PR-B / PR-D defenses already in force:
 
 ### 0.2 Immutable inputs (not re-debated)
 
-The following are immutable in PR-C scope and not re-litigated:
+The following are fixed inputs for PR-C scope; amendable later only via proper governance:
 
 1. **L3 tools MUST be pure** (no LLM at runtime; no writes; no cache mutation; no session creation). PROD::I5 + ADR-RFC-ARCH-002 §1.4.
 2. **L1 canonical** (DECISIONS, North Stars, L0 ADRs) **MUST remain UNCHANGED** by RFC #38 v1. CE amendment.

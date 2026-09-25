@@ -1,6 +1,6 @@
 # ADR-RFC-ARCH-002 — Information-Architecture Contract, CI Gate Specification, and MCP-Tool Fail-Fast Requirement
 
-- **Status**: PROPOSED (awaiting CIV + SR review)
+- **Status**: PROPOSED (awaiting CIV + SR review). **Revision 2026-09-26** — MINOR in-place amendment under HO-GOVERNANCE-AMEND-IN-PLACE-20260926 (PR #188, operator-ruled): §0.2 intro reworded from supersession-only/immutable framing to amendable-in-place-via-proper-governance, and the §7 "PE-immutable in PR-B scope" line reworded to "settled; amendable only via proper governance"; the three PE amendments themselves are unchanged.
 - **Date**: 2026-05-18
 - **Scope**: hestai-context-mcp repository; LOCAL repo-relative paths in full; cross-repo authoritative references defined here for the first time
 - **Sequence**: PR-B (this ADR)
@@ -26,7 +26,7 @@ By Principal Engineer ruling (PE amendment 3, §0.2), the MCP-tool fail-fast con
 
 ### 0.2 Principal Engineer amendments (immutable in PR-B scope)
 
-The following three amendments were ruled by the Principal Engineer prior to PR-B drafting and are immutable here. Any subsequent ADR that wishes to alter them must cite this ADR and treat the change as supersession.
+The following three amendments were ruled by the Principal Engineer prior to PR-B drafting and are fixed inputs for PR-B scope; the three amendments below are unchanged by this note. Per HO-GOVERNANCE-AMEND-IN-PLACE-20260926 (2026-09-26, operator ruling), no governance artefact is permanently immutable: these amendments are amendable in place through proper governance — a reviewed PR and human merge — rather than only via a subsequent ADR treating the change as supersession.
 
 1. **CI gate scoped to LOCAL repo-relative paths only.** The gate **must not** flag URIs, opaque tokens, content-addressed identifiers, or cross-repo references. False positives on these classes were ruled an unacceptable regression. The cross-repo reference rules live in §1.4 (IA Contract), enforced at the tool boundary (§3) and by human review, not by the CI gate.
 2. **IA Contract must include explicit query-routing rules.** The contract must say, in normative form, when a query routes to RFC #38 (`lookup_concept`, stable/structural) versus RFC #40 (`lookup_decision`, temporal/historic). The stable-vs-temporal boundary must be explicit. See §1.5.
@@ -373,7 +373,7 @@ PR-B does **not** define, decide, or constrain:
 - **UI, dispatch, payload compiler design.** Workbench lane. Workbench is a consumer of this contract via `get_context` (PROD::I5) at KVAEPH Position 3; it is not a co-author of the contract.
 - **Deliberation records or debate-hall artefact format.** DebateHall lane.
 - **OCTAVE grammar additions or changes.** octave-mcp lane. This ADR uses OCTAVE atoms by reference (`META.TYPE`, etc.); it does not extend the grammar.
-- **Umbrella-vs-peers architecture revisitation.** Settled by debate-hall on 2026-05-16; PE-immutable in PR-B scope.
+- **Umbrella-vs-peers architecture revisitation.** Settled by debate-hall on 2026-05-16; settled; amendable only via proper governance (HO-GOVERNANCE-AMEND-IN-PLACE-20260926).
 - **Mac B#1 raw ledger promotion.** Deferred to PR-E per Principal Engineer ruling (carry-forward §"Why this exists").
 - **Cross-repo IA contracts in other repositories.** Reciprocity is advisory per §1.4.3.
 
