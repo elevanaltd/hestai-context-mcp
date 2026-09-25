@@ -1159,11 +1159,22 @@ class TestRenameAwareBaseDeclaration:
         import subprocess as sp
         from unittest.mock import MagicMock
 
+        # The same status lines in `git diff --raw` form (regular-file modes,
+        # placeholder blob ids), so the fixture feeds whichever of the two
+        # status formats get_changed_files asks for (issue #161 symlink rework).
+        raw_output = "".join(
+            f":100644 100644 1111111 2222222 {line}\n"
+            for line in name_status_output.splitlines()
+            if line
+        )
+
         def mock_run(cmd, **kwargs):
             if "--numstat" in cmd:
                 return MagicMock(returncode=0, stdout=numstat_output)
             if "--name-status" in cmd:
                 return MagicMock(returncode=0, stdout=name_status_output)
+            if "--raw" in cmd:
+                return MagicMock(returncode=0, stdout=raw_output)
             return MagicMock(returncode=0, stdout="")
 
         monkeypatch.setattr(sp, "run", mock_run)
