@@ -64,7 +64,7 @@ Classification is mandatory. Unknown state is treated as `LOCAL_MUTABLE` until e
 3. **Per-writer, append-only.** Each writer (a lane, machine or cloud session) writes only its own files, so carrier merges cannot conflict. A file that several writers rewrite, such as a shared work queue, is not itself eligible. It becomes a `DERIVED_PROJECTION` rebuilt locally from per-writer entries, consistent with R9 (append-first, compact-later, no Last-Write-Wins).
 4. **Cloud sessions write only to their own inbox.** A local role-bound agent promotes inbox content into shared state.
 5. **Never-shared data class.** Client data, personal data and financial data are never shared through any carrier. They must be kept out of Coordination Documents. A document that contains them is not eligible and stays local. Such data is not redacted for publication.
-6. **Publication screen.** Before any Coordination Document reaches any carrier or other published space, it passes a screen with two layers, and a hit in either layer blocks publication:
+6. **Publication screen.** Before any Coordination Document reaches any carrier, it passes a screen with two layers, and a hit in either layer blocks publication:
    - a deterministic pattern pre-screen (for example email addresses, phone numbers, currency amounts and key-shaped secrets);
    - a single cheap-model agent pass over the provider-agnostic AIClient port (PROD I3), judging whether the document contains never-shared data.
 
