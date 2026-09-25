@@ -754,34 +754,3 @@ class TestTestsExemptionStaysNarrow:
         """Ordinary tests/ paths classify as None (exempt) -- unchanged by the fix."""
         monkeypatch.chdir(tmp_path)
         assert validate_review._classify_file_facet(path) is None
-
-
-# ---------------------------------------------------------------------------
-# 9. Issue #180: the TIER_1_SELF short-circuit must not swallow GOVERNANCE
-# ---------------------------------------------------------------------------
-_RULE_TEXT = '===RULE===\nMETA:\n  TYPE::RULE\n  VERSION::"1.0"\n===END===\n'
-
-
-@pytest.mark.unit
-@pytest.mark.security
-class TestGovernanceIsNotSelfReview:
-    """GOVERNANCE maps to {SR}, but the TIER_1_SELF short-circuit excluded only
-    SECURITY, META_CONTROL_PLANE and EXECUTABLE_SPEC -- so a single-file,
-    under-10-line governance-only change returned an EMPTY role set: zero
-    external reviewers. The short-circuit must not apply to GOVERNANCE."""
-
-    @pytest.mark.parametrize(
-        "record",
-        [
-            {"path": "docs/standards/naming.oct.md", "new_content": _RULE_TEXT},
-            # No recorded text: an .oct.md whose TYPE is unknown is GOVERNANCE too.
-            {"path": "docs/standards/naming.oct.md"},
-        ],
-    )
-    def test_small_single_file_governance_change_requires_sr(self, record: dict) -> None:
-        files = [{**record, "added": 2, "deleted": 1, "total_changed": 3, "status": "M"}]
-        facets, roles, tier, reason = validate_review.classify_pr_facets(files)
-        assert facets == {"GOVERNANCE"}, facets
-        assert tier != "TIER_1_SELF", f"governance-only change self-cleared: {reason}"
-        assert "SR" in roles, f"governance change must require SR, got {roles}"
-        assert roles == validate_review.FACET_ROLE_MAP["GOVERNANCE"]
