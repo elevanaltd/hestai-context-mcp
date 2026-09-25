@@ -9,7 +9,9 @@ ACCEPTED
 - **Type**: ADR
 - **Author**: requirements-steward (codex, via control-room session)
 - **Created**: 2026-04-25
-- **Updated**: 2026-04-26
+- **Version**: 1.1
+- **Revision**: 1.0→1.1 2026-09-26: R1 gains the `COORDINATION_DOCUMENT` class (ruling `HO-ADR-0013-COORDINATION-DOCUMENT-CLASS-20260926`)
+- **Updated**: 2026-09-26
 - **Ratified**: 2026-04-26 (human authority via control-room session)
 - **Phase**: D2 design
 - **GitHub Issue**: [#13](https://github.com/elevanaltd/hestai-context-mcp/issues/13)
@@ -34,6 +36,7 @@ Vocabulary adopted by this ADR:
 
 - **Local State**: the raw `.hestai/state/` folder and local-only mutable files.
 - **Portable Memory Artifact**: a redacted, versioned, cloud-safe artifact eligible for optional carriers.
+- **Coordination Document**: an allowlisted, text-only, per-writer coordination file (for example a work-queue entry, queued brief or lane report) that meets the R1 `COORDINATION_DOCUMENT` rules and is eligible for optional carriers.
 - **Context Projection**: a rebuilt read model produced from Local State plus Portable Memory Artifacts.
 - **StorageAdapter**: the storage interface PSS uses for LocalFilesystem and future optional carriers.
 - **Publish Portable State**: redaction-gated publication of Portable Memory Artifacts.
@@ -41,7 +44,7 @@ Vocabulary adopted by this ADR:
 
 ## Decision
 
-We decide on PSS as the design contract: LocalFilesystem remains the default StorageAdapter, remote-capable carriers are optional, and `.hestai/state/` itself never goes to cloud. Only Portable Memory Artifacts can cross carrier boundaries, and redaction provenance is the publication gate. This preserves PROD I1, PROD I2, PROD I3, PROD I5, PROD I6, and immutable stdio JSON-RPC transport.
+We decide on PSS as the design contract: LocalFilesystem remains the default StorageAdapter, remote-capable carriers are optional, and `.hestai/state/` itself never goes to cloud. Only Portable Memory Artifacts and Coordination Documents can cross carrier boundaries. Redaction provenance is the publication gate for Portable Memory Artifacts, and the R1 publication screen is the gate for Coordination Documents. This preserves PROD I1, PROD I2, PROD I3, PROD I5, PROD I6, and immutable stdio JSON-RPC transport.
 
 ### R1: State classification
 
@@ -50,8 +53,22 @@ We decide on PSS as the design contract: LocalFilesystem remains the default Sto
 | `LOCAL_MUTABLE` | Never synced as a folder or raw file set | `.hestai/state/sessions/active/{session_id}/session.json`, `.hestai/state/sessions/archive/*-redacted.jsonl`, `.hestai/state/learnings-index.jsonl`, `.hestai/state/sessions/control-room-ledger.oct.md`, `.hestai/state/context/state/*` | Keeps raw working state local, preserving PROD I2 and PROD I6. |
 | `PORTABLE_MEMORY` | Eligible for optional carriers only after redaction and provenance validation | `.hestai/state/portable/outbox/{artifact_id}.json`, abstract carrier path `pss/{carrier_namespace}/{project_id}/{workspace_id}/{user_id}/artifacts/{artifact_id}`, redacted session summaries, extracted decisions, extracted blockers, checklist deltas, tombstones | Shares memory without syncing raw state, preserving PROD I2 and provider-neutral context semantics under PROD I3. |
 | `DERIVED_PROJECTION` | Never synced; rebuilt on hydrate or local reads | `.hestai/state/portable/snapshots/{session_id}/context-projection.json`, materialized `.hestai/state/context/PROJECT-CONTEXT.oct.md` when derived from portable memory, fast-layer read models | Makes `get_context` a pure local read and protects PROD I5. |
+| `COORDINATION_DOCUMENT` | Eligible for optional carriers only when every rule below holds; never eligible by default | Per-writer work-queue entries, queued briefs, lane reports, cloud-session inbox files — only paths named on an explicit allowlist | Shares coordination across machines and cloud sessions without raw sync, preserving PROD I2 through a never-shared data class and a fail-closed screen. |
 
 Classification is mandatory. Unknown state is treated as `LOCAL_MUTABLE` until explicitly classified. That fail-closed default protects PROD I2.
+
+`COORDINATION_DOCUMENT` rules:
+
+1. **Explicit allowlist.** Only paths named on the allowlist are eligible. Every other path stays `LOCAL_MUTABLE`. Excluding paths from a synced folder is not an admissible substitute. Class S raw sync stays rejected.
+2. **Text only.** `.md`, `.oct.md`, `.json` and `.jsonl` files only. Binaries, design assets, CSV/SQL/PDF exports and backups are never eligible.
+3. **Per-writer, append-only.** Each writer (a lane, machine or cloud session) writes only its own files, so carrier merges cannot conflict. A file that several writers rewrite, such as a shared work queue, is not itself eligible. It becomes a `DERIVED_PROJECTION` rebuilt locally from per-writer entries, consistent with R9 (append-first, compact-later, no Last-Write-Wins).
+4. **Cloud sessions write only to their own inbox.** A local role-bound agent promotes inbox content into shared state.
+5. **Never-shared data class.** Client data, personal data and financial data are never shared through any carrier. They must be kept out of Coordination Documents. A document that contains them is not eligible and stays local. Such data is not redacted for publication.
+6. **Publication screen.** Before any Coordination Document reaches any carrier or other published space, it passes a screen with two layers, and a hit in either layer blocks publication:
+   - a deterministic pattern pre-screen (for example email addresses, phone numbers, currency amounts and key-shaped secrets);
+   - a single cheap-model agent pass over the provider-agnostic AIClient port (PROD I3), judging whether the document contains never-shared data.
+
+   A blocked document stays local and is reported, not rewritten. If the screen is unavailable, publication does not happen, so the screen fails closed. Local operation is unaffected (PROD I6).
 
 ### R2: StorageAdapter protocol contract and carrier capability matrix
 
@@ -133,6 +150,8 @@ Redaction is the publication gate. A `redaction_success` boolean is insufficient
 
 `write_redacted_artifact()` must fail closed without complete provenance metadata. This prevents stale redactor output from being treated as safe after rules change. It directly enforces PROD I2.
 
+Coordination Documents are not redacted. They either pass the R1 publication screen unchanged or they are not published. A published Coordination Document still carries screen provenance: screen version, pattern-set hash, agent model, input hash and timestamp.
+
 ### R7: Publish acknowledgement, durable queue, and unpublished status
 
 `clock_out` has two separable outcomes: local lifecycle archive and portable publication. If local archive succeeds but remote publish fails, `clock_out` must report local archive success and portable publish failure or queued status. It must also expose `unpublished_memory_exists: true` until the durable outbound queue is empty.
@@ -186,6 +205,7 @@ The following are explicitly out of scope for this ADR:
 - RemoteHTTP wire format or schema
 - first-run UX state taxonomy
 - specific adapter implementations beyond LocalFilesystem
+- the contents of the `COORDINATION_DOCUMENT` allowlist and the implementation of the publication screen
 
 These require future ADRs. This ADR defines the PSS architecture boundary, classification, lifecycle, provenance, concurrency, and invariants only.
 
