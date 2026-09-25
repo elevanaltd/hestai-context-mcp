@@ -647,7 +647,12 @@ class TestIdenticalBytesClassifyTheSameOnEitherSide:
             validate_review.get_changed_files()
         )
 
-        assert new_facets, new_reason
+        # Pin the expected facet on EACH side first: equality alone would also
+        # pass if both sides regressed together (e.g. both to GOVERNANCE).
+        # With one line rule (universal newlines) these separators do not
+        # split lines, so TYPE::AGENT_DEFINITION sits on line 1.
+        assert new_facets == {"EXECUTABLE_SPEC"}, new_reason
+        assert old_facets == {"EXECUTABLE_SPEC"}, old_reason
         assert old_facets == new_facets, (
             f"identical bytes classified differently: old side {old_facets} ({old_reason}) "
             f"vs new side {new_facets} ({new_reason})"
@@ -662,6 +667,16 @@ class TestRecordedContentIsByteBounded:
     """A single enormous line must not be read whole on either side."""
 
     _HUGE = b"TYPE::RULE " + b"x" * (2 * 1024 * 1024)
+
+    @staticmethod
+    def _assert_bounded(content: str) -> None:
+        limit = validate_review._CONTENT_READ_LIMIT_BYTES
+        # The documented contract (issue #185 item 2): changing the bound is a
+        # reviewed decision, not a silent drift.
+        assert limit == 64 * 1024, limit
+        # Every decoded character consumed at least one byte, so this bounds
+        # the bytes read too.
+        assert len(content) <= limit, (len(content), limit)
 
     @MODES
     def test_new_side_read_is_bounded(
@@ -678,7 +693,7 @@ class TestRecordedContentIsByteBounded:
         content = record["new_content"]
         assert isinstance(content, str)
         assert content.startswith("TYPE::RULE")
-        assert len(content) < 1024 * 1024, len(content)
+        self._assert_bounded(content)
 
     @MODES
     def test_old_side_read_is_bounded(
@@ -694,7 +709,7 @@ class TestRecordedContentIsByteBounded:
         content = record["old_content"]
         assert isinstance(content, str)
         assert content.startswith("TYPE::RULE")
-        assert len(content) < 1024 * 1024, len(content)
+        self._assert_bounded(content)
 
 
 # ---------------------------------------------------------------------------
