@@ -272,18 +272,48 @@ _SECURITY_BASENAMES_CASEFOLDED: frozenset[str] = frozenset(
 # macOS, can produce for the same on-disk directory) evaded the guard
 # entirely.
 #
-# Fixed by matching both markers on an EXACT, casefolded PATH SEGMENT
-# (split on "/"), anywhere in the path -- one semantics for both markers,
-# consistent with the casefolded basename set above.
-_VENDOR_PATH_SEGMENTS_CASEFOLDED = frozenset({"vendor", "node_modules"})
+# Round 6 fixed this by matching both markers on an EXACT, casefolded PATH
+# SEGMENT (split on "/"), anywhere in the path -- one semantics for both
+# markers.
+#
+# ISSUE #163 "SHAPE B" (closes #167) -- the ROUND 6 "one semantics" goal is
+# DELIBERATELY reversed for `vendor`. What still holds from ROUND 6, for
+# BOTH markers: exact path-segment matching (never a substring, so
+# `my_vendor/` and `my_node_modules/` are NOT vendored) and casefolding
+# (`Vendor/`, `Node_Modules/`). What changes: `vendor` now counts ONLY as
+# the FIRST segment; `node_modules` still counts at ANY depth.
+#
+# Why the asymmetry is intended, not the inconsistency ROUND 6 removed: a
+# directory NAME is not proof of third-party provenance, and this guard
+# fails OPEN -- it switches OFF the security-basename check. Matching
+# `vendor` at any depth meant a first-party `app/vendor/.drift-exceptions`
+# silently dropped from SECURITY to ROUTINE_CODE (#163), and composed with
+# the ^tests/ exemption, `tests/vendor/.pgtap-quarantine` classified None
+# -> TIER_0_EXEMPT, zero reviewers (#167). The two markers are different
+# in kind: `node_modules` is a package-manager install tree that appears at
+# any depth in monorepos (`packages/web/node_modules/...`), so root-only
+# matching for it would reopen the spurious SECURITY demands this guard was
+# added to stop; a genuinely vendored `vendor/` tree (Go modules, PHP
+# composer) conventionally sits at the repo root.
+#
+# What shape B does NOT close: a first-party security ledger under a ROOT
+# `vendor/` directory (e.g. `vendor/.pgtap-quarantine`) is still treated as
+# vendored and still loses SECURITY. #163 stays open for that; its
+# provenance-based options (not the directory name) are the real fix and
+# are parked.
+_ROOT_ONLY_VENDOR_SEGMENT_CASEFOLDED = "vendor"
+_ANY_DEPTH_VENDOR_SEGMENT_CASEFOLDED = "node_modules"
 
 
 def _is_vendored_path(path: str) -> bool:
-    """Return True if any path segment is exactly 'vendor' or
-    'node_modules' (casefolded), anywhere in the path -- not a substring
-    or root-only prefix match."""
-    return any(
-        segment.casefold() in _VENDOR_PATH_SEGMENTS_CASEFOLDED for segment in path.split("/")
+    """Return True if the FIRST path segment is exactly 'vendor', or ANY
+    path segment is exactly 'node_modules' (both casefolded, exact segment
+    match -- never a substring). A nested first-party 'vendor/' directory
+    is NOT vendored (issue #163 shape B, #167)."""
+    segments = [segment.casefold() for segment in path.split("/")]
+    return (
+        segments[0] == _ROOT_ONLY_VENDOR_SEGMENT_CASEFOLDED
+        or _ANY_DEPTH_VENDOR_SEGMENT_CASEFOLDED in segments
     )
 
 

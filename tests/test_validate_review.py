@@ -3021,10 +3021,10 @@ class TestSecurityBasenameSkipsVendoredPaths:
     altogether -- the failure mode this whole thread exists to prevent.
 
     Fix, minimally, MIP-consistent with the basenames themselves: skip the
-    basename check when `vendor` or `node_modules` appears as an exact,
-    casefolded path segment anywhere in the path (see `_is_vendored_path`,
-    segment-anchored per the round-6 fix) -- two entries, no configurable
-    list. The check's FIRST position ahead of the ^tests/ exemption is
+    basename check when the path is vendored -- the FIRST segment is
+    exactly `vendor`, or ANY segment is exactly `node_modules` (casefolded,
+    segment-anchored; see `_is_vendored_path` and issue #163 shape B) --
+    two markers, no configurable list. The check's FIRST position ahead of the ^tests/ exemption is
     unchanged and remains load-bearing (round 3 mutation-tested); this
     only narrows WHEN the first-position check fires, not WHERE it sits."""
 
@@ -3078,6 +3078,12 @@ class TestVendorGuardSegmentAnchoringAndCasefold:
     Fix: match both markers by PATH SEGMENT (an exact, casefolded segment
     equal to "vendor" or "node_modules" anywhere in the path), not by
     substring or by root-only prefix. One semantics for both markers.
+
+    SUPERSEDED IN PART by issue #163 shape B (see
+    TestVendorGuardRootAnchoredVendorShapeB): exact-segment and casefold
+    matching still hold for both markers, but 'vendor' now counts only as
+    the FIRST segment. The "one semantics for both markers" goal is
+    deliberately dropped for the reasons given there.
     """
 
     def test_directory_name_merely_containing_node_modules_substring_is_not_vendored(
@@ -3092,14 +3098,23 @@ class TestVendorGuardSegmentAnchoringAndCasefold:
             == "SECURITY"
         )
 
-    def test_nested_vendor_directory_is_treated_as_vendored_consistently(self):
-        """Consistency: 'app/vendor/.pgtap-quarantine' must be treated as
-        vendored the same way a nested node_modules/ path already is --
-        one segment-anywhere semantics for both markers, not root-only
-        for 'vendor/' and anywhere for 'node_modules/'."""
-        assert (
-            validate_review._classify_file_facet("app/vendor/.pgtap-quarantine") == "ROUTINE_CODE"
-        )
+    def test_nested_vendor_directory_is_not_vendored_and_ledger_classifies_security(self):
+        """INVERTED (issue #163 shape B, closes #167). This test previously
+        asserted the ROUND 6 contract -- 'app/vendor/.pgtap-quarantine' is
+        vendored -> ROUTINE_CODE, "one segment-anywhere semantics for both
+        markers". That expectation is DELIBERATELY reversed here, not
+        deleted, so the history stays visible.
+
+        Why: a directory NAMED 'vendor' below the repo root is not proof
+        of third-party provenance. The any-depth 'vendor' match is the
+        #163 fail-open: a first-party app/vendor/ or tests/vendor/ tree
+        silently lost the SECURITY basename check, and composed with the
+        ^tests/ exemption tests/vendor/<ledger> dropped to TIER_0_EXEMPT
+        with zero reviewers (#167). 'node_modules' stays any-depth because
+        it is a package-manager artefact at any depth in monorepos; only
+        'vendor' is root-anchored. The asymmetry ROUND 6 called
+        "inconsistent" is now intentional."""
+        assert validate_review._classify_file_facet("app/vendor/.pgtap-quarantine") == "SECURITY"
 
     def test_capitalized_vendor_segment_is_casefolded(self):
         """'Vendor/.pgtap-quarantine' must be treated as vendored --
@@ -3140,6 +3155,133 @@ class TestVendorGuardSegmentAnchoringAndCasefold:
             == "SECURITY"
         )
         assert validate_review._classify_file_facet("vendors/.pgtap-quarantine") == "SECURITY"
+
+
+# Real ledger names drawn from the classifier's own set -- never invented.
+_LEDGER_BASENAMES = sorted(validate_review._SECURITY_BASENAMES)
+
+
+@pytest.mark.security
+class TestVendorGuardRootAnchoredVendorShapeB:
+    """Issue #163 "shape B" -- closes #167, refs #163 (partial).
+
+    Contract: a path is vendored iff its FIRST segment casefolds to
+    'vendor' OR ANY segment casefolds to 'node_modules'. Exact-segment
+    matching and casefolding (the still-valid ROUND 6 lessons) hold for
+    both markers.
+
+    This deliberately reintroduces the root-only-'vendor' vs
+    any-depth-'node_modules' asymmetry that ROUND 6 removed. A directory
+    NAME is not proof of third-party provenance: the any-depth 'vendor'
+    match let a first-party app/vendor/ or tests/vendor/ security ledger
+    lose SECURITY, and composed with the ^tests/ exemption,
+    tests/vendor/<ledger> became TIER_0_EXEMPT with zero reviewers
+    (#167). 'node_modules' differs in kind -- a package-manager artefact
+    at any depth in monorepos -- so it stays any-depth.
+
+    NOT closed by shape B: a first-party ledger under a ROOT vendor/
+    still loses SECURITY (#163 stays open for provenance-based options).
+    """
+
+    # --- RED: fail on the pre-#163 validator, pass under shape B ---------
+
+    @pytest.mark.parametrize("basename", _LEDGER_BASENAMES)
+    def test_tests_vendor_ledger_classifies_security(self, basename: str):
+        """#167: tests/vendor/<ledger> previously classified None
+        (exempt) because the vendor guard skipped the basename check and
+        ^tests/ then swallowed the path."""
+        assert validate_review._classify_file_facet(f"tests/vendor/{basename}") == "SECURITY"
+
+    @pytest.mark.parametrize("basename", _LEDGER_BASENAMES)
+    def test_tests_vendor_ledger_only_pr_is_not_tier_0_exempt(self, basename: str):
+        """#167 at TIER level: a PR whose ONLY change is tests/vendor/<ledger>
+        must not be TIER_0_EXEMPT (zero reviewers). Driven through
+        classify_pr_facets, not just the per-file classifier."""
+        files = [
+            {
+                "path": f"tests/vendor/{basename}",
+                "total_changed": 50,
+                "added": 50,
+                "deleted": 0,
+                "status": "M",
+            }
+        ]
+        facets, required_roles, tier_label, _reason = validate_review.classify_pr_facets(files)
+        assert tier_label != "TIER_0_EXEMPT"
+        assert "SECURITY" in facets
+        assert required_roles
+
+    @pytest.mark.parametrize("prefix", ["app/vendor/", "App/Vendor/", "src/vendor/quarantine/"])
+    @pytest.mark.parametrize("basename", _LEDGER_BASENAMES)
+    def test_nested_first_party_vendor_ledger_classifies_security(self, prefix: str, basename: str):
+        """#163: a first-party ledger under a NESTED vendor/ directory
+        (any casing) previously downgraded to ROUTINE_CODE."""
+        assert validate_review._classify_file_facet(f"{prefix}{basename}") == "SECURITY"
+
+    # --- GUARDS: green before AND after shape B ---------------------------
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "vendor/",
+            "Vendor/",
+            "vendor/some-dep/",
+            "node_modules/pkg/",
+            "Node_Modules/pkg/",
+            "vendor/node_modules/",
+            "app/node_modules/pkg/",
+            "packages/web/node_modules/x/",
+        ],
+    )
+    @pytest.mark.parametrize("basename", _LEDGER_BASENAMES)
+    def test_genuinely_vendored_ledger_stays_suppressed(self, prefix: str, basename: str):
+        """GUARD (green before and after): root vendor/ (any casing) and
+        node_modules at ANY depth stay vendored, so a same-named file in a
+        third-party tree does not demand a spurious SECURITY wave. Nested
+        node_modules is why shape B keeps node_modules any-depth rather
+        than root-only for both markers."""
+        assert validate_review._classify_file_facet(f"{prefix}{basename}") == "ROUTINE_CODE"
+
+    def test_ordinary_code_inside_nested_vendor_stays_routine(self):
+        """GUARD (green before and after): only the basename check is
+        gated by the vendor guard, so ordinary code under a nested vendor/
+        directory is unaffected by shape B."""
+        assert validate_review._classify_file_facet("app/vendor/lib.py") == "ROUTINE_CODE"
+
+    @pytest.mark.parametrize("prefix", ["my_vendor/", "my_node_modules/", "src/my_vendor/"])
+    @pytest.mark.parametrize("basename", _LEDGER_BASENAMES)
+    def test_directory_merely_containing_marker_word_is_not_vendored(
+        self, prefix: str, basename: str
+    ):
+        """GUARD (green before and after): the ROUND 6 substring
+        regression must stay dead -- a directory whose name merely
+        CONTAINS 'vendor' or 'node_modules' is not vendored."""
+        assert validate_review._classify_file_facet(f"{prefix}{basename}") == "SECURITY"
+
+    def test_is_vendored_path_contract_table(self):
+        """Direct contract table for _is_vendored_path under shape B."""
+        vendored = [
+            "vendor/x",
+            "Vendor/x",
+            "VENDOR/a/b",
+            "node_modules/x",
+            "a/node_modules/x",
+            "a/b/Node_Modules/x",
+            "vendor/node_modules/x",
+        ]
+        not_vendored = [
+            "app/vendor/x",
+            "tests/vendor/x",
+            "App/Vendor/x",
+            "my_vendor/x",
+            "vendors/x",
+            "my_node_modules/x",
+            "src/x.py",
+        ]
+        for p in vendored:
+            assert validate_review._is_vendored_path(p) is True, p
+        for p in not_vendored:
+            assert validate_review._is_vendored_path(p) is False, p
 
 
 # ---------------------------------------------------------------------------
