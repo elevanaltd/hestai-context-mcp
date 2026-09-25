@@ -1090,9 +1090,7 @@ class TestLsTreeBlob:
     @pytest.mark.unit
     def test_exit_0_empty_stdout_is_measured_no_record(self, tmp_path: Path) -> None:
         with patch(f"{_LINKER}._run_git", return_value=(0, "", "")):
-            blob_oid, error = linker._ls_tree_blob(
-                tmp_path, "a" * 40, ".hestai/decisions/T.oct.md"
-            )
+            blob_oid, error = linker._ls_tree_blob(tmp_path, "a" * 40, ".hestai/decisions/T.oct.md")
         assert blob_oid is None
         assert error is None
 
@@ -1101,9 +1099,7 @@ class TestLsTreeBlob:
         oid = "4" * 40
         line = f"100644 blob {oid}\t.hestai/decisions/T.oct.md"
         with patch(f"{_LINKER}._run_git", return_value=(0, line, "")):
-            blob_oid, error = linker._ls_tree_blob(
-                tmp_path, "a" * 40, ".hestai/decisions/T.oct.md"
-            )
+            blob_oid, error = linker._ls_tree_blob(tmp_path, "a" * 40, ".hestai/decisions/T.oct.md")
         assert blob_oid == oid
         assert error is None
 
@@ -1116,9 +1112,7 @@ class TestLsTreeBlob:
             f"{_LINKER}._run_git",
             return_value=(128, "", "fatal: not a tree object"),
         ):
-            blob_oid, error = linker._ls_tree_blob(
-                tmp_path, "a" * 40, ".hestai/decisions/T.oct.md"
-            )
+            blob_oid, error = linker._ls_tree_blob(tmp_path, "a" * 40, ".hestai/decisions/T.oct.md")
         assert blob_oid is None
         assert error is not None
         assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
@@ -1230,9 +1224,7 @@ class TestTargetPathNoneBoundary:
         assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
 
     @pytest.mark.unit
-    def test_target_path_none_with_no_candidates_stays_measured_empty(
-        self, tmp_path: Path
-    ) -> None:
+    def test_target_path_none_with_no_candidates_stays_measured_empty(self, tmp_path: Path) -> None:
         """Regression guard, not a RED case: ZERO candidate branches means
         there is nothing the missing content-match signal COULD have
         changed -- a fully measured "nothing in flight", not an error."""

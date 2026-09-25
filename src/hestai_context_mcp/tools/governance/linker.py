@@ -206,8 +206,8 @@ def _push_branch(working_dir: Path, branch_name: str) -> str | None:
 
 # ---------------------------------------------------------------------------
 # In-flight TOKEN detection (issue #173 slice 1; operator ruling 2026-09-21,
-# HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921; rework round 1 per CRS/CE/
-# TMG/cubic review of PR #179)
+# HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921; OID round -- the FINAL
+# shape after three prior rework rounds)
 #
 # "In flight" = a governance branch for the TOKEN's slug that exists on
 # origin, ANY date prefix, and is NOT merged into origin/main -- OR an open PR
@@ -215,97 +215,120 @@ def _push_branch(working_dir: Path, branch_name: str) -> str | None:
 #
 # ASSUMPTION -- "open PR" coverage without an independent GitHub query: the
 # unmerged-origin-branch test is treated as covering "open PR" too, WITHOUT a
-# per-submission GitHub API query for open PRs (that would be built, not
-# documented, per the rework brief -- explicitly deferred). This holds
-# because governance PRs are SAME-REPO by construction: ``_push_branch``
-# always pushes to ``origin`` and ``_open_pr`` runs ``gh pr create`` from
-# inside that same pushed worktree, so a governance PR's head branch is NEVER
-# a fork ref -- it is always ``origin/governance/<date>-<slug>``. A GitHub PR
-# requires its head branch to exist; deleting that branch auto-closes the PR.
-# So "an unmerged origin/governance/*-<slug> branch exists" and "an open PR
-# for this token exists" are the same fact observed from two angles, FOR THIS
-# REPO'S governance flow specifically. If this assumption is ever found
-# false (e.g. a future slice opens governance PRs from forks, or a branch is
-# deleted without closing/merging its PR through some out-of-band path), STOP
-# and escalate rather than silently trusting the ref test -- do not paper
-# over it with a per-submission network call.
+# per-submission GitHub API query for open PRs. This holds because governance
+# PRs are SAME-REPO by construction: ``_push_branch`` always pushes to
+# ``origin`` and ``_open_pr`` runs ``gh pr create`` from inside that same
+# pushed worktree, so a governance PR's head branch is NEVER a fork ref -- it
+# is always ``origin/governance/<date>-<slug>``. A GitHub PR requires its head
+# branch to exist; deleting that branch auto-closes the PR. So "an unmerged
+# origin/governance/*-<slug> branch exists" and "an open PR for this token
+# exists" are the same fact observed from two angles, FOR THIS REPO'S
+# governance flow specifically. If this assumption is ever found false, STOP
+# and escalate rather than silently trusting the ref test.
 #
-# MERGED classification (two independent, PER-CANDIDATE-BRANCH, git-only
-# signals; item 5 of round 1, CORRECTED in round 2 -- see the note below): a
-# MERGED-but-undeleted origin branch is excluded from in-flight status even
-# though the ref still exists (origin keeps merged governance branches;
-# issue #173 diagnosis point 4). A branch is "merged" iff EITHER of:
-#   (1) ``merge-base --is-ancestor`` -- correct for merge-commit (--no-ff)
-#       merges, but CANNOT see a squash or rebase merge (the head branch is
-#       never an ancestor of main under those strategies); OR
-#   (2) THAT BRANCH's OWN copy of the record at the token's target_path is
-#       byte-identical to origin/main's copy -- a git BLOB-HASH comparison
-#       (``git rev-parse --verify -q <ref>:<path>``): two blobs share a SHA
-#       iff their content is identical, so this is strategy-independent --
-#       the record's CONTENT is what actually lands on main regardless of
-#       how the merge happened. No extra network call: reads the
-#       already-fetched local remote-tracking refs.
-# A branch is excluded if EITHER signal, evaluated for THAT branch, says
-# merged.
+# THE OID SHAPE (this round's fix -- CRS/CE/TMG/cubic across three prior
+# rounds each found a NEW INSTANCE OF ONE CAUSE: the code verified a ref, then
+# RE-READ IT BY NAME in a second git process, and treated a silent exit 1 (or
+# stderr presence/absence) as a measurement -- a ref pruned between reads, a
+# killed process with empty stderr, and ``_run_git`` mapping a timeout/OSError
+# to exit code 1 (indistinguishable from ``merge-base``'s "not an ancestor")
+# were all found as separate bugs in separate rounds, because the SHAPE kept
+# admitting new instances of the same defect class). The fix is structural,
+# not another special case:
 #
-# ROUND-2 CORRECTION (cubic review 5265518720, reproduced by the coordinator
-# at af01c13d): the round-1 implementation evaluated signal (2) ONCE, for the
-# whole TOKEN -- "does ANY copy of the record exist anywhere on
-# origin/main?" -- and if so, short-circuited every candidate branch to
-# "nothing in flight." That does not match the docstring's own rule above
-# (which is stated per BRANCH) and is wrong whenever TWO different branches
-# exist for the same token's slug: if branch A was squash-merged (so its
-# content now matches main) but branch B is a LATER, genuinely unmerged
-# branch with DIFFERENT (diverged) content, the token-wide short-circuit
-# wrongly cleared B too. Signal (2) is now evaluated independently for EACH
-# candidate branch via ``_branch_record_matches_origin_main`` -- only a
-# branch whose OWN content matches main is excluded by this signal; a
-# sibling branch with different content is unaffected.
+#   1. EVERY ref is resolved to an immutable OID EXACTLY ONCE:
+#      - all candidate branches, together, via ONE
+#        ``git for-each-ref --format='%(refname:short) %(objectname)'`` call
+#        (see ``_list_remote_governance_candidates_for_slug``);
+#      - ``origin/main``, via ONE
+#        ``git rev-parse --verify origin/main^{commit}`` call, WITHOUT ``-q``
+#        (see ``_resolve_oid``).
+#   2. EVERY subsequent check takes an OID, NEVER a ref name:
+#      - ancestry: ``git rev-list -1 <branch-oid> ^<main-oid>``
+#        (``_is_ancestor_of_main``) -- exit 0 + empty stdout = merged,
+#        exit 0 + non-empty stdout = not an ancestor;
+#      - the squash-merge content signal:
+#        ``git ls-tree <oid> -- <target_path>`` (``_ls_tree_blob``) -- exit 0
+#        with empty stdout = no record at that path, exit 0 with output = a
+#        parseable ``<mode> <type> <blob-oid>\t<path>`` line.
+#   3. THE EXIT-0 CONTRACT: every one of these four git invocations was
+#      CHOSEN because its every valid answer exits 0 with the answer on
+#      stdout (empty or non-empty stdout both count as valid, DETERMINED
+#      answers). Consequently EVERY non-zero exit -- 128 (bad object/ref),
+#      137 (SIGKILL, always empty stderr), OR ``_run_git``'s own
+#      timeout-as-1 / OSError-as-1 (linker.py's ``_run_git``, UNCHANGED by
+#      this round: the exit-0 contract makes a stderr discriminator
+#      unnecessary) -- maps uniformly to ``IN_FLIGHT_UNDETERMINED``. NO
+#      function on this path inspects stderr CONTENT to decide which branch
+#      of the code runs; stderr is not even captured by three of the four
+#      calls' undetermined paths (only the exit code is). A masked timeout on
+#      the SAME exit code as a genuine measurement can no longer masquerade
+#      as one, because there is no code path left where that exit code
+#      *could* correspond to two different valid outcomes -- the shape does
+#      not depend on discriminating causes of exit 1, because none of these
+#      four commands uses exit 1 for two different meanings the way
+#      ``merge-base --is-ancestor`` (removed) and ``rev-parse --verify -q``
+#      (removed) both did.
+#
+# REMOVED (obsolete under the OID shape -- code got SMALLER; see the OID
+# round report for the exact net line delta):
+#   - ``_is_merged_into_origin_main`` (name-based ``merge-base
+#     --is-ancestor origin/<branch> origin/main``, exit-1-means-two-things);
+#   - ``_blob_sha_at`` (name-based ``rev-parse --verify -q <ref>:<path>``,
+#     which could not tell a missing REF from a missing PATH);
+#   - ``_verify_ref_resolves`` (a whole extra function that existed ONLY to
+#     patch over ``_blob_sha_at``'s ref/path ambiguity -- moot now, since
+#     nothing after enumeration is ever looked up by NAME again, so there is
+#     no ref left to be ambiguously "missing" at that stage);
+#   - ``_branch_record_matches_origin_main`` (folded into
+#     ``find_in_flight_branches`` directly, since both OIDs it needs --
+#     the branch's and main's -- are already in hand by the time it would
+#     run).
+#
+# MERGED classification (still two independent, PER-CANDIDATE-BRANCH
+# signals -- the ratified spec is UNCHANGED, only the git-call SHAPE changed):
+# a MERGED-but-undeleted origin branch is excluded from in-flight status even
+# though the ref still exists. A branch is "merged" iff EITHER:
+#   (1) its OID is an ancestor of main's OID (``_is_ancestor_of_main``) --
+#       correct for merge-commit (--no-ff) merges, blind to squash/rebase; OR
+#   (2) THAT BRANCH's OWN blob at the token's target_path equals origin/main's
+#       blob at that path (compared via ``_ls_tree_blob`` on both OIDs) --
+#       strategy-independent, because the record's CONTENT is what actually
+#       lands on main regardless of how the merge happened. Evaluated PER
+#       BRANCH, NEVER as a token-wide short-circuit (round-2 correction,
+#       unchanged this round): branch A being squash-merged must never clear
+#       a DIFFERENT, still-unmerged branch B whose content has since
+#       diverged from what's on main.
 #
 # POST-MERGE RE-FILING IS UNCHANGED BY THIS SLICE: what happens when the SAME
 # token is re-submitted AFTER its record already landed on origin/main is
 # governed ENTIRELY by Check 6 (``type_checker._validate_impl`` ->
-# ``lexer.lookup_token_deterministic``), which rejects a re-file ONLY if the
-# record is visible in the CALLER's OWN local ``working_dir`` tree
-# (MANIFEST.md, then a filesystem walk of ``.hestai/decisions/`` and
-# ``.hestai/context/concepts/``) -- it does NOT consult origin/main. If the
-# caller's local checkout is stale (has not pulled the commit that merged the
-# token), Check 6 will not see it, and THIS in-flight check does not fill
-# that gap either: the ``origin/main`` cat-file signal above only EXCLUDES an
-# already-landed branch from being misreported "in flight" -- it is not a
-# new duplicate-rejection path, and it never touches Check 6. A
-# stale-checkout-safe re-file rejection, or an amendment path for an
-# already-merged token, is explicitly deferred to a later slice (routing an
-# amendment to "the agent that instigated it" is the still-unresolved
-# question the original brief scoped out of slice 1). This slice only
-# prevents duplicate BRANCHES/PRs for a token that has NOT yet merged.
+# ``lexer.lookup_token_deterministic``), which reads the CALLER's OWN local
+# ``working_dir`` tree and does not consult origin/main. This in-flight check
+# only EXCLUDES an already-landed branch from being misreported "in flight";
+# it is not a new duplicate-rejection path.
 #
-# Fetch-before-check (not after): the OLD flow ran Check 6 (local-only
-# lookup_token_deterministic) before ``_create_worktree``'s fetch, so a
-# same-day or later-day in-flight branch was invisible until AFTER validation
-# already passed. ``check_in_flight_token`` fetches fresh remote state itself
-# and is called from ``run_linker`` BEFORE any worktree/branch/push, closing
-# that ordering gap.
+# Fetch-before-check (not after): ``find_in_flight_branches`` fetches fresh
+# remote state itself and is called from ``run_linker`` BEFORE any
+# worktree/branch/push, so a same-day or later-day in-flight branch is never
+# invisible the way the old Check-6-then-linker-fetch ordering made it.
 #
-# TRI-STATE ``in_flight`` (rework round 1 addendum A): a fetch or
-# ref-enumeration failure means detection COULD NOT RUN -- a different fact
-# from "detection ran and found nothing." Collapsing both to
-# ``in_flight: False`` would let a caller read an undetermined result as a
-# measured "safe to proceed" (the exact CRS/CE fail-open finding). So
-# ``in_flight`` is ``bool | None`` EVERYWHERE this module and its callers
-# surface it:
+# TRI-STATE ``in_flight`` (``bool | None`` EVERYWHERE this module and its
+# callers surface it, unchanged this round):
 #   - ``None``  -- UNDETERMINED: detection did not run (``dry_run``) or could
-#     not complete (fetch/ref-enumeration failure). The paired ``error``
-#     string is prefixed ``IN_FLIGHT_UNDETERMINED: `` so callers can branch
-#     on it without parsing the whole message.
-#   - ``True``  -- DETERMINED: at least one unmerged branch was found.
+#     not complete (any non-zero exit on the detection path, or a missing
+#     ``target_path`` with candidates present). The paired ``error`` string
+#     is prefixed ``IN_FLIGHT_UNDETERMINED: ``.
+#   - ``True``  -- DETERMINED: at least one unmerged branch was found -- and
+#     is NAMED in ``branches`` (acceptance criterion (d): every determined
+#     True names the branch(es)).
 #   - ``False`` -- DETERMINED: detection ran to completion and found nothing.
 # ---------------------------------------------------------------------------
 
 _GOVERNANCE_REMOTE_REF_PREFIX = "refs/remotes/origin/governance/"
 
 # Stable prefix so callers can branch on "detection could not run" without
-# parsing the full message (rework round 1 addendum A).
+# parsing the full message.
 _IN_FLIGHT_UNDETERMINED_PREFIX = "IN_FLIGHT_UNDETERMINED: "
 
 
@@ -314,8 +337,8 @@ def _fetch_origin(working_dir: Path) -> str | None:
 
     MUST run before any remote-branch-based in-flight check: detection must
     see refs that exist on origin RIGHT NOW, not whatever the local
-    remote-tracking namespace last held from a previous fetch (or never held,
-    for a branch pushed by a different session/clone).
+    remote-tracking namespace last held. ``git fetch``'s only valid answer is
+    success (exit 0); any non-zero exit is undetermined.
 
     Returns an ``IN_FLIGHT_UNDETERMINED``-prefixed error string on failure,
     None on success.
@@ -326,25 +349,30 @@ def _fetch_origin(working_dir: Path) -> str | None:
     return None
 
 
-def _list_remote_governance_branches_for_slug(
+def _list_remote_governance_candidates_for_slug(
     working_dir: Path, slug: str
-) -> tuple[list[str], str | None]:
-    """List origin governance branches matching ``slug``, ANY date prefix.
+) -> tuple[list[tuple[str, str]], str | None]:
+    """List origin governance branches matching ``slug`` (ANY date prefix),
+    EACH PAIRED WITH ITS OID, via ONE
+    ``git for-each-ref --format='%(refname:short) %(objectname)'`` call.
 
-    Returns ``(branch_names, error)``: SHORT branch names
-    (``governance/<8-digit-date>-<slug>``), not the ``origin/`` remote-tracking
-    prefix. Requires a prior ``_fetch_origin`` call to see current remote
-    state -- this function does not fetch.
+    EXIT-0 CONTRACT: for-each-ref's only valid answers are exit 0 (whether or
+    not anything matches -- an empty result is not an error). ANY non-zero
+    exit is undetermined; this NEVER collapses to an empty list on failure
+    (that was the round-1 CRS/CE fail-open finding -- an empty list here must
+    always mean "asked and there were none," never "could not ask").
 
-    FAILS CLOSED (rework round 1, item 1 -- CRS/CE finding): a
-    ``git for-each-ref`` failure returns a non-None, ``IN_FLIGHT_UNDETERMINED``
-    -prefixed ``error``, NEVER an empty list with no error. An empty list must
-    mean "asked and there were none," not "could not ask" -- collapsing those
-    two cases previously let a transient ref-listing failure silently pass
-    the in-flight gate and open a duplicate branch/PR.
+    Requires a prior ``_fetch_origin`` call to see current remote state --
+    this function does not fetch.
+
+    Returns ``(candidates, error)``: ``candidates`` is a sorted list of
+    ``(branch_name, oid)`` tuples, ``branch_name`` WITHOUT the ``origin/``
+    remote-tracking prefix. This is the ONE place a candidate branch's ref is
+    ever resolved to an OID -- no candidate ref is read again by name
+    anywhere downstream (acceptance criterion (c), READ-ONCE).
     """
     code, out, stderr = _run_git(
-        ["for-each-ref", "--format=%(refname:short)", _GOVERNANCE_REMOTE_REF_PREFIX],
+        ["for-each-ref", "--format=%(refname:short) %(objectname)", _GOVERNANCE_REMOTE_REF_PREFIX],
         working_dir,
     )
     if code != 0:
@@ -355,172 +383,103 @@ def _list_remote_governance_branches_for_slug(
     # Full-name anchored: governance/<8 digits>-<exact slug>, nothing else --
     # a longer slug that merely ENDS with this slug must not match.
     pattern = re.compile(rf"^origin/governance/\d{{8}}-{re.escape(slug)}$")
-    matches = [
-        line.strip().removeprefix("origin/")
-        for line in out.splitlines()
-        if pattern.match(line.strip())
-    ]
-    return sorted(matches), None
+    matches: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.rsplit(" ", 1)
+        if len(parts) != 2:
+            continue
+        ref_name, oid = parts
+        if pattern.match(ref_name):
+            matches.append((ref_name.removeprefix("origin/"), oid))
+    matches.sort(key=lambda pair: pair[0])
+    return matches, None
 
 
-def _is_merged_into_origin_main(working_dir: Path, branch: str) -> tuple[bool, str | None]:
-    """True iff ``origin/<branch>`` is an ancestor of ``origin/main`` (merged).
+def _resolve_oid(working_dir: Path, ref: str) -> tuple[str | None, str | None]:
+    """Resolve ``ref`` to its commit OID via
+    ``git rev-parse --verify <ref>^{commit}``, WITHOUT ``-q``.
 
-    Ancestor-only signal 1 of 2 (see the module-level MERGED-classification
-    note): correct for merge-commit (``--no-ff``) merges, blind to squash/
-    rebase merges -- ``find_in_flight_branches`` pairs this, PER BRANCH, with
-    ``_branch_record_matches_origin_main`` (signal 2) so either one deciding
-    "merged" is enough to exclude THAT branch.
-
-    Returns ``(merged, error)`` -- MEASURED vs UNDETERMINED (PR #179 round 3,
-    CRS 5760485688: this used to collapse "measured not-merged" and "could
-    not measure at all" into a single ``False``, which let a downstream
-    caller read an unmeasured result as a determined answer):
-      - ``(True, None)``  -- exit 0: a genuine, MEASURED ancestor relationship.
-      - ``(False, None)`` -- exit 1 with EMPTY stderr: a genuine, MEASURED
-        "not an ancestor" (``git merge-base --is-ancestor`` prints nothing on
-        this exact outcome).
-      - ``(False, error)`` -- anything else, error UNDETERMINED-prefixed:
-        any exit code other than 0/1 (a real git failure, e.g. an invalid
-        ref), OR exit 1 WITH NON-EMPTY stderr. The latter case exists
-        specifically because ``_run_git`` reports a subprocess timeout (or a
-        missing git binary / OSError) as ``(1, "", "git command timed
-        out")`` -- THE SAME EXIT CODE as a genuine "not an ancestor" result,
-        but with a non-empty stderr message. A masked timeout must not
-        masquerade as a measured miss; stderr presence is what tells the two
-        apart, since a clean "not an ancestor" run is always silent.
+    EXIT-0 CONTRACT: this command's only valid answer is exit 0 with the OID
+    on stdout -- there is no valid "the ref is absent" outcome the way
+    ``rev-parse --verify -q <ref>:<path>`` had (that ambiguity is exactly
+    what this round removes). WITHOUT ``-q``, a missing ref is ALWAYS a hard
+    git failure (non-zero exit, typically 128); ANY non-zero exit maps to
+    undetermined, decided by the exit code ALONE -- never by inspecting
+    whether stderr happens to be empty or not.
     """
-    code, _, stderr = _run_git(
-        ["merge-base", "--is-ancestor", f"origin/{branch}", "origin/main"],
-        working_dir,
-    )
-    if code == 0:
-        return True, None
-    if code == 1 and not stderr:
-        return False, None
-    return (
-        False,
-        f"{_IN_FLIGHT_UNDETERMINED_PREFIX}"
-        f"git merge-base --is-ancestor origin/{branch} origin/main "
-        f"failed: {stderr or f'unexpected exit code {code}'}",
-    )
-
-
-def _blob_sha_at(working_dir: Path, ref_and_path: str) -> tuple[str | None, str | None]:
-    """Resolve the git blob SHA for ``<ref>:<path>`` (e.g.
-    ``origin/main:.hestai/decisions/TOKEN.oct.md``) via
-    ``git rev-parse --verify -q``.
-
-    Returns ``(sha, error)``:
-      - ``(sha, None)`` -- the path exists at that ref; ``sha`` is its blob
-        hash (git hashes CONTENT, so two paths with the same sha have
-        byte-identical content).
-      - ``(None, None)`` -- the path (or the ref itself) does NOT exist
-        there. ``--verify -q`` SUPPRESSES the "fatal: ... does not exist"
-        message for exactly this case, so it resolves with an EMPTY stderr --
-        that is how this is told apart from a genuine failure below. This is
-        a normal, MEASURED outcome, not a failure.
-      - ``(None, error)`` -- ``git rev-parse`` itself failed unexpectedly
-        (corrupted repo, git binary missing, timeout, ...); because ``-q``
-        suppresses the routine "does not exist" message, any STDERR that
-        still comes back here is a real failure, not a routine miss.
-        ``error`` is ``IN_FLIGHT_UNDETERMINED``-prefixed, consistent with
-        every other detection-could-not-run path in this module.
-    """
-    code, out, stderr = _run_git(["rev-parse", "--verify", "-q", ref_and_path], working_dir)
+    rev_arg = f"{ref}^{{commit}}"
+    code, out, stderr = _run_git(["rev-parse", "--verify", rev_arg], working_dir)
     if code == 0:
         return out.strip(), None
-    if stderr:
-        return (
-            None,
-            f"{_IN_FLIGHT_UNDETERMINED_PREFIX}"
-            f"git rev-parse --verify {ref_and_path} failed: {stderr}",
-        )
-    return None, None
+    return None, (
+        f"{_IN_FLIGHT_UNDETERMINED_PREFIX}git rev-parse --verify {rev_arg} "
+        f"failed (exit {code}): {stderr}"
+    )
 
 
-def _verify_ref_resolves(working_dir: Path, ref: str) -> str | None:
-    """Verify ``ref`` resolves to a commit object (``git rev-parse --verify
-    -q <ref>^{commit}``).
-
-    PR #179 round 3, item 2 (CRS 5760485688): ``_blob_sha_at``'s own
-    ``rev-parse --verify -q <ref>:<path>`` exits 1 with EMPTY stderr for
-    BOTH a missing PATH at an existing ref AND a MISSING REF -- the two are
-    indistinguishable from that call alone. A missing ref (``origin/main``
-    itself, or a candidate branch's own remote-tracking ref) is NOT a
-    routine "no file here" miss the way a missing path is: it signals
-    something is seriously wrong (a race with a prune, a corrupted
-    remote-tracking namespace, ...), so it must fail closed rather than be
-    silently read as "path absent, no match, not merged."
-
-    Returns ``None`` when ``ref`` resolves; an ``IN_FLIGHT_UNDETERMINED``
-    -prefixed error string when it does not (or the check itself fails).
-    """
-    code, _, stderr = _run_git(["rev-parse", "--verify", "-q", f"{ref}^{{commit}}"], working_dir)
-    if code == 0:
-        return None
-    detail = f": {stderr}" if stderr else ""
-    return f"{_IN_FLIGHT_UNDETERMINED_PREFIX}ref '{ref}' does not resolve to a commit{detail}"
-
-
-def _branch_record_matches_origin_main(
-    working_dir: Path, branch: str, target_path: str | None
+def _is_ancestor_of_main(
+    working_dir: Path, branch_oid: str, main_oid: str
 ) -> tuple[bool, str | None]:
-    """True iff ``origin/<branch>``'s OWN copy of ``target_path`` is
-    byte-identical to ``origin/main``'s copy -- a blob-hash comparison (see
-    ``_blob_sha_at``).
+    """True iff ``branch_oid`` is an ancestor of ``main_oid``, via
+    ``git rev-list -1 <branch_oid> ^<main_oid>`` -- OIDs ONLY, never a ref
+    name (acceptance criterion (c), READ-ONCE: both OIDs were already
+    resolved once, by ``_list_remote_governance_candidates_for_slug`` and
+    ``_resolve_oid`` respectively).
 
-    Strategy-independent merged signal 2 of 2, evaluated PER BRANCH (rework
-    round 1 item 5, CORRECTED in round 2 -- see the module-level
-    ROUND-2 CORRECTION note: this must never be evaluated token-wide). A
-    squash or rebase merge never leaves the governance branch as an ancestor
-    of ``origin/main``, so ``_is_merged_into_origin_main`` alone
-    misclassifies a squash/rebase-merged-but-undeleted branch as permanently
-    in flight. Checking whether THIS branch's OWN record content already
-    matches what's on ``origin/main`` is independent of merge strategy: if it
-    does, this branch's purpose has been fulfilled regardless of how.
-
-    Returns ``(matches, error)``. ``matches`` is ``False`` (not merged via
-    THIS signal -- the ancestor test in ``_is_merged_into_origin_main`` still
-    applies independently) in every case where identity legitimately could
-    NOT be established, none of which is a failure -- these are all
-    MEASURED outcomes, not errors:
-      (a) the branch's ref resolves fine but has no FILE at ``target_path``,
-      (b) ``origin/main``'s ref resolves fine but has no FILE at
-          ``target_path``,
-      (c) ``target_path`` is ``None`` (nothing to compare).
-    ``error`` (``IN_FLIGHT_UNDETERMINED``-prefixed) is set when EITHER the
-    branch's OWN ref or ``origin/main`` does not resolve to a commit at all
-    (round 3, item 2 -- see ``_verify_ref_resolves``; this is checked BEFORE
-    any path lookup, so a missing ref is never misread as case (a)/(b)), or
-    when ``git rev-parse`` itself failed unexpectedly while resolving a blob
-    -- see ``_blob_sha_at``. No extra network call: reads the already-fetched
-    local remote-tracking refs.
+    EXIT-0 CONTRACT: ``rev-list``'s only valid answers are exit 0 -- with
+    EMPTY stdout when every commit reachable from ``branch_oid`` is also
+    reachable from ``main_oid`` (branch_oid is an ancestor: merged), or with
+    NON-EMPTY stdout otherwise (not an ancestor: still in flight, pending the
+    squash-content signal). ANY non-zero exit -- a bad OID, exit 137 from a
+    killed process (always empty stderr), or a masked ``_run_git`` timeout on
+    THIS call (exit 1, "git command timed out" -- the exact CRS/CE finding
+    this round closes) -- maps to undetermined, decided by the exit code
+    alone.
     """
-    if not target_path:
-        return False, None  # (c)
+    code, out, stderr = _run_git(["rev-list", "-1", branch_oid, f"^{main_oid}"], working_dir)
+    if code != 0:
+        return False, (
+            f"{_IN_FLIGHT_UNDETERMINED_PREFIX}git rev-list -1 {branch_oid} ^{main_oid} "
+            f"failed (exit {code}): {stderr}"
+        )
+    return not out.strip(), None
 
-    branch_ref = f"origin/{branch}"
-    branch_ref_err = _verify_ref_resolves(working_dir, branch_ref)
-    if branch_ref_err:
-        return False, branch_ref_err
-    main_ref_err = _verify_ref_resolves(working_dir, "origin/main")
-    if main_ref_err:
-        return False, main_ref_err
 
-    branch_sha, branch_err = _blob_sha_at(working_dir, f"{branch_ref}:{target_path}")
-    if branch_err:
-        return False, branch_err
-    if branch_sha is None:
-        return False, None  # (a)
+def _ls_tree_blob(working_dir: Path, oid: str, target_path: str) -> tuple[str | None, str | None]:
+    """Resolve the blob OID for ``target_path`` inside the tree of commit
+    ``oid``, via ``git ls-tree <oid> -- <target_path>`` -- an OID, never a
+    ref name.
 
-    main_sha, main_err = _blob_sha_at(working_dir, f"origin/main:{target_path}")
-    if main_err:
-        return False, main_err
-    if main_sha is None:
-        return False, None  # (b)
+    EXIT-0 CONTRACT: ``ls-tree`` against a valid commit OID always exits 0,
+    whether or not ``target_path`` exists in that tree (an empty match is not
+    an error -- it is a measured "no record here"). ANY non-zero exit (e.g.
+    an invalid/unreadable ``oid``) maps to undetermined, decided by the exit
+    code alone.
 
-    return branch_sha == main_sha, None
+    Returns ``(blob_oid, error)``: ``(None, None)`` when the path has no
+    entry (measured miss, not a failure); ``(blob_oid, None)`` when it does
+    (parsed from the ``<mode> <type> <blob-oid>\t<path>`` line); ``(None,
+    error)`` on a non-zero exit.
+    """
+    code, out, stderr = _run_git(["ls-tree", oid, "--", target_path], working_dir)
+    if code != 0:
+        return None, (
+            f"{_IN_FLIGHT_UNDETERMINED_PREFIX}git ls-tree {oid} -- {target_path} "
+            f"failed (exit {code}): {stderr}"
+        )
+    out = out.strip()
+    if not out:
+        return None, None
+    parts = out.split()
+    if len(parts) < 3:
+        return None, (
+            f"{_IN_FLIGHT_UNDETERMINED_PREFIX}git ls-tree {oid} -- {target_path} "
+            f"produced unparseable output: {out!r}"
+        )
+    return parts[2], None
 
 
 def find_in_flight_branches(
@@ -531,42 +490,33 @@ def find_in_flight_branches(
     collision and the later-day second-PR case, issue #173).
 
     ``target_path`` is the TOKEN's own canonical record path (repo-relative),
-    used ONLY for the strategy-independent merged signal -- see
-    ``_branch_record_matches_origin_main``, evaluated PER CANDIDATE BRANCH
-    (round 2 correction: NEVER as a token-wide short-circuit).
+    used ONLY for the strategy-independent merged signal (``_ls_tree_blob``
+    on both the candidate's and main's OID), evaluated PER CANDIDATE BRANCH,
+    NEVER as a token-wide short-circuit.
 
-    ``target_path=None`` POLICY (round 3, item 3 -- CRS 5760485688; chosen
-    over the alternative of returning undetermined per-candidate): rejected
-    at the boundary, ONCE, but ONLY when there is at least one candidate
-    branch to evaluate -- mirroring ``run_linker``'s own precedent of
-    rejecting a missing required input before it can silently degrade
-    downstream logic, rather than letting each candidate discover the gap
-    independently. Without ``target_path`` the content-match signal can
-    never run for ANY candidate, so a squash/rebase-merged branch could
-    never be ruled out -- returning a "determined" branch list built on an
-    incomplete signal set would repeat exactly the CRS/CE finding this round
-    fixes for items 1 and 2, just at the boundary instead of inside a single
-    signal. This is scoped to fire ONLY when ``candidates`` is non-empty: a
+    ``target_path=None`` POLICY (unchanged from round 3): rejected at the
+    boundary, ONCE, but ONLY when there is at least one candidate branch to
+    evaluate. Without ``target_path`` the content-match signal can never run
+    for ANY candidate, so a squash/rebase-merged branch could never be ruled
+    out. Scoped to fire ONLY when ``candidates`` is non-empty: a
     ZERO-candidate result is a fully MEASURED "nothing in flight" (reached
-    via ref-enumeration alone) regardless of ``target_path`` -- there is
-    nothing the missing content-match signal COULD have changed, so treating
-    that case as undetermined would be needless over-caution, not integrity.
+    via ref-enumeration alone) regardless of ``target_path``.
 
-    Returns ``(branch_names, error)``. FAILS CLOSED (item 1): ``error`` is
-    non-None, prefixed ``IN_FLIGHT_UNDETERMINED: ``, whenever detection could
-    NOT run to completion (fetch failure, ref-enumeration failure, a missing
-    ``target_path`` with candidates present, OR a genuine git failure while
-    checking a branch's merged status); in that case ``branch_names`` is
-    always ``[]`` and the caller MUST NOT read that empty list as "nothing
-    in flight" -- pair it with the error, or (as ``check_in_flight_token``
-    does) surface ``in_flight: None``.
+    Returns ``(branch_names, error)``. FAILS CLOSED: ``error`` is non-None,
+    prefixed ``IN_FLIGHT_UNDETERMINED: ``, whenever ANY git call on the
+    detection path returned non-zero (fetch, ref-enumeration, main's OID
+    resolution, an ancestry check, or a blob check), or ``target_path`` is
+    missing with candidates present; in that case ``branch_names`` is always
+    ``[]`` and the caller MUST NOT read that empty list as "nothing in
+    flight." Every DETERMINED in-flight result NAMES the branch(es)
+    (acceptance criterion (d)).
     """
     fetch_err = _fetch_origin(working_dir)
     if fetch_err:
         return [], fetch_err
 
     slug = _token_to_slug(token)
-    candidates, list_err = _list_remote_governance_branches_for_slug(working_dir, slug)
+    candidates, list_err = _list_remote_governance_candidates_for_slug(working_dir, slug)
     if list_err:
         return [], list_err
 
@@ -578,21 +528,38 @@ def find_in_flight_branches(
             "merged branch could not be ruled out)"
         )
 
+    if not candidates:
+        return [], None
+
+    main_oid, main_oid_err = _resolve_oid(working_dir, "origin/main")
+    if main_oid_err:
+        return [], main_oid_err
+    assert main_oid is not None  # guaranteed by the error contract above
+
+    # target_path is guaranteed non-None here (candidates is non-empty, and
+    # the boundary check above already rejected target_path=None in that
+    # case). main's blob is resolved ONCE, shared across every candidate.
+    assert target_path is not None
+    main_blob_oid, main_blob_err = _ls_tree_blob(working_dir, main_oid, target_path)
+    if main_blob_err:
+        return [], main_blob_err
+
     in_flight: list[str] = []
-    for branch in candidates:
-        merged, merge_err = _is_merged_into_origin_main(working_dir, branch)
-        if merge_err:
-            return [], merge_err
-        if merged:
+    for branch_name, branch_oid in candidates:
+        is_ancestor, ancestor_err = _is_ancestor_of_main(working_dir, branch_oid, main_oid)
+        if ancestor_err:
+            return [], ancestor_err
+        if is_ancestor:
             continue
 
-        matches, match_err = _branch_record_matches_origin_main(working_dir, branch, target_path)
-        if match_err:
-            return [], match_err
-        if matches:
-            continue
+        branch_blob_oid, branch_blob_err = _ls_tree_blob(working_dir, branch_oid, target_path)
+        if branch_blob_err:
+            return [], branch_blob_err
 
-        in_flight.append(branch)
+        if main_blob_oid is not None and branch_blob_oid == main_blob_oid:
+            continue  # this branch's OWN content matches main: squash-merged
+
+        in_flight.append(branch_name)
 
     return sorted(in_flight), None
 
