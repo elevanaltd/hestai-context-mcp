@@ -10,7 +10,9 @@ Breaking Change: Now exits non-zero on CI failures (was: fail-open)
 """
 
 # Critical-Engineer: consulted for Review-gate fail-closed validation
+import enum
 import importlib.util
+import io
 import json
 import os
 import re
@@ -18,7 +20,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal
 
 # --- Advisory bot accounts ---
 # Bot comments are ADVISORY ONLY: they provide context for reviewers but NEVER
@@ -49,8 +51,105 @@ _BOT_LOGIN_SET: frozenset[str] = frozenset(
 )
 
 
+# ---------------------------------------------------------------------------
+# Change-record content (issue #161, option C)
+# ---------------------------------------------------------------------------
+# get_changed_files() is the SOLE producer of every fact classification needs.
+# It resolves the comparison point once, inside itself, never hands that
+# revision out, and records on each file record the text of the side(s) the
+# classifier may consult. Classification (classify_pr_facets,
+# _classify_file_facet, _sniff_octave_type) then consults neither git nor the
+# filesystem. That invariant covers CLASSIFICATION ONLY: the declaration
+# scanner _collect_bitemporal_declarations still reads blobs itself, at the
+# base-branch TIP (issue #181, deliberately left alone).
+
+
+class _Content(enum.Enum):
+    """Explicit state for a side of a change whose text is not known."""
+
+    UNAVAILABLE = "CONTENT_UNAVAILABLE"
+
+
+# "The text of this side is not known." ONE meaning, used everywhere: a read
+# that failed, a record that never carried the text, and a direct classifier
+# call that supplied none are all this state -- there is no second
+# interpretation (e.g. "go and read it here") for any caller to fall into.
+CONTENT_UNAVAILABLE: Final = _Content.UNAVAILABLE
+FileContent = str | Literal[_Content.UNAVAILABLE]
+
+# Byte bound for every recorded read (issue #185 item 2): a single enormous
+# line can no longer be read whole. Generous next to any real 50-line META
+# header; the 50-line sniff window still applies within it.
+_CONTENT_READ_LIMIT_BYTES: Final = 64 * 1024
+
+_OCTAVE_SUFFIX: Final = ".oct.md"
+
+
+def _is_octave_path(path: str) -> bool:
+    """The single rule for which paths the classifier sniffs for META.TYPE.
+
+    Used by BOTH the producer (to decide which new sides to record) and the
+    classifier (to decide which paths to sniff), so they cannot disagree.
+    """
+    return path.endswith(_OCTAVE_SUFFIX)
+
+
+def _decode_content(data: bytes) -> str:
+    """The single decode policy for both sides: substitute bad bytes, never fail."""
+    return data.decode("utf-8", errors="replace")
+
+
+def _read_revision_content(revision: str, path: str) -> FileContent:
+    """Return the first bytes of ``path`` at ``revision`` as text, bounded by bytes.
+
+    Never raises: a missing blob, bad revision or git failure is
+    CONTENT_UNAVAILABLE. Called only by get_changed_files.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["git", "cat-file", "blob", f"{revision}:{path}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return CONTENT_UNAVAILABLE
+    with proc:
+        try:
+            data = proc.stdout.read(_CONTENT_READ_LIMIT_BYTES) if proc.stdout else b""
+        except OSError:
+            proc.kill()
+            return CONTENT_UNAVAILABLE
+        if len(data) >= _CONTENT_READ_LIMIT_BYTES:
+            # Bound reached: stop git; what was read is the recorded head.
+            proc.kill()
+            return _decode_content(data)
+    # The blob ended inside the bound, so git ran to completion (the context
+    # manager waited for it): its exit status says whether the read succeeded.
+    if proc.returncode != 0:
+        return CONTENT_UNAVAILABLE
+    return _decode_content(data)
+
+
+def _read_working_tree_content(path: str) -> FileContent:
+    """Return the first bytes of the working-tree file ``path`` as text, bounded by bytes.
+
+    Local (pre-commit) mode only. Never raises: an unreadable file is
+    CONTENT_UNAVAILABLE. Called only by get_changed_files.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return _decode_content(fh.read(_CONTENT_READ_LIMIT_BYTES))
+    except OSError:
+        return CONTENT_UNAVAILABLE
+
+
+def _git_stdout(cmd: list[str]) -> str:
+    """Run a git command that must succeed; return its stripped stdout."""
+    return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
+
+
 def get_changed_files() -> list[dict[str, Any]]:
-    """Get list of changed files with line counts and file status.
+    """Get list of changed files with line counts, status and recorded content.
 
     Each returned dict includes:
       - path: new file path (or current path for non-renamed files)
@@ -59,21 +158,51 @@ def get_changed_files() -> list[dict[str, Any]]:
       - total_changed: added + deleted
       - status: git status letter (A=added, M=modified, D=deleted, R=renamed)
       - previous_path: (renames only) the old file path before the rename
+      - old_content: (renames only) the OLD side's text at the comparison
+        point, or CONTENT_UNAVAILABLE if it could not be read
+      - new_content: (.oct.md paths only) the NEW side's text, or
+        CONTENT_UNAVAILABLE if it could not be read
 
-    For renamed files, ``previous_path`` is populated so that callers can
-    fetch the BASE blob using the old path (issue #417).
+    The old side therefore has exactly three states: not a rename (no
+    ``previous_path``), text present (``old_content`` is a str), or unreadable
+    (``old_content`` is CONTENT_UNAVAILABLE). Every recorded read is bounded
+    by bytes and decoded by one policy.
+
+    Comparison point, resolved ONCE here and never handed out (issue #161):
+      - CI: the merge base of GITHUB_BASE_REF and HEAD. The diff runs from
+        that exact commit to HEAD, the old side is read from it, and the new
+        side is read as a git object at HEAD -- one resolved value for all
+        three. Unresolvable -> exit 1 (the diff itself is unknowable).
+      - Local: the staged diff (``--cached``); the old side is read from
+        ``HEAD:<previous_path>``, the new side from the working tree.
+
+    For renamed files, ``previous_path`` is also used by
+    _collect_bitemporal_declarations to fetch the BASE blob (issue #417).
     """
     try:
-        # In CI, compare against base branch; locally use cached
         if "CI" in os.environ:
-            # Get the base branch (usually main)
             base_ref = os.environ.get("GITHUB_BASE_REF", "origin/main")
-            numstat_cmd = ["git", "diff", f"{base_ref}...HEAD", "--numstat"]
-            status_cmd = ["git", "diff", f"{base_ref}...HEAD", "--name-status"]
+            head = _git_stdout(["git", "rev-parse", "--verify", "HEAD^{commit}"])
+            merge_base = _git_stdout(["git", "merge-base", base_ref, head])
+            diff_args = [merge_base, head]
+
+            def read_old(path: str) -> FileContent:
+                return _read_revision_content(merge_base, path)
+
+            def read_new(path: str) -> FileContent:
+                return _read_revision_content(head, path)
+
         else:
             # Local: check staged files
-            numstat_cmd = ["git", "diff", "--cached", "--numstat"]
-            status_cmd = ["git", "diff", "--cached", "--name-status"]
+            diff_args = ["--cached"]
+
+            def read_old(path: str) -> FileContent:
+                return _read_revision_content("HEAD", path)
+
+            read_new = _read_working_tree_content
+
+        numstat_cmd = ["git", "diff", *diff_args, "--numstat"]
+        status_cmd = ["git", "diff", *diff_args, "--name-status"]
 
         # Build rename map from --name-status first: old_path -> new_path.
         # For renames git emits: "R<score>\t<old_path>\t<new_path>"
@@ -154,12 +283,17 @@ def get_changed_files() -> list[dict[str, Any]]:
                     }
                 )
 
-        # Merge status (and previous_path for renames) into file dicts.
+        # Merge status (and previous_path for renames) into file dicts, and
+        # record the content classification needs -- read here, from the
+        # comparison point resolved above, and nowhere else.
         for f in files:
             path = f["path"]
             f["status"] = status_map.get(path, "M")  # Default to M if unknown
             if path in rename_map:
                 f["previous_path"] = rename_map[path]
+                f["old_content"] = read_old(rename_map[path])
+            if isinstance(path, str) and _is_octave_path(path):
+                f["new_content"] = read_new(path)
 
         return files
     except subprocess.CalledProcessError as e:
@@ -321,32 +455,48 @@ def _is_vendored_path(path: str) -> bool:
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
 
-def _sniff_octave_type(path: str) -> str:
-    """Read META.TYPE from an OCTAVE file. Max 50 lines, fail-safe.
+def _sniff_octave_type(text: str) -> str:
+    """Read META.TYPE from OCTAVE text. Max 50 lines, fail-safe. Text only.
+
+    Issue #161 (option C): this never opens a file or calls git -- the text
+    arrives recorded on the change record by get_changed_files, decoded by
+    the one policy both sides share. There is ONE line-splitting rule:
+    universal newlines (LF, CRLF, CR), exactly what text-mode ``open()``
+    applied when this read files. ``str.splitlines`` is deliberately not used:
+    it also breaks on VT, FF, FS/GS/RS, NEL, U+2028 and U+2029, which would let
+    attacker-authorable bytes move TYPE:: in or out of the 50-line window.
 
     Args:
-        path: File path to read.
+        text: The recorded content of an .oct.md file.
 
     Returns:
         The TYPE value string (e.g., 'AGENT_DEFINITION', 'RULE') or empty string.
     """
-    try:
-        with open(path, encoding="utf-8") as f:
-            for _ in range(50):
-                line = f.readline()
-                if not line:
-                    break
-                if "TYPE::" in line:
-                    parts = line.split("::", 1)
-                    if len(parts) == 2:
-                        return parts[1].strip().strip('"').strip("'")
-    except Exception:
-        pass
+    stream = io.StringIO(text, newline=None)
+    for _ in range(50):
+        line = stream.readline()
+        if not line:  # '' only at end of text; a blank line is '\n'
+            break
+        if "TYPE::" in line:
+            parts = line.split("::", 1)
+            if len(parts) == 2:
+                return parts[1].strip().strip('"').strip("'")
     return ""
 
 
-def _classify_file_facet(path: str) -> str | None:
+def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) -> str | None:
     """Classify a single file path into a content facet.
+
+    Pure: consults neither git nor the filesystem (issue #161, option C).
+
+    Args:
+        path: Repo-relative path.
+        content: The file's recorded text, consulted only for ``.oct.md``
+            paths outside the library directories. Not supplying it means
+            exactly one thing: CONTENT_UNAVAILABLE -- the text is not known,
+            so the path classifies on its name alone and an unsniffable
+            ``.oct.md`` lands on the GOVERNANCE fallback. There is no other
+            meaning; in particular the classifier never goes and reads it.
 
     Returns:
         Facet name string, or None if the file is exempt.
@@ -382,13 +532,13 @@ def _classify_file_facet(path: str) -> str | None:
         return "META_CONTROL_PLANE"
 
     # .oct.md files: classify by path or sniff TYPE
-    if path.endswith(".oct.md"):
+    if _is_octave_path(path):
         # Agent/skill .oct.md files are always EXECUTABLE_SPEC by path
         # (even if deleted and can't be sniffed for TYPE)
         if "/library/agents/" in path or "/library/skills/" in path:
             return "EXECUTABLE_SPEC"
-        # For other .oct.md files, sniff TYPE to distinguish
-        octave_type = _sniff_octave_type(path)
+        # For other .oct.md files, sniff TYPE from the recorded text
+        octave_type = _sniff_octave_type(content) if isinstance(content, str) else ""
         if octave_type in _EXECUTABLE_SPEC_TYPES:
             return "EXECUTABLE_SPEC"
         # All other .oct.md (RULE, STANDARD, NORTH_STAR_SUMMARY, unknown) -> GOVERNANCE
@@ -446,13 +596,53 @@ def _classify_file_facet(path: str) -> str | None:
     return "ROUTINE_CODE"
 
 
+def _recorded_content(record: dict[str, Any], key: str) -> FileContent:
+    """Return the content recorded on ``record`` under ``key``.
+
+    A key that is absent, or holds anything other than text or
+    CONTENT_UNAVAILABLE, is CONTENT_UNAVAILABLE: stub and hand-built records
+    reach classification, and a missing value must never read as known text.
+    """
+    value = record.get(key, CONTENT_UNAVAILABLE)
+    if isinstance(value, str) or value is CONTENT_UNAVAILABLE:
+        return value
+    return CONTENT_UNAVAILABLE
+
+
+def _classify_old_side(record: dict[str, Any]) -> str | None:
+    """Facet of a renamed file's OLD side, from what the record carries.
+
+    Two rules are written here, not assumed:
+
+    1. A record that names a ``previous_path`` but carries NO recorded old
+       side is NOT "not a rename": its old side is CONTENT_UNAVAILABLE and is
+       handled as unreadable (via _recorded_content).
+    2. Escalation on an unreadable old side is NARROW: it escalates to
+       EXECUTABLE_SPEC only when classifying the old NAME alone lands on the
+       ambiguous GOVERNANCE fallback (an ``.oct.md`` whose TYPE is unknown).
+       Any other unreadable rename keeps its ordinary category, so ordinary
+       moves do not over-escalate.
+    """
+    previous_path = record.get("previous_path")
+    if not isinstance(previous_path, str) or not previous_path:
+        return None  # not a rename
+    content = _recorded_content(record, "old_content")
+    facet = _classify_file_facet(previous_path, content)
+    if content is CONTENT_UNAVAILABLE and facet == "GOVERNANCE":
+        return "EXECUTABLE_SPEC"
+    return facet
+
+
 def classify_pr_facets(
     files: list[dict[str, Any]],
     declared_roles: set[str] | None = None,
 ) -> tuple[set[str], set[str], str, str]:
     """Classify PR files into content facets and compute required reviewers.
 
-    Each file is assigned a facet based on its path and content type.
+    Each file is assigned a facet based on its path and content type; a
+    renamed file also contributes its OLD side's facet (issue #161).
+    Classification is pure: every fact it needs arrives recorded on the file
+    records by get_changed_files; it makes no git calls and opens no files.
     Required reviewers = union of all facets' role requirements UNION any
     ``declared_roles`` (content-aware escalation, issue #412).
     Tier label is backward-computed from the reviewer set.
@@ -484,9 +674,18 @@ def classify_pr_facets(
     non_exempt_files = []
 
     for f in files:
-        facet = _classify_file_facet(f["path"])
-        if facet is not None:
-            facets.add(facet)
+        # A file's facets are its NEW side's facet UNION its OLD side's facet
+        # (issue #161): a rename must not launder a file out of its facet.
+        file_facets = {
+            facet
+            for facet in (
+                _classify_file_facet(f["path"], _recorded_content(f, "new_content")),
+                _classify_old_side(f),
+            )
+            if facet is not None
+        }
+        if file_facets:
+            facets |= file_facets
             non_exempt_files.append(f)
 
     # CRITICAL ORDERING (issue #412, comment 4569387061): the declaration union
