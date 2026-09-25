@@ -68,7 +68,7 @@ Classification is mandatory. Unknown state is treated as `LOCAL_MUTABLE` until e
    - a deterministic pattern pre-screen (for example email addresses, phone numbers, currency amounts and key-shaped secrets);
    - a single cheap-model agent pass over the provider-agnostic AIClient port (PROD I3), judging whether the document contains never-shared data.
 
-   A blocked document stays local and is reported, not rewritten. If the screen is unavailable, publication does not happen, so the screen fails closed. Local operation is unaffected (PROD I6).
+   A blocked document stays local and is reported, not rewritten. Publication requires an affirmative clear result from the agent pass; any other result — uncertain, malformed, timed out or errored — blocks publication. If never-shared data is found in a document after publication, it is revoked through R8 (tombstone, then hard delete where the carrier supports it). If the screen is unavailable, publication does not happen, so the screen fails closed. Local operation is unaffected (PROD I6).
 
 ### R2: StorageAdapter protocol contract and carrier capability matrix
 
@@ -96,6 +96,8 @@ Carrier capability matrix:
 | Encryption | Optional for local adapter, because local disk policy is outside this ADR | Required in transit and at rest for any non-local adapter |
 
 Adapters that cannot satisfy required capabilities are read-only or invalid for PSS publication. This keeps remote storage optional (PROD I6), avoids provider-specific context behavior (PROD I3), and prevents storage races from corrupting lifecycle history (PROD I1).
+
+Coordination Documents travel through the same StorageAdapter as a separate artifact kind. That kind carries screen provenance (R6) in place of redaction provenance and is never written through `write_redacted_artifact()`. The exact artifact type and adapter method are a build-time decision (R12), and the carrier capability requirements above apply to it unchanged.
 
 ### R3: Identity tuple
 
