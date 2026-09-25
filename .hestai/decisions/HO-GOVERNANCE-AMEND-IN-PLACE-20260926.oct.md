@@ -17,8 +17,10 @@ META:
   THIN_RULING_RECORD::"each amendment ruling → submit_governance record carrying who∧when∧why∧what_changed + pointer to amended artefact; never restates amended content"
   INTERIM_PATH::"until ADR-RFC-ARCH-004 §3.5 propose_decision_amendment broker exists → in-place edit travels as normal human-reviewed PR"
   SCOPE_GUARD::"human merge sole semantic gate ∧ no auto-merge ∧ TOKEN uniqueness unchanged"
-  FIRST_APPLICATION::"ADR-0013 R1 gains COORDINATION_DOCUMENT class → edited in place ⊕ own thin ruling record"
-  DECISION::"Ecosystem-wide: amend governance artefacts in place → replace clause ∧ bump VERSION ∧ one-line REVISION; git = correction log; thin ruling record per amendment; no stacking; nothing immutable"
+  FIRST_APPLICATION::"ADR-0013 R1 gains COORDINATION_DOCUMENT class → applied in PR #190[ADR-0013 v1.1 edited in place ⊕ thin ruling record HO-ADR-0013-COORDINATION-DOCUMENT-CLASS-20260926]"
+  DECISION::"Ecosystem-wide: amend governance artefacts in place → replace clause ∧ one-line REVISION entry; git = correction log; thin ruling record per amendment; no stacking; nothing immutable"
   BECAUSE::"SOURCE_FIDELITY → in-place, no versioned copies; stacking forces reassembly ∧ misleads; change is not the risk, ungoverned change is ∴ reviewed PR ∧ human merge = the control; ADR-RFC-ARCH-004 v1.1 precedent"
   AMENDMENT_GATE::"no artefact immutable → any clause amendable via proper governance: reviewed PR ∧ human merge ∧ human-authority gates retained where a standard requires them; the control is governance, not immutability"
+  REVISION_CONVENTION::"AGR → META REVISION field, one line per amendment[date: what changed]; META VERSION stays the ADR-RFC-ARCH-004 schema version → never bumped per edit; human ADR → header **Version** bump ∧ **Revision** line[date: what changed]"
+  ADOPTION::"Standard is ecosystem-wide; binding in a consumer repo once that repo adopts it[pointer in its instructions∨decision index] per ADR-RFC-ARCH-004 §0.2 #4 opt-in adoption; rollout to other repos deferred by operator 2026-09-26"
 ===END===
