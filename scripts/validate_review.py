@@ -65,9 +65,10 @@ _BOT_LOGIN_SET: frozenset[str] = frozenset(
 
 
 class _Content(enum.Enum):
-    """Explicit state for a side of a change whose text is not known."""
+    """Explicit, mutually distinct states for a side of a change with no text."""
 
     UNAVAILABLE = "CONTENT_UNAVAILABLE"
+    SYMLINK = "CONTENT_SYMLINK"
 
 
 # "The text of this side is not known." ONE meaning, used everywhere: a read
@@ -75,7 +76,17 @@ class _Content(enum.Enum):
 # call that supplied none are all this state -- there is no second
 # interpretation (e.g. "go and read it here") for any caller to fall into.
 CONTENT_UNAVAILABLE: Final = _Content.UNAVAILABLE
-FileContent = str | Literal[_Content.UNAVAILABLE]
+
+# "This side is a symlink object (git mode 120000); its text is deliberately
+# not read." A DIFFERENT fact from CONTENT_UNAVAILABLE and never folded into
+# it: the narrow unreadable-old-side escalation applies to CONTENT_UNAVAILABLE
+# only, while this state applies to either side. Decided by the producer from
+# the object mode in the diff it already runs; classification only reacts.
+CONTENT_SYMLINK: Final = _Content.SYMLINK
+FileContent = str | Literal[_Content.UNAVAILABLE, _Content.SYMLINK]
+
+# git's object mode for a symbolic link.
+_GIT_SYMLINK_MODE: Final = "120000"
 
 # Byte bound for every recorded read (issue #185 item 2): a single enormous
 # line can no longer be read whole. Generous next to any real 50-line META
@@ -159,14 +170,18 @@ def get_changed_files() -> list[dict[str, Any]]:
       - status: git status letter (A=added, M=modified, D=deleted, R=renamed)
       - previous_path: (renames only) the old file path before the rename
       - old_content: (renames only) the OLD side's text at the comparison
-        point, or CONTENT_UNAVAILABLE if it could not be read
-      - new_content: (.oct.md paths only) the NEW side's text, or
+        point, CONTENT_SYMLINK if that side is a symlink object, or
+        CONTENT_UNAVAILABLE if it could not be read
+      - new_content: (.oct.md paths only) the NEW side's text,
+        CONTENT_SYMLINK if that side is a symlink object, or
         CONTENT_UNAVAILABLE if it could not be read
 
-    The old side therefore has exactly three states: not a rename (no
-    ``previous_path``), text present (``old_content`` is a str), or unreadable
-    (``old_content`` is CONTENT_UNAVAILABLE). Every recorded read is bounded
-    by bytes and decoded by one policy.
+    The old side therefore has exactly four states: not a rename (no
+    ``previous_path``), text present (``old_content`` is a str), a symlink
+    (CONTENT_SYMLINK), or unreadable (CONTENT_UNAVAILABLE). Every recorded
+    read is bounded by bytes and decoded by one policy. Symlink objects are
+    never read: their mode comes from ``git diff --raw``, the same status
+    listing in both modes, so local and CI cannot disagree about it.
 
     Comparison point, resolved ONCE here and never handed out (issue #161):
       - CI: the merge base of GITHUB_BASE_REF and HEAD. The diff runs from
@@ -202,31 +217,45 @@ def get_changed_files() -> list[dict[str, Any]]:
             read_new = _read_working_tree_content
 
         numstat_cmd = ["git", "diff", *diff_args, "--numstat"]
-        status_cmd = ["git", "diff", *diff_args, "--name-status"]
+        status_cmd = ["git", "diff", *diff_args, "--raw"]
 
-        # Build rename map from --name-status first: old_path -> new_path.
-        # For renames git emits: "R<score>\t<old_path>\t<new_path>"
-        # We key by new_path to match against numstat entries, and store old_path
-        # as previous_path.
+        # Build the status, rename and object-mode maps from ONE --raw listing.
+        # git emits ":<src_mode> <dst_mode> <src_blob> <dst_blob> <STATUS>\t<path>"
+        # and, for renames, "...R<score>\t<old_path>\t<new_path>". We key by
+        # new_path to match against numstat entries, and store old_path as
+        # previous_path. --raw carries the same status and paths --name-status
+        # did, plus the modes, so no extra git call is needed for them.
         status_result = subprocess.run(status_cmd, capture_output=True, text=True, check=True)
         status_map: dict[str, str] = {}  # new_path -> status letter
         rename_map: dict[str, str] = {}  # new_path -> old_path
+        old_side_symlinks: set[str] = set()  # new_path whose OLD side is a symlink
+        new_side_symlinks: set[str] = set()  # new_path whose NEW side is a symlink
         for line in status_result.stdout.strip().split("\n"):
-            if not line:
-                continue
             parts = line.split("\t")
-            if len(parts) >= 2:
-                # Status is first char of first field (e.g., "M", "A", "R100")
-                status_letter = parts[0][0]
-                if status_letter == "R" and len(parts) >= 3:
-                    # Rename: parts[1]=old_path, parts[2]=new_path
-                    old_path = parts[1]
-                    new_path = parts[2]
-                    status_map[new_path] = "R"
-                    rename_map[new_path] = old_path
-                else:
-                    filename = parts[-1]  # Last field is the path
-                    status_map[filename] = status_letter
+            meta = parts[0].lstrip(":").split()
+            if len(parts) < 2 or len(meta) < 5:
+                continue
+            src_mode, dst_mode, status_field = meta[0], meta[1], meta[4]
+            # Status is first char of the status field (e.g., "M", "A", "R100")
+            status_letter = status_field[0]
+            if status_letter == "R" and len(parts) >= 3:
+                # Rename: parts[1]=old_path, parts[2]=new_path
+                filename = parts[2]
+                rename_map[filename] = parts[1]
+            else:
+                filename = parts[-1]  # Last field is the path
+            status_map[filename] = status_letter
+            # Critical-Engineer: consulted for Security vulnerability assessment
+            # A symlink side is recorded as CONTENT_SYMLINK, never read: in CI
+            # its blob is only the link-target text (no TYPE::), which let a
+            # tracked .oct.md symlink fall from EXECUTABLE_SPEC to GOVERNANCE
+            # (CE BLOCKED, PR #187). Only .oct.md paths are content-classified,
+            # so only they are affected; symlinks under any other name keep
+            # their ordinary path classification.
+            if src_mode == _GIT_SYMLINK_MODE:
+                old_side_symlinks.add(filename)
+            if dst_mode == _GIT_SYMLINK_MODE:
+                new_side_symlinks.add(filename)
 
         # Get diff stats (line counts).
         # --numstat for renamed files emits either:
@@ -291,9 +320,11 @@ def get_changed_files() -> list[dict[str, Any]]:
             f["status"] = status_map.get(path, "M")  # Default to M if unknown
             if path in rename_map:
                 f["previous_path"] = rename_map[path]
-                f["old_content"] = read_old(rename_map[path])
+                f["old_content"] = (
+                    CONTENT_SYMLINK if path in old_side_symlinks else read_old(rename_map[path])
+                )
             if isinstance(path, str) and _is_octave_path(path):
-                f["new_content"] = read_new(path)
+                f["new_content"] = CONTENT_SYMLINK if path in new_side_symlinks else read_new(path)
 
         return files
     except subprocess.CalledProcessError as e:
@@ -491,8 +522,10 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
 
     Args:
         path: Repo-relative path.
-        content: The file's recorded text, consulted only for ``.oct.md``
-            paths outside the library directories. Not supplying it means
+        content: The file's recorded text (or CONTENT_SYMLINK), consulted
+            only for ``.oct.md`` paths outside the library directories. An
+            ``.oct.md`` symlink is conservatively EXECUTABLE_SPEC: its target
+            is not something this gate reads. Not supplying content means
             exactly one thing: CONTENT_UNAVAILABLE -- the text is not known,
             so the path classifies on its name alone and an unsniffable
             ``.oct.md`` lands on the GOVERNANCE fallback. There is no other
@@ -536,6 +569,10 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
         # Agent/skill .oct.md files are always EXECUTABLE_SPEC by path
         # (even if deleted and can't be sniffed for TYPE)
         if "/library/agents/" in path or "/library/skills/" in path:
+            return "EXECUTABLE_SPEC"
+        # A symlinked .oct.md: the producer did not read it (see
+        # get_changed_files); treat it as the strictest spec facet.
+        if content is CONTENT_SYMLINK:
             return "EXECUTABLE_SPEC"
         # For other .oct.md files, sniff TYPE from the recorded text
         octave_type = _sniff_octave_type(content) if isinstance(content, str) else ""
@@ -599,12 +636,13 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
 def _recorded_content(record: dict[str, Any], key: str) -> FileContent:
     """Return the content recorded on ``record`` under ``key``.
 
-    A key that is absent, or holds anything other than text or
-    CONTENT_UNAVAILABLE, is CONTENT_UNAVAILABLE: stub and hand-built records
-    reach classification, and a missing value must never read as known text.
+    A key that is absent, or holds anything other than text,
+    CONTENT_SYMLINK or CONTENT_UNAVAILABLE, is CONTENT_UNAVAILABLE: stub and
+    hand-built records reach classification, and a missing value must never
+    read as known text.
     """
     value = record.get(key, CONTENT_UNAVAILABLE)
-    if isinstance(value, str) or value is CONTENT_UNAVAILABLE:
+    if isinstance(value, str) or value is CONTENT_UNAVAILABLE or value is CONTENT_SYMLINK:
         return value
     return CONTENT_UNAVAILABLE
 
