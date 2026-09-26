@@ -29,7 +29,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hestai_context_mcp.tools.governance.linker import run_linker
+from hestai_context_mcp.tools.governance.linker import _git_add_and_commit, run_linker
 from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
 
 _LINKER = "hestai_context_mcp.tools.governance.linker"
@@ -304,3 +304,46 @@ class TestCallerVenvLinkedIntoThrowawayWorktree:
         assert output["error"] is None, output["error"]
         assert sentinel.exists()
         assert sentinel.read_text() == "do not delete me"
+
+
+@pytest.mark.integration
+class TestCommitFailureNotAttributedToHookWhenNoneRan:
+    """PR #191 pre-review fix: `_format_commit_failure` must NOT prefix
+    GOVERNANCE_COMMIT_HOOK_FAILED onto a commit failure unless a pre-commit
+    hook was actually present AND executable at the path git resolves for
+    this worktree -- otherwise "nothing to commit", a missing identity,
+    `index.lock` present, etc. all get misattributed to a hook that never
+    ran (the same lesson as PR #179's measured-vs-asserted distinction)."""
+
+    def test_commit_failure_without_any_hook_is_not_attributed_to_a_hook(
+        self, tmp_path: Path
+    ) -> None:
+        """(RED) Force a commit failure that has NOTHING to do with hooks --
+        the coordinator's own example: "nothing to commit" -- in a repo with
+        NO hook installed at all. The file is already committed on `main`
+        with IDENTICAL content, so `git add` is a clean no-op (exit 0) and
+        `git commit` fails on its own, cleanly, with no hook involved. The
+        resulting error must NOT start with GOVERNANCE_COMMIT_HOOK_FAILED,
+        while still carrying the pre-existing "git commit failed" shape."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_isolated_git_repo(repo)
+        # Deliberately NO hook installed anywhere.
+
+        file_path = repo / ".hestai" / "decisions" / f"{_TOKEN}.oct.md"
+        file_path.parent.mkdir(parents=True)
+        file_path.write_text(_DECISION_RECORD_OCTAVE)
+        manifest_path = repo / ".hestai" / "MANIFEST.md"
+
+        # Pre-commit the EXACT same content, so the upcoming `git add` in
+        # _git_add_and_commit is a genuine no-op and `git commit` has
+        # nothing staged to commit.
+        _run(["add", "."], repo)
+        _run(["commit", "-m", "pre-existing identical content"], repo)
+
+        err = _git_add_and_commit(repo, file_path, manifest_path, "msg")
+
+        assert err is not None
+        assert not err.startswith("GOVERNANCE_COMMIT_HOOK_FAILED")
+        assert "git commit failed" in err
+        assert "nothing to commit" in err.lower()
