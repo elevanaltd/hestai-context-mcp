@@ -865,34 +865,90 @@ def _stamp_human_adr_ref(octave_content: str, token: str) -> str:
 # Stable prefix (issue #178) so a commit-hook rejection is distinguishable,
 # by callers and by grep, from every other commit failure this function can
 # return (a failed `git add`, or a `git commit` failure that isn't a hook --
-# e.g. a missing git identity). "Named" per the operator's ruling: where the
-# hook's own output is parseable (the `pre-commit` framework's failure-
-# summary format, `- hook id: <id>`), the id is embedded in the message too.
+# e.g. "nothing to commit", a missing git identity, a stale `index.lock`).
+# "Named" per the operator's ruling: where the hook's own output is
+# parseable (the `pre-commit` framework's failure-summary format,
+# `- hook id: <id>`), the id is embedded in the message too.
+#
+# ASSERTS ONLY WHAT WAS MEASURED (pre-review fix, PR #191 -- the same lesson
+# as PR #179's measured-vs-undetermined distinction): this prefix is applied
+# IF AND ONLY IF a pre-commit hook was ACTUALLY PRESENT AND EXECUTABLE at the
+# path git resolves for the worktree the commit ran in (see
+# ``_has_executable_precommit_hook``) at the moment of the failed commit. A
+# commit can fail for reasons that have nothing to do with any hook --
+# "nothing to commit", a missing identity, a stale ``index.lock`` -- and
+# attributing those to a hook that never ran would be exactly the kind of
+# asserted-not-measured claim issue #179 spent three rounds eliminating from
+# this same file's in-flight detection. When no hook is present (or hook
+# presence could not be determined), the ORIGINAL, un-prefixed
+# ``"git commit failed: ..."`` shape is returned unchanged.
 _GOVERNANCE_COMMIT_HOOK_FAILED_PREFIX = "GOVERNANCE_COMMIT_HOOK_FAILED: "
 
 _PRE_COMMIT_HOOK_ID_RE = re.compile(r"^- hook id: (\S+)", re.MULTILINE)
 
 
-def _format_commit_failure(combined_output: str) -> str:
-    """Format a ``git commit`` failure as a structured, NAMED error (issue
-    #178). ``combined_output`` is the commit's stdout+stderr, in that order
-    -- this is where a rejecting hook's own message lives (whether the
-    rejection is an ENVIRONMENT problem, e.g. missing ``.venv/bin/python``,
-    or a CONTENT problem, e.g. issue #166's canonical-paths validator).
+def _has_executable_precommit_hook(worktree_path: Path) -> bool:
+    """True iff a ``pre-commit`` hook is PRESENT and EXECUTABLE at the path
+    git itself would actually run a commit's hook from, inside
+    ``worktree_path``.
 
-    Every ``git commit`` failure at this call site is treated as a
-    commit-hook rejection: by the time this call runs, the files to commit
-    are already staged and validated (Gate A/B already passed upstream), so
-    a local hook (pre-commit, commit-msg, ...) is the overwhelmingly likely
-    cause -- and NEVER skipping hooks (no ``--no-verify`` here, unlike
-    ``_push_branch``) means this classification is reliable, not a guess
-    papering over some other failure mode.
+    Resolved via ``git rev-parse --git-path hooks/pre-commit``, run FROM
+    ``worktree_path`` so it reflects THAT worktree's config -- verified
+    empirically with git 2.52.0 that this HONOURS ``core.hooksPath`` (a
+    custom hooks path set on the repo is reflected immediately in the
+    resolved path) and returns a path RELATIVE to the invoking cwd when no
+    absolute override is configured (git's default ``.git/hooks/...`` is
+    returned as the bare relative string ``".git/hooks/pre-commit"``, not an
+    absolute path) -- so a relative result is joined onto ``worktree_path``
+    here before checking it.
 
-    Preserves the substring ``"git commit failed"`` for byte-compatibility
-    with pre-existing tests/callers that already grep for it; the NEW
-    ``GOVERNANCE_COMMIT_HOOK_FAILED:`` prefix and (where parseable) hook id
-    are purely additive.
+    A present-but-NON-EXECUTABLE hook file is treated as ABSENT: verified
+    empirically with git 2.52.0 that git itself silently skips (does not
+    run, does not warn, does not fail) a hook file that exists but lacks the
+    executable bit -- so attributing a commit failure to that file would
+    claim a hook ran when it structurally could not have.
+
+    If the ``git rev-parse`` call itself fails, this returns ``False``
+    (fail-safe: an unresolvable hook path can never be asserted as "a hook
+    is present" -- the caller then correctly reports a plain, un-attributed
+    commit failure rather than guessing).
     """
+    code, out, _ = _run_git(["rev-parse", "--git-path", "hooks/pre-commit"], worktree_path)
+    if code != 0:
+        return False
+    hook_path = Path(out.strip())
+    if not hook_path.is_absolute():
+        hook_path = worktree_path / hook_path
+    return hook_path.is_file() and os.access(hook_path, os.X_OK)
+
+
+def _format_commit_failure(combined_output: str, *, hook_present: bool) -> str:
+    """Format a ``git commit`` failure.
+
+    ``hook_present`` (measured by ``_has_executable_precommit_hook`` BEFORE
+    the commit ran, from the SAME worktree the commit ran in) decides the
+    shape:
+      - ``True``  -- a hook was actually present and executable, so a
+        rejection is attributed to it: the structured, NAMED
+        ``GOVERNANCE_COMMIT_HOOK_FAILED:``-prefixed error (issue #178),
+        carrying ``combined_output`` (the commit's stdout+stderr, in that
+        order -- where a rejecting hook's own message lives, whether the
+        rejection is an ENVIRONMENT problem, e.g. missing
+        ``.venv/bin/python``, or a CONTENT problem, e.g. issue #166's
+        canonical-paths validator) and, where parseable (the ``pre-commit``
+        framework's ``- hook id: <id>`` failure-summary line), the hook's
+        own id.
+      - ``False`` -- no hook was present (or its presence could not be
+        determined): the ORIGINAL, un-prefixed ``"git commit failed: ..."``
+        shape, UNCHANGED, so ``"nothing to commit"``, a missing identity, a
+        stale ``index.lock``, etc. are never misattributed to a hook.
+
+    Preserves the substring ``"git commit failed"`` in BOTH shapes, for
+    byte-compatibility with pre-existing tests/callers that already grep
+    for it.
+    """
+    if not hook_present:
+        return f"git commit failed: {combined_output}"
     hook_id_match = _PRE_COMMIT_HOOK_ID_RE.search(combined_output)
     if hook_id_match:
         hook_id = hook_id_match.group(1)
@@ -952,10 +1008,15 @@ def _git_add_and_commit(
             manifest_rel = manifest_path
         _run_git(["add", str(manifest_rel)], working_dir)
 
+    # Measured BEFORE the commit runs, from the SAME worktree: whether a
+    # rejection can be attributed to a hook must reflect what was actually
+    # there, not be asserted after the fact (issue #178 pre-review fix).
+    hook_present = _has_executable_precommit_hook(working_dir)
+
     code, out, stderr = _run_git(["commit", "-m", commit_message], working_dir)
     if code != 0:
         combined_output = "\n".join(part for part in (out, stderr) if part)
-        return _format_commit_failure(combined_output)
+        return _format_commit_failure(combined_output, hook_present=hook_present)
     return None
 
 
