@@ -141,9 +141,7 @@ def _validate(repo: Path) -> object:
 
 @pytest.mark.integration
 class TestCallerVenvLinkedIntoThrowawayWorktree:
-    def test_with_caller_venv_hook_runs_for_real_and_commit_succeeds(
-        self, tmp_path: Path
-    ) -> None:
+    def test_with_caller_venv_hook_runs_for_real_and_commit_succeeds(self, tmp_path: Path) -> None:
         """(RED 1) The target repo's hook needs `.venv/bin/python`; the
         caller HAS a `.venv`. The linker must symlink it into the throwaway
         worktree so the hook runs for real and the commit succeeds."""
@@ -177,9 +175,7 @@ class TestCallerVenvLinkedIntoThrowawayWorktree:
         ).stdout
         assert committed == _DECISION_RECORD_OCTAVE
 
-    def test_without_caller_venv_hook_fails_with_structured_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_without_caller_venv_hook_fails_with_structured_error(self, tmp_path: Path) -> None:
         """(RED 2) Same hook, caller has NO `.venv`: the commit-hook failure
         must surface as a structured, NAMED GOVERNANCE_COMMIT_HOOK_FAILED
         error carrying the hook's output -- never silently skipped
@@ -248,9 +244,7 @@ class TestCallerVenvLinkedIntoThrowawayWorktree:
         assert "CANONICAL" in output["error"]
         open_pr.assert_not_called()
 
-    def test_commit_contains_only_intended_paths_no_venv_entry(
-        self, tmp_path: Path
-    ) -> None:
+    def test_commit_contains_only_intended_paths_no_venv_entry(self, tmp_path: Path) -> None:
         """(RED 4) The linked `.venv` must NEVER be staged or committed: the
         resulting commit's file list has no `.venv` entry, only the record
         (and MANIFEST)."""

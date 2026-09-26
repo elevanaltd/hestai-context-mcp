@@ -8,8 +8,13 @@ Accepts a ValidationResult + raw OCTAVE content, then:
   1. Creates a DEDICATED git worktree on a fresh ``governance/{date}-{token-slug}``
      branch based off ``origin/main`` (after a second, redundant ``git fetch
      origin`` internal to ``_create_worktree`` -- left as-is; cheap/idempotent)
+  1b. Symlinks the caller's ``.venv`` (if present) into the throwaway
+     worktree root -- see ``_link_caller_venv_into_worktree`` and the
+     COMMIT-SIDE HOOKS note below (issue #178).
   2. Writes OCTAVE content to the computed target_path INSIDE that worktree
-  3. Commits with: chore(governance): add {token} [{card_type}]
+  3. Commits with: chore(governance): add {token} [{card_type}] -- runs the
+     TARGET REPO'S OWN local hooks for real (NEVER ``--no-verify`` on this
+     call; see the COMMIT-SIDE HOOKS note below)
   4. Updates MANIFEST (write_manifest)
   5. Pushes the branch to origin (git push --no-verify -u origin <branch>)
   6. Opens PR via gh pr create
@@ -24,6 +29,47 @@ as it was found — the tool can never "leave" a checkout on ``governance/...``
 tree's branch and stranded it there). This also sidesteps the worktree-discipline
 pre-commit hook entirely, since commits are always made from a real worktree.
 
+COMMIT-SIDE HOOKS (issue #178; the commit-side sibling of the push rationale
+in ``_push_branch`` below): the throwaway worktree is a FRESH checkout with
+no ``.venv`` -- any target repo whose pre-commit hooks shell out to
+``.venv/bin/python`` (a common pattern: namespace/canonical-path validators,
+octave-mcp's own validator) fail there with an ENVIRONMENT error (e.g. exit
+127, "no such file"), not a content verdict, and ``run_linker`` never even
+reaches ``git push`` -- ``success=false``, no PR, no signal about whether the
+record itself was actually good. Unlike the push (which genuinely runs
+project-wide quality gates that make no sense from an ephemeral worktree),
+the commit-side hooks are exactly the mechanism issue #166's defect class
+(a canonical-paths validator) exists to enforce, so blanket ``--no-verify``
+here would hide real content defects until CI -- the operator explicitly
+rejected that option (RD23, option 2b over option 1). Instead:
+  - ``_link_caller_venv_into_worktree`` symlinks the CALLER's OWN ``.venv``
+    into the worktree root before the commit, so a hook needing
+    ``.venv/bin/python`` finds a REAL interpreter and can do REAL work
+    against the staged record, not just fail on a missing binary.
+  - If a hook still fails -- including when the caller has no ``.venv`` at
+    all -- ``_git_add_and_commit`` surfaces a structured, NAMED
+    ``GOVERNANCE_COMMIT_HOOK_FAILED:`` error (PROD I4) carrying the hook's
+    combined stdout+stderr, and (where parseable, e.g. the ``pre-commit``
+    framework's ``- hook id: <id>`` failure-summary line) the hook's own id.
+    The commit is NEVER skipped to paper over this.
+  - CONSEQUENCE (part of the design, not an incidental risk): these hooks
+    run from the throwaway worktree using origin/main's entry SCRIPTS, but
+    any IMPORT of the target repo's own package inside those scripts
+    resolves through the CALLER's editable install (``pip install -e``) to
+    the CALLER's ``src/`` -- see issue #164. That is the SAME code a
+    hand-run ``git commit`` from the caller's own checkout would use, so
+    this is not a new class of risk the linker introduces; it is the
+    existing editable-install behavior, inherited. The residual risk is a
+    FALSE EARLY SIGNAL (a hook could pass or fail based on the caller's
+    checked-out revision of the package rather than origin/main's), which
+    the PR's own CI run corrects downstream -- the hook here is a fast,
+    best-effort local gate, not the final authority.
+  - The link is NEVER staged or committed (explicit-path ``git add``
+    staging only -- see ``_git_add_and_commit``, never ``git add -A``/``.``)
+    and is removed WITH the throwaway worktree by ``_remove_worktree``,
+    which never follows the top-level symlink back into the caller's real
+    ``.venv`` (``shutil.rmtree`` does not traverse a top-level symlink).
+
 dry_run=True: skips all git/file operations, returns what WOULD happen.
 
 GitHub token resolution is provided by the shared single-source-of-truth helper
@@ -33,6 +79,7 @@ that previously copied this logic from submit_review). It is re-exported here as
 (patchable in tests).
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -202,6 +249,58 @@ def _push_branch(working_dir: Path, branch_name: str) -> str | None:
     if code != 0:
         return f"Failed to push branch '{branch_name}' to origin: {stderr}"
     return None
+
+
+def _link_caller_venv_into_worktree(working_dir: Path, worktree_path: Path) -> None:
+    """Best-effort: symlink the caller's ``.venv`` into the throwaway
+    worktree root as ``.venv`` (issue #178), so the target repo's own
+    pre-commit hooks -- which often shell out to ``.venv/bin/python`` -- run
+    for REAL against the staged record, instead of failing on a missing
+    interpreter in an environment that never had one. See the module
+    docstring's COMMIT-SIDE HOOKS note for the full rationale (including the
+    editable-install/issue #164 consequence).
+
+    Does nothing (no error, no return value) when the caller's
+    ``working_dir`` has no ``.venv`` directory, or when the symlink cannot be
+    created for any reason (permissions, an existing ``.venv`` already in
+    the fresh worktree, ...) -- this is a best-effort improvement, never a
+    requirement: a caller without a usable ``.venv`` still gets a correct,
+    structured ``GOVERNANCE_COMMIT_HOOK_FAILED`` outcome if a hook then
+    fails (see ``_git_add_and_commit``), it just does not get the hook
+    running successfully.
+
+    NEVER staged, NEVER committed: ``_git_add_and_commit`` stages files
+    ONLY by their EXPLICIT relative path (never ``git add -A`` / ``git add
+    .``), and this symlink is never named in any ``git add`` call -- it
+    cannot appear in a commit as long as that staging discipline holds
+    (guarded by a dedicated test asserting ``git show --name-only`` has no
+    ``.venv`` entry). It is removed WITH the throwaway worktree by
+    ``_remove_worktree``'s ``shutil.rmtree`` -- which does NOT follow a
+    top-level symlink into the caller's real ``.venv`` (proven by a
+    dedicated test using a sentinel file inside the caller's ``.venv``).
+
+    NOT done: writing the link's path into the worktree's
+    ``.git/info/exclude`` as an extra defence-in-depth measure. That file is
+    NOT per-worktree state -- ``git rev-parse --git-path info/exclude``
+    from inside a linked worktree resolves to the CALLER's OWN real
+    ``.git/info/exclude`` (the common git dir is shared across all
+    worktrees of a repository), so writing to it would mutate the
+    operator's real repository configuration as a persistent side effect,
+    directly contradicting this file's own "the operator's own working
+    tree is NEVER touched" invariant (see the module docstring). The
+    explicit-path staging discipline above is the sole safeguard, and is
+    sufficient: the symlink is structurally never named in any ``git add``
+    call this module makes.
+    """
+    caller_venv = working_dir / ".venv"
+    if not caller_venv.is_dir():
+        return
+    link_path = worktree_path / ".venv"
+    # Best-effort: permissions, an existing path, or any other symlink
+    # failure falls through silently -- a hook needing .venv will then fail
+    # with its own error, surfaced structurally below.
+    with contextlib.suppress(OSError):
+        link_path.symlink_to(caller_venv, target_is_directory=True)
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +862,47 @@ def _stamp_human_adr_ref(octave_content: str, token: str) -> str:
     return octave_content
 
 
+# Stable prefix (issue #178) so a commit-hook rejection is distinguishable,
+# by callers and by grep, from every other commit failure this function can
+# return (a failed `git add`, or a `git commit` failure that isn't a hook --
+# e.g. a missing git identity). "Named" per the operator's ruling: where the
+# hook's own output is parseable (the `pre-commit` framework's failure-
+# summary format, `- hook id: <id>`), the id is embedded in the message too.
+_GOVERNANCE_COMMIT_HOOK_FAILED_PREFIX = "GOVERNANCE_COMMIT_HOOK_FAILED: "
+
+_PRE_COMMIT_HOOK_ID_RE = re.compile(r"^- hook id: (\S+)", re.MULTILINE)
+
+
+def _format_commit_failure(combined_output: str) -> str:
+    """Format a ``git commit`` failure as a structured, NAMED error (issue
+    #178). ``combined_output`` is the commit's stdout+stderr, in that order
+    -- this is where a rejecting hook's own message lives (whether the
+    rejection is an ENVIRONMENT problem, e.g. missing ``.venv/bin/python``,
+    or a CONTENT problem, e.g. issue #166's canonical-paths validator).
+
+    Every ``git commit`` failure at this call site is treated as a
+    commit-hook rejection: by the time this call runs, the files to commit
+    are already staged and validated (Gate A/B already passed upstream), so
+    a local hook (pre-commit, commit-msg, ...) is the overwhelmingly likely
+    cause -- and NEVER skipping hooks (no ``--no-verify`` here, unlike
+    ``_push_branch``) means this classification is reliable, not a guess
+    papering over some other failure mode.
+
+    Preserves the substring ``"git commit failed"`` for byte-compatibility
+    with pre-existing tests/callers that already grep for it; the NEW
+    ``GOVERNANCE_COMMIT_HOOK_FAILED:`` prefix and (where parseable) hook id
+    are purely additive.
+    """
+    hook_id_match = _PRE_COMMIT_HOOK_ID_RE.search(combined_output)
+    if hook_id_match:
+        hook_id = hook_id_match.group(1)
+        return (
+            f"{_GOVERNANCE_COMMIT_HOOK_FAILED_PREFIX}git commit failed "
+            f"(hook '{hook_id}'): {combined_output}"
+        )
+    return f"{_GOVERNANCE_COMMIT_HOOK_FAILED_PREFIX}git commit failed: {combined_output}"
+
+
 def _git_add_and_commit(
     working_dir: Path,
     file_path: Path,
@@ -776,6 +916,21 @@ def _git_add_and_commit(
     verbatim ADR land in ONE commit. Each extra path is staged BEFORE the commit;
     a failed ``git add`` on any of them aborts with a structured error (no commit
     with a missing file).
+
+    Staging is ALWAYS by EXPLICIT relative path (never ``git add -A`` /
+    ``git add .``) -- this is the load-bearing invariant (issue #178) that
+    keeps a caller's ``.venv`` symlink, if ``_link_caller_venv_into_worktree``
+    created one in this same worktree, from EVER being staged or committed:
+    it is never named in any ``git add`` call here, so it structurally
+    cannot appear in the commit.
+
+    The final ``git commit`` NEVER uses ``--no-verify`` (issue #178): unlike
+    ``_push_branch``'s push, which bypasses hooks that make no sense from an
+    ephemeral worktree, the commit-side hooks are exactly the mechanism
+    issue #166's defect class exists to enforce, so they must run for real.
+    A failure here is reported via ``_format_commit_failure`` -- a
+    structured, ``GOVERNANCE_COMMIT_HOOK_FAILED:``-prefixed error naming the
+    hook where parseable.
 
     Returns an error string on failure, None on success.
     """
@@ -797,9 +952,10 @@ def _git_add_and_commit(
             manifest_rel = manifest_path
         _run_git(["add", str(manifest_rel)], working_dir)
 
-    code, _, stderr = _run_git(["commit", "-m", commit_message], working_dir)
+    code, out, stderr = _run_git(["commit", "-m", commit_message], working_dir)
     if code != 0:
-        return f"git commit failed: {stderr}"
+        combined_output = "\n".join(part for part in (out, stderr) if part)
+        return _format_commit_failure(combined_output)
     return None
 
 
@@ -1094,6 +1250,13 @@ def run_linker(
 
     # On success ``_create_worktree`` returns a non-None path (err is None).
     assert worktree_path is not None
+
+    # 1b. Symlink the caller's .venv (if any) into the throwaway worktree
+    #     BEFORE the commit, so the target repo's own hooks can find a real
+    #     interpreter (issue #178). Best-effort, no error path: see
+    #     _link_caller_venv_into_worktree and the module docstring's
+    #     COMMIT-SIDE HOOKS note.
+    _link_caller_venv_into_worktree(working_dir, worktree_path)
 
     pushed_ok = False
     pr_url: str | None = None
