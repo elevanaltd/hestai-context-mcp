@@ -1,6 +1,6 @@
 # ADR-RFC-ARCH-004 — Agent-Readable Governance Records (AGR) — Format, Lifecycle, Tool Contracts
 
-- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13). **Schema v1.1** — MINOR-additive amendment transcribing HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED): §1.2 `DECISION`/`BECAUSE` bytecode density (≤40 words, no newline), §1.5 v1.1 semantics, §4.1 #13 value-level guard, `HUMAN_ADR_REF` greppable-TOKEN form. No structural parser change; v1.0 records remain valid.
+- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13). **Schema v1.1** — MINOR-additive amendment transcribing HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED): §1.2 `DECISION`/`BECAUSE` bytecode density (≤40 words, no newline), §1.5 v1.1 semantics, §4.1 #13 value-level guard, `HUMAN_ADR_REF` greppable-TOKEN form. No structural parser change; v1.0 records remain valid. **Schema v1.2** — MINOR-additive amendment transcribing HO-GOVERNANCE-AMEND-IN-PLACE-20260926 (2026-09-26, operator-ruled): §1.2 optional `REVISION` field (one line per in-place amendment; never bumps `VERSION`), §1.6 in-place-amendment reading of the `AMENDS` edge, §0.2 intro reworded from "immutable in PR-D scope and not re-debated" to "fixed inputs for PR-D scope; amendable later only via proper governance" (no live clause claims permanent immutability). No structural parser change; v1.0/v1.1 records remain valid.
 - **Ratified-by**: standards-reviewer + critical-implementation-validator (stamped close-out 2026-06-11), HO-orchestrated, operator-authorised
 - **Date**: 2026-05-19
 - **Scope**: `hestai-context-mcp` repository. Specifies the L1 AGR record format and consumer-side MCP tool contracts. Specification only; code implementation is deferred to a successor PR (PR-D′ / PR-H) routed via oa-router to implementation-lead.
@@ -28,7 +28,7 @@ The AGR layer composes with PR-B's defenses: AGR files inherit governance-class 
 
 ### 0.2 Immutable operator-ratified inputs
 
-The following are immutable in PR-D scope and not re-debated:
+The following are fixed inputs for PR-D scope; amendable later only via proper governance:
 
 1. **RFC #40's three-layer model**: L0 human ADRs (unchanged), L1 AGRs (this ADR), L1S Facet ABI (RFC #38 / PR-B). Operator-ratified 2026-05-13.
 2. **Substrate-not-registry binding** (ADR-0013): the AGR canonical store is plain committed files at `.hestai/decisions/`; PSS is substrate, never the registry. Any write tool is a broker that creates a PR; no tool mutates the canonical store directly.
@@ -71,7 +71,7 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 | Field | Type | Notes |
 |---|---|---|
 | `TYPE` | literal | MUST be `DECISION_RECORD` |
-| `VERSION` | semver-2-segment | `MAJOR.MINOR` per §1.5. Current: `1.1` (records authored before the v1.1 amendment remain valid at `1.0`; v1.1 is MINOR-additive — see §1.5). |
+| `VERSION` | semver-2-segment | `MAJOR.MINOR` per §1.5. Current: `1.2` (records authored before the v1.1/v1.2 amendments remain valid at `1.0`; v1.1 and v1.2 are both MINOR-additive — see §1.5). |
 | `TOKEN` | string | Globally unique identifier within the repository (see §1.3) |
 | `STATUS` | enum | One of `PROPOSED`, `RATIFIED`, `SUPERSEDED`, `VOID` (see §1.4) |
 | `TIER` | enum | One of `STRATEGIC`, `TACTICAL`, `OPERATIONAL`. Semantic gravity per the cited research brief. |
@@ -87,7 +87,8 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 | `HUMAN_ADR_REF` | string | Reference to a human ADR. Optional; records without a human ADR are first-class. **v1.0**: a repository-relative path (resolved by §4.1 #11). **v1.1**: a greppable cross-repo-survivable TOKEN is the canonical form (per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 `ADR_REF_FORM::greppable_TOKEN`); a path remains accepted for back-compat and is path-resolved under §4.1 #11 only when it is path-shaped. |
 | `SUPERSEDED_BY` | string | TOKEN of the superseding record. Required iff `STATUS == SUPERSEDED`. |
 | `EXTENDS` | list of TOKENs | Records this record extends (additive, not replacing). May be empty. |
-| `AMENDS` | list of TOKENs | Records this record amends (partial replacement). May be empty. |
+| `AMENDS` | list of TOKENs | Records this record amends (partial replacement; or, under in-place amendment practice — see §1.6 — full in-place edit of the cited artefact by a thin ruling record). May be empty. |
+| `REVISION` | string | One line per in-place amendment: `<YYYY-MM-DD>: <what changed>`. Optional; never changes schema `VERSION` (§1.5) — logs a record's own in-place edits instead of a version bump. Introduced in schema v1.2 (HO-GOVERNANCE-AMEND-IN-PLACE-20260926). |
 | `SCOPE` | string or list | Free-form scope qualifier (e.g. `"hestai-context-mcp"`, `["L1", "AGR"]`). Optional. |
 | `EFFECTIVE_FROM` | ISO-8601 timestamp | When the decision takes effect; defaults to `AUTHORED_AT` if absent. |
 | `EFFECTIVE_UNTIL` | ISO-8601 timestamp | When the decision lapses (independent of supersession). Optional. |
@@ -147,9 +148,11 @@ Rules:
 - **MINOR bump** — additive. New optional fields, new admissible enum values for non-required fields, new reserved names. Parsers written against `MAJOR=N.MINOR=K` MUST tolerate `MAJOR=N.MINOR>K` by ignoring unknown optional fields.
 - No patch level. Spec corrections land at the next MINOR.
 
-Current schema is `1.1`. Future additive extensions become `1.2`, `1.3`, etc.
+Current schema is `1.2`. Future additive extensions become `1.3`, `1.4`, etc.
 
 **v1.1 (MINOR-additive, per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101)**: AGRs are treated as LLM "bytecode". The reasoning-bearing fields `DECISION` and `BECAUSE` are constrained to a single flat line of ≤40 words with no embedded newline, using compressed-OCTAVE operators for connectives (new value-level invariant §4.1 #13; no structural parser change). `HUMAN_ADR_REF` gains a greppable-TOKEN canonical form alongside the legacy path form. Both are MINOR-additive: a `1.0` record that already satisfies the ≤40-word/no-newline density (as every conforming one-sentence `DECISION`/`BECAUSE` does) remains valid, and v1.1 introduces no new required field. Parsers written against `1.0` continue to parse `1.1` records (the structural grammar is unchanged).
+
+**v1.2 (MINOR-additive, per HO-GOVERNANCE-AMEND-IN-PLACE-20260926, 2026-09-26)**: ecosystem-wide in-place amendment practice is adopted for governance artefacts. Records gain the optional `REVISION` field (§1.2) — one line per in-place amendment, `<YYYY-MM-DD>: <what changed>` — logged instead of a schema `VERSION` bump; `VERSION` stays the schema-version identifier, never a per-record edit counter. `AMENDS` (§1.6) gains an in-place-amendment reading: a thin ruling record's `AMENDS` edge may mean the ruling amended the cited artefact in place rather than only a partial-replacement stack. Both readings are MINOR-additive: no existing record's structural parse changes, and a `1.0`/`1.1` record without `REVISION` remains fully valid. Parsers written against `1.0`/`1.1` continue to parse `1.2` records by ignoring the unknown optional field.
 
 **Spec-only period (CLOSED)**: Between this ADR's merge and the code landing, AGR records were authored by hand and conformed to §1.1–§1.6 as if the validator (§4) were running. The validator has now landed: Gate A (`type_checker.validate_octave_content`) enforces the §4.1 invariants against every record under `.hestai/decisions/**/*.oct.md`, regardless of authoring date — the **v1.0 envelope PLUS the v1.1 additive §4.1 #13 density invariant** (≤40 words, no embedded newline on `DECISION`/`BECAUSE`). There is no grandfather clause: every record, old or new, MUST satisfy the currently-enforced invariant set (the three pre-existing verbose records were migrated to compliant bytecode when #13 landed).
 
@@ -164,6 +167,7 @@ Current schema is `1.1`. Future additive extensions become `1.2`, `1.3`, etc.
 - **Cross-edge interactions are NOT treated as cycles.** Specifically: an old record carrying `SUPERSEDED_BY=NEW` combined with the new record carrying `AMENDS=OLD` is **admissible** and is the canonical pattern for "this new record supersedes the old one and explicitly amends what it changed." The validator MUST NOT flag this as a cycle.
 - `EXTENDS` does not imply `SUPERSEDED_BY`; an extension is additive — both records remain live (`RATIFIED`).
 - `AMENDS` does not by itself supersede; an amendment refines the cited record without retiring it. Combined `AMENDS` + `SUPERSEDED_BY` (as above) is admissible.
+- **In-place amendment practice (HO-GOVERNANCE-AMEND-IN-PLACE-20260926, schema v1.2)**: when an amendment is applied in place — the amended record or human ADR is edited directly rather than stacked — the amending thin ruling record's `AMENDS` edge means "this ruling amended that artefact in place"; the ruling record MUST NOT restate the amended content (per HO-GOVERNANCE-AMEND-IN-PLACE-20260926's own `THIN_RULING_RECORD` field). This is a reading of the existing `AMENDS` edge type, not a new edge type: the acyclicity rule above and the admissible `AMENDS` + `SUPERSEDED_BY` combination are unchanged. An artefact with no TOKEN (e.g. a human ADR outside the AGR store, or this ADR itself) cannot be an `AMENDS` target — lineage resolution (§4.1 #8) requires the cited identifier to resolve via the deterministic TOKEN lookup; such amendments are recorded via a free-form pointer field (e.g. `AMENDED_ARTEFACTS`) instead.
 - Edges MUST reference TOKENs that exist in the same repository (cross-repo edges are out of scope for §1.6 enforcement; see §4.1 invariant #8 scoping note).
 
 ## 2. Placement, layer mapping, and projection rules
