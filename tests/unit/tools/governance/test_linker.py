@@ -229,19 +229,38 @@ class TestGitAddAndCommit:
 
     @pytest.mark.unit
     def test_commit_failure_returns_error(self, tmp_path: Path) -> None:
-        """A failing `git commit` after a successful add returns an error."""
+        """A failing `git commit` after a successful add returns an error.
+
+        (PR #191 pre-review fix) A third `_run_git` call now runs BETWEEN the
+        add and the commit -- `_has_executable_precommit_hook`'s
+        `rev-parse --git-path hooks/pre-commit` -- so this side_effect has a
+        middle item for it. It resolves to a non-zero exit here (no hook
+        path resolvable in this mock), so hook_present=False and the
+        ORIGINAL un-prefixed "git commit failed: ..." shape is expected --
+        unaffected by which attribution branch fires, since both preserve
+        this substring."""
         file_path = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         manifest = tmp_path / ".hestai" / "MANIFEST.md"
 
-        # add succeeds (0), commit fails (1)
-        with patch(f"{_LINKER}._run_git", side_effect=[(0, "", ""), (1, "", "nothing to commit")]):
+        # add succeeds (0), hook-presence check fails/absent (1), commit fails (1)
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[(0, "", ""), (1, "", "no hook path"), (1, "", "nothing to commit")],
+        ):
             err = _git_add_and_commit(tmp_path, file_path, manifest, "msg")
         assert err is not None
         assert "git commit failed" in err
+        assert not err.startswith("GOVERNANCE_COMMIT_HOOK_FAILED")
 
     @pytest.mark.unit
     def test_manifest_staged_when_present(self, tmp_path: Path) -> None:
-        """When MANIFEST.md exists, it is staged with a second `git add`."""
+        """When MANIFEST.md exists, it is staged with a second `git add`.
+
+        (PR #191 pre-review fix) `return_value` applies uniformly to every
+        `_run_git` call, so the new hook-presence check (which now runs
+        between the last `git add` and `git commit`) adds ONE more call:
+        add(file) + add(manifest) + hook-presence-check + commit == 4.
+        """
         file_path = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         manifest = tmp_path / ".hestai" / "MANIFEST.md"
         manifest.parent.mkdir(parents=True)
@@ -250,8 +269,7 @@ class TestGitAddAndCommit:
         with patch(f"{_LINKER}._run_git", return_value=(0, "", "")) as run:
             err = _git_add_and_commit(tmp_path, file_path, manifest, "msg")
         assert err is None
-        # add(file) + add(manifest) + commit == 3 git calls.
-        assert run.call_count == 3
+        assert run.call_count == 4
         staged_args = [call.args[0] for call in run.call_args_list]
         assert any("MANIFEST.md" in " ".join(a) for a in staged_args)
 
