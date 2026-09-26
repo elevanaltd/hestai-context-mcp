@@ -150,9 +150,10 @@ class TestProseMode:
 
 
 class TestOctaveContentBackCompat:
-    """The octave_content path keeps its post-#70 return shape, plus the single
-    additive #108.4 Option-L ``real_validation_available`` signal (no pre-existing
-    key removed/renamed, and still no ``metrics`` key on this path)."""
+    """The octave_content path keeps its post-#70 return shape, plus the
+    additive #108.4 Option-L ``real_validation_available`` signal and the
+    additive issue #173 slice-1 in-flight signal (no pre-existing key
+    removed/renamed, and still no ``metrics`` key on this path)."""
 
     _POST_70_KEYS = {
         "success",
@@ -162,6 +163,12 @@ class TestOctaveContentBackCompat:
         "adr_target_path",
         "branch",
         "pr_url",
+        # issue #173 slice 1: names the in-flight branch(es)/PR URL when a
+        # TOKEN collides with an unmerged origin governance branch.
+        "in_flight",
+        "in_flight_branches",
+        "in_flight_pr_urls",
+        "in_flight_pr_lookup_error",
         "validation_errors",
         "octave_validation",
         "real_validation_available",
@@ -181,6 +188,13 @@ class TestOctaveContentBackCompat:
         assert result["success"] is True
         assert result["token"] == "HO-CONTEXT-MCP-PROSE-20260601"
         assert result["card_type"] == "DECISION_RECORD"
+        # dry_run never runs detection: in_flight is UNDETERMINED (None), not
+        # a measured False (rework round 1 addendum A; cubic presence-only
+        # finding -- this locks the VALUE, not just key presence).
+        assert result["in_flight"] is None
+        assert result["in_flight_branches"] == []
+        assert result["in_flight_pr_urls"] == {}
+        assert result["in_flight_pr_lookup_error"] is None
 
     def test_octave_content_failure_shape_unchanged(self, tmp_path: Path) -> None:
         result = asyncio.run(
@@ -191,6 +205,12 @@ class TestOctaveContentBackCompat:
             )
         )
         assert set(result.keys()) == self._POST_70_KEYS
+        # Gate A rejected before run_linker was ever reached: detection never
+        # ran, so in_flight is UNDETERMINED (None), not a measured False.
+        assert result["in_flight"] is None
+        assert result["in_flight_branches"] == []
+        assert result["in_flight_pr_urls"] == {}
+        assert result["in_flight_pr_lookup_error"] is None
         assert result["success"] is False
         assert result["validation_errors"]
 

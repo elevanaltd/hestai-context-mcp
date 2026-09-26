@@ -14,6 +14,7 @@ subprocess boundary (git / gh) and the filesystem write layer:
     a throwaway worktree, so run_linker never moves the invoking tree's HEAD.
 """
 
+import json
 import subprocess
 from contextlib import ExitStack
 from pathlib import Path
@@ -29,8 +30,11 @@ from hestai_context_mcp.tools.governance.linker import (
     _git_add_and_commit,
     _open_pr,
     _push_branch,
+    _resolve_open_pr_urls,
     _run_git,
     _write_file,
+    check_in_flight_token,
+    find_in_flight_branches,
     run_linker,
 )
 from hestai_context_mcp.tools.governance.type_checker import ValidationResult
@@ -425,6 +429,10 @@ def _drive_live(
         def p(name: str, **kw: object) -> MagicMock:
             return stack.enter_context(patch(f"{_LINKER}.{name}", **kw))
 
+        p(
+            "check_in_flight_token",
+            return_value={"in_flight": False, "branches": [], "pr_urls": {}, "error": None},
+        )
         p("_create_worktree", return_value=wt_ret)
         remove = p("_remove_worktree")
         delete = p("_delete_branch")
@@ -499,6 +507,10 @@ class TestRunLinkerLivePath:
         """A write_manifest exception is logged, not fatal; commit/PR proceed."""
         target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         with (
+            patch(
+                f"{_LINKER}.check_in_flight_token",
+                return_value={"in_flight": False, "branches": [], "pr_urls": {}, "error": None},
+            ),
             patch(f"{_LINKER}._create_worktree", return_value=(tmp_path / "wt", None)),
             patch(f"{_LINKER}._remove_worktree"),
             patch(f"{_LINKER}._delete_branch"),
@@ -536,6 +548,10 @@ class TestRunLinkerLivePath:
         """
         target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         with (
+            patch(
+                f"{_LINKER}.check_in_flight_token",
+                return_value={"in_flight": False, "branches": [], "pr_urls": {}, "error": None},
+            ),
             patch(f"{_LINKER}._create_worktree", return_value=(tmp_path / "wt", None)),
             patch(f"{_LINKER}._remove_worktree") as remove,
             patch(f"{_LINKER}._delete_branch") as delete,
@@ -643,6 +659,16 @@ class TestRunLinkerLivePath:
         """Happy live path: worktree + write + manifest + commit + push + PR all succeed."""
         target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
         with (
+            patch(
+                f"{_LINKER}.check_in_flight_token",
+                return_value={
+                    "in_flight": False,
+                    "branches": [],
+                    "pr_urls": {},
+                    "pr_lookup_error": None,
+                    "error": None,
+                },
+            ),
             patch(f"{_LINKER}._create_worktree", return_value=(tmp_path / "wt", None)),
             patch(f"{_LINKER}._remove_worktree") as remove,
             patch(f"{_LINKER}._delete_branch") as delete,
@@ -658,6 +684,13 @@ class TestRunLinkerLivePath:
         assert out["pr_url"] == "http://pr/1"
         assert out["branch"].startswith("governance/")
         assert out["staged_uncommitted"] is False
+        # DETERMINED False (not undetermined None): the in-flight check ran
+        # to completion above and found nothing (cubic finding: the I4
+        # in_flight* fields must propagate on the happy live path too).
+        assert out["in_flight"] is False
+        assert out["in_flight_branches"] == []
+        assert out["in_flight_pr_urls"] == {}
+        assert out["in_flight_pr_lookup_error"] is None
         # The branch was pushed before the PR was opened.
         push.assert_called_once()
         # The worktree is always cleaned up; a successful push leaves the branch.
@@ -740,3 +773,468 @@ class TestBranchPersistenceContract:
 def test_linker_module_exposes_run_linker() -> None:
     """Smoke: public entry point is importable and callable."""
     assert callable(linker.run_linker)
+
+
+# ---------------------------------------------------------------------------
+# PR #179 rework round 1: fail-closed detection + tri-state in_flight
+# (items 1, 2; addendum A). Mocked _run_git -- no real git process, so the
+# fetch vs. ref-enumeration failure can be isolated deterministically via
+# side_effect ordering.
+# ---------------------------------------------------------------------------
+
+
+class TestFailClosedDetection:
+    @pytest.mark.unit
+    def test_fetch_failure_is_undetermined_not_measured_false(self, tmp_path: Path) -> None:
+        """(item 2) A fetch failure must be reported UNDETERMINED (None), never
+        a measured False -- TMG: no prior test exercised this path at all."""
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "network down")):
+            branches, error = find_in_flight_branches(tmp_path, _LIVE_RECORD_ID)
+        assert branches == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+        assert "fetch" in error.lower()
+
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "network down")):
+            status = check_in_flight_token(tmp_path, _LIVE_RECORD_ID)
+        assert status["in_flight"] is None
+        assert status["branches"] == []
+        assert status["error"] is not None
+        assert status["error"].startswith("IN_FLIGHT_UNDETERMINED: ")
+
+    @pytest.mark.unit
+    def test_ref_enumeration_failure_fails_closed_undetermined(self, tmp_path: Path) -> None:
+        """(item 1 -- CRS/CE BLOCKING finding) A `git for-each-ref` failure MUST
+        propagate as an error, not silently collapse to an empty (== "nothing
+        in flight") list. Fetch succeeds; for-each-ref fails."""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[(0, "", ""), (1, "", "ref db corrupted")],
+        ):
+            branches, error = find_in_flight_branches(tmp_path, _LIVE_RECORD_ID)
+        assert branches == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+        assert "for-each-ref" in error
+
+    @pytest.mark.unit
+    def test_run_linker_fails_closed_on_ref_enumeration_error(self, tmp_path: Path) -> None:
+        """(item 1) run_linker must open NO worktree/branch/PR when detection
+        could not complete, and must surface the UNDETERMINED shape.
+
+        (round 2, cubic P3) ``_resolve_github_token`` is stubbed so this test
+        makes ZERO real `gh` calls -- it previously fell through to a real
+        `gh auth token` subprocess since run_linker resolves the token
+        unconditionally before the in-flight check."""
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        with (
+            patch(
+                f"{_LINKER}._run_git",
+                side_effect=[(0, "", ""), (1, "", "ref db corrupted")],
+            ),
+            patch(f"{_LINKER}._resolve_github_token", return_value=None),
+            patch(f"{_LINKER}._create_worktree") as create_worktree,
+        ):
+            out = run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", False)
+        assert out["branch"] is None
+        assert out["pr_url"] is None
+        assert out["in_flight"] is None
+        assert out["in_flight_branches"] == []
+        assert out["in_flight_pr_urls"] == {}
+        assert out["error"] is not None
+        assert out["error"].startswith("IN_FLIGHT_UNDETERMINED: ")
+        create_worktree.assert_not_called()
+
+    @pytest.mark.unit
+    def test_run_linker_undetermined_on_dry_run(self, tmp_path: Path) -> None:
+        """(addendum A) dry_run never runs detection -- in_flight must be the
+        UNDETERMINED shape (None), not a measured False."""
+        target = tmp_path / ".hestai" / "decisions" / "x.oct.md"
+        out = run_linker(tmp_path, _valid_decision(target), "===DECISION_RECORD===\n", True)
+        assert out["dry_run"] is True
+        assert out["in_flight"] is None
+        assert out["in_flight_branches"] == []
+        assert out["in_flight_pr_urls"] == {}
+
+
+# ---------------------------------------------------------------------------
+# PR #179 rework round 1, item 6: per-branch gh pr list lookup (replaces the
+# single `--limit 100` list that could silently truncate).
+# ---------------------------------------------------------------------------
+
+
+class TestResolveOpenPrUrls:
+    @pytest.mark.unit
+    def test_no_branches_makes_no_subprocess_call(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}.subprocess.run") as run:
+            urls, err = _resolve_open_pr_urls(tmp_path, [], None)
+        assert urls == {}
+        assert err is None
+        run.assert_not_called()
+
+    @pytest.mark.unit
+    def test_success_resolves_url_per_branch_via_head_filter(self, tmp_path: Path) -> None:
+        """ONE `gh pr list --head <branch>` call PER branch, not a single
+        shared `--limit N` list (truncation-proof by construction)."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            calls.append(cmd)
+            assert cmd[:3] == ["gh", "pr", "list"]
+            assert "--limit" not in cmd or cmd[cmd.index("--limit") + 1] == "1"
+            branch = cmd[cmd.index("--head") + 1]
+            return _fake_completed(0, stdout=json.dumps([{"url": f"http://pr/{branch}"}]))
+
+        with patch(f"{_LINKER}.subprocess.run", side_effect=fake_run):
+            urls, err = _resolve_open_pr_urls(tmp_path, ["governance/a", "governance/b"], None)
+        assert urls == {
+            "governance/a": "http://pr/governance/a",
+            "governance/b": "http://pr/governance/b",
+        }
+        assert err is None
+        assert len(calls) == 2
+
+    @pytest.mark.unit
+    def test_one_branch_gh_failure_is_surfaced_others_still_resolve(self, tmp_path: Path) -> None:
+        """A per-branch lookup failure is NAMED in pr_lookup_error, not
+        silently swallowed (CRS/CE/cubic finding); the other branch's lookup
+        still succeeds -- detection is unaffected either way."""
+
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            branch = cmd[cmd.index("--head") + 1]
+            if branch == "governance/bad":
+                return _fake_completed(1, stderr="gh: not found")
+            return _fake_completed(0, stdout=json.dumps([{"url": "http://pr/ok"}]))
+
+        with patch(f"{_LINKER}.subprocess.run", side_effect=fake_run):
+            urls, err = _resolve_open_pr_urls(tmp_path, ["governance/bad", "governance/ok"], None)
+        assert urls == {"governance/ok": "http://pr/ok"}
+        assert err is not None
+        assert "governance/bad" in err
+
+    @pytest.mark.unit
+    def test_no_pr_found_for_branch_is_not_an_error(self, tmp_path: Path) -> None:
+        """An empty JSON array (no open PR for this branch) is success with
+        no URL, not a failure."""
+        with patch(
+            f"{_LINKER}.subprocess.run",
+            return_value=_fake_completed(0, stdout="[]"),
+        ):
+            urls, err = _resolve_open_pr_urls(tmp_path, ["governance/none"], None)
+        assert urls == {}
+        assert err is None
+
+
+# ---------------------------------------------------------------------------
+# PR #179 OID round (final): three review rounds each found a new instance of
+# ONE cause -- the code verified a ref, then re-read it BY NAME in a second
+# git process, treating a silent exit 1 (or stderr presence/absence) as a
+# measurement. The fix changes the SHAPE: every git call's valid answers exit
+# 0 with the answer on stdout, and every ref is resolved to an immutable OID
+# EXACTLY ONCE (one `for-each-ref --format='%(refname:short) %(objectname)'`
+# call captures every candidate's name+OID together; one
+# `rev-parse --verify origin/main^{commit}` call captures main's OID). Every
+# subsequent ancestry (`git rev-list -1 <branch-oid> ^<main-oid>`) or blob
+# (`git ls-tree <oid> -- <path>`) check takes an OID, NEVER a ref name. EVERY
+# non-zero exit from ANY of these calls -- including _run_git's
+# timeout-as-1/OSError-as-1 -- maps to IN_FLIGHT_UNDETERMINED. NO code path
+# inspects stderr to decide an outcome (stderr may still appear in an error
+# MESSAGE for diagnostics, but never gates control flow).
+#
+# REMOVED in this round (obsolete under the OID shape; see report for the
+# full deletion list): _is_merged_into_origin_main (name-based merge-base),
+# _blob_sha_at / _verify_ref_resolves / _branch_record_matches_origin_main
+# (name-based rev-parse --verify -q, which could not tell a missing REF from
+# a missing PATH -- moot now: nothing after enumeration is ever looked up by
+# name again, so there is no ref to be "missing" at that stage).
+# ---------------------------------------------------------------------------
+
+
+class TestListRemoteGovernanceCandidatesForSlug:
+    """ONE `for-each-ref --format='%(refname:short) %(objectname)'` call
+    captures BOTH the branch name and its OID together -- the OID is never
+    re-resolved later."""
+
+    @pytest.mark.unit
+    def test_parses_name_and_oid_pairs(self, tmp_path: Path) -> None:
+        oid = "1" * 40
+        with patch(
+            f"{_LINKER}._run_git",
+            return_value=(0, f"origin/governance/20260101-ho-x-20260101 {oid}", ""),
+        ):
+            candidates, error = linker._list_remote_governance_candidates_for_slug(
+                tmp_path, "ho-x-20260101"
+            )
+        assert error is None
+        assert candidates == [("governance/20260101-ho-x-20260101", oid)]
+
+    @pytest.mark.unit
+    def test_non_matching_slug_excluded(self, tmp_path: Path) -> None:
+        oid = "2" * 40
+        with patch(
+            f"{_LINKER}._run_git",
+            return_value=(0, f"origin/governance/20260101-other-slug-20260101 {oid}", ""),
+        ):
+            candidates, error = linker._list_remote_governance_candidates_for_slug(
+                tmp_path, "ho-x-20260101"
+            )
+        assert error is None
+        assert candidates == []
+
+    @pytest.mark.unit
+    def test_nonzero_exit_is_undetermined_not_fail_open(self, tmp_path: Path) -> None:
+        """(M3 guard) A for-each-ref failure must fail closed, not silently
+        return an empty list."""
+        with patch(f"{_LINKER}._run_git", return_value=(128, "", "fatal: bad ref")):
+            candidates, error = linker._list_remote_governance_candidates_for_slug(
+                tmp_path, "ho-x-20260101"
+            )
+        assert candidates == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+    @pytest.mark.unit
+    def test_empty_output_is_measured_empty(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}._run_git", return_value=(0, "", "")):
+            candidates, error = linker._list_remote_governance_candidates_for_slug(
+                tmp_path, "ho-x-20260101"
+            )
+        assert candidates == []
+        assert error is None
+
+
+class TestResolveOid:
+    """`git rev-parse --verify <ref>^{commit}` WITHOUT -q: exit 0 -> OID on
+    stdout; ANY non-zero exit -> undetermined. No stderr inspection."""
+
+    @pytest.mark.unit
+    def test_exit_0_returns_oid(self, tmp_path: Path) -> None:
+        oid = "3" * 40
+        with patch(f"{_LINKER}._run_git", return_value=(0, oid, "")):
+            resolved, error = linker._resolve_oid(tmp_path, "origin/main")
+        assert resolved == oid
+        assert error is None
+
+    @pytest.mark.unit
+    def test_nonzero_exit_with_empty_stderr_is_still_undetermined(self, tmp_path: Path) -> None:
+        """Without -q, a missing ref is a HARD git failure (fatal, non-zero
+        exit) -- but even if stderr were somehow empty, the exit code ALONE
+        must decide; this proves the code does not require non-empty stderr
+        to fail closed (no stderr inspection anywhere)."""
+        with patch(f"{_LINKER}._run_git", return_value=(128, "", "")):
+            resolved, error = linker._resolve_oid(tmp_path, "origin/main")
+        assert resolved is None
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+    @pytest.mark.unit
+    def test_masked_timeout_is_undetermined(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}._run_git", return_value=(1, "", "git command timed out")):
+            resolved, error = linker._resolve_oid(tmp_path, "origin/main")
+        assert resolved is None
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+
+class TestIsAncestorOfMain:
+    """`git rev-list -1 <branch-oid> ^<main-oid>`, OIDs only: exit 0 + empty
+    stdout -> merged; exit 0 + non-empty stdout -> not an ancestor. ANY
+    non-zero exit (including exit 137 / SIGKILL with empty stderr, and a
+    masked `_run_git` timeout) -> undetermined."""
+
+    @pytest.mark.unit
+    def test_exit_0_empty_stdout_is_measured_merged(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}._run_git", return_value=(0, "", "")):
+            merged, error = linker._is_ancestor_of_main(tmp_path, "b" * 40, "m" * 40)
+        assert merged is True
+        assert error is None
+
+    @pytest.mark.unit
+    def test_exit_0_nonempty_stdout_is_measured_not_ancestor(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}._run_git", return_value=(0, "b" * 40, "")):
+            merged, error = linker._is_ancestor_of_main(tmp_path, "b" * 40, "m" * 40)
+        assert merged is False
+        assert error is None
+
+    @pytest.mark.unit
+    def test_killed_process_exit_137_empty_stderr_is_undetermined(self, tmp_path: Path) -> None:
+        """(RED case) A SIGKILL'd git process: exit 137, EMPTY stderr (the
+        kernel does not populate stderr for a kill signal). Must NOT be read
+        as a measured "not an ancestor" -- the non-zero exit ALONE decides,
+        never stderr presence/absence."""
+        with patch(f"{_LINKER}._run_git", return_value=(137, "", "")):
+            merged, error = linker._is_ancestor_of_main(tmp_path, "b" * 40, "m" * 40)
+        assert merged is False
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+    @pytest.mark.unit
+    def test_masked_timeout_on_ancestry_call_is_undetermined(self, tmp_path: Path) -> None:
+        """(RED case) `_run_git` timeout on THIS specific call -- exit 1,
+        "git command timed out" -- must not masquerade as a measured miss."""
+        with patch(
+            f"{_LINKER}._run_git",
+            return_value=(1, "", "git command timed out"),
+        ):
+            merged, error = linker._is_ancestor_of_main(tmp_path, "b" * 40, "m" * 40)
+        assert merged is False
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+
+class TestLsTreeBlob:
+    """`git ls-tree <oid> -- <path>`: exit 0 with empty stdout -> no record
+    (measured); exit 0 with output -> parse the blob id. ANY non-zero exit
+    -> undetermined."""
+
+    @pytest.mark.unit
+    def test_exit_0_empty_stdout_is_measured_no_record(self, tmp_path: Path) -> None:
+        with patch(f"{_LINKER}._run_git", return_value=(0, "", "")):
+            blob_oid, error = linker._ls_tree_blob(tmp_path, "a" * 40, ".hestai/decisions/T.oct.md")
+        assert blob_oid is None
+        assert error is None
+
+    @pytest.mark.unit
+    def test_exit_0_parses_blob_oid(self, tmp_path: Path) -> None:
+        oid = "4" * 40
+        line = f"100644 blob {oid}\t.hestai/decisions/T.oct.md"
+        with patch(f"{_LINKER}._run_git", return_value=(0, line, "")):
+            blob_oid, error = linker._ls_tree_blob(tmp_path, "a" * 40, ".hestai/decisions/T.oct.md")
+        assert blob_oid == oid
+        assert error is None
+
+    @pytest.mark.unit
+    def test_nonzero_exit_is_undetermined(self, tmp_path: Path) -> None:
+        """(RED case) An invalid/unreadable tree object -- exit 128 -- must
+        NOT be read as "no record" just because that's also plausible; the
+        non-zero exit alone decides."""
+        with patch(
+            f"{_LINKER}._run_git",
+            return_value=(128, "", "fatal: not a tree object"),
+        ):
+            blob_oid, error = linker._ls_tree_blob(tmp_path, "a" * 40, ".hestai/decisions/T.oct.md")
+        assert blob_oid is None
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+
+class TestFindInFlightBranchesUndeterminedPropagation:
+    """End-to-end: internal signal failures must surface as
+    find_in_flight_branches' own error, never silently become a determined
+    branch list."""
+
+    @pytest.mark.unit
+    def test_masked_ancestor_timeout_propagates_as_undetermined(self, tmp_path: Path) -> None:
+        branch_oid = "5" * 40
+        main_oid = "6" * 40
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[
+                (0, "", ""),  # fetch origin
+                (
+                    0,
+                    f"origin/governance/20260101-ho-context-mcp-live-20260101 {branch_oid}",
+                    "",
+                ),  # for-each-ref (name + OID in one call)
+                (0, main_oid, ""),  # rev-parse --verify origin/main^{commit}
+                (0, "", ""),  # ls-tree main_oid -- target_path (no record on main)
+                (1, "", "git command timed out"),  # rev-list -1 branch_oid ^main_oid (masked)
+            ],
+        ):
+            branches, error = find_in_flight_branches(
+                tmp_path, _LIVE_RECORD_ID, ".hestai/decisions/T.oct.md"
+            )
+        assert branches == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+
+class TestReadOnceRefResolution:
+    """(c) READ-ONCE: each ref is resolved to an OID exactly once (one
+    for-each-ref call for all candidates, one rev-parse for main); every
+    subsequent ancestry/blob check takes an OID, never a ref name. This also
+    demonstrates that a ref pruned mid-run is IRRELEVANT: nothing after
+    enumeration ever re-reads a ref by name, so deleting it changes nothing."""
+
+    @pytest.mark.unit
+    def test_no_call_after_enumeration_references_a_ref_name(self, tmp_path: Path) -> None:
+        branch_oid = "7" * 40
+        main_oid = "8" * 40
+        branch_name = "governance/20260101-ho-context-mcp-live-20260101"
+        calls: list[list[str]] = []
+
+        def fake_run_git(args: list[str], cwd: object) -> tuple[int, str, str]:
+            calls.append(args)
+            if args[0] == "fetch":
+                return (0, "", "")
+            if args[0] == "for-each-ref":
+                return (0, f"origin/{branch_name} {branch_oid}", "")
+            joined = " ".join(args)
+            if (f"origin/{branch_name}" in joined or "origin/main" in joined) and args[
+                0
+            ] != "rev-parse":
+                pytest.fail(f"git call re-read a ref by name after enumeration: {args}")
+            if args[0] == "rev-parse":
+                return (0, main_oid, "")
+            if args[0] == "ls-tree":
+                return (0, "", "")
+            if args[0] == "rev-list":
+                return (0, "", "")
+            pytest.fail(f"unexpected git call: {args}")
+            raise AssertionError("unreachable")
+
+        with patch(f"{_LINKER}._run_git", side_effect=fake_run_git):
+            branches, error = find_in_flight_branches(
+                tmp_path, _LIVE_RECORD_ID, ".hestai/decisions/T.oct.md"
+            )
+
+        assert error is None
+        for_each_ref_calls = [c for c in calls if c[0] == "for-each-ref"]
+        rev_parse_calls = [c for c in calls if c[0] == "rev-parse"]
+        assert len(for_each_ref_calls) == 1
+        assert len(rev_parse_calls) == 1
+        for call in calls:
+            if call[0] in ("rev-list", "ls-tree"):
+                assert branch_name not in " ".join(call)
+                assert "origin/main" not in " ".join(call)
+
+
+class TestTargetPathNoneBoundary:
+    """PR #179 round 3 item 3 (unchanged policy): target_path=None on the
+    PUBLIC find_in_flight_branches is rejected at the boundary once there is
+    anything to evaluate."""
+
+    @pytest.mark.unit
+    def test_target_path_none_with_candidates_is_undetermined(self, tmp_path: Path) -> None:
+        oid = "9" * 40
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[
+                (0, "", ""),  # fetch origin
+                (
+                    0,
+                    f"origin/governance/20260101-ho-context-mcp-live-20260101 {oid}",
+                    "",
+                ),  # for-each-ref: one candidate exists
+            ],
+        ):
+            branches, error = find_in_flight_branches(tmp_path, _LIVE_RECORD_ID)
+        assert branches == []
+        assert error is not None
+        assert error.startswith("IN_FLIGHT_UNDETERMINED: ")
+
+    @pytest.mark.unit
+    def test_target_path_none_with_no_candidates_stays_measured_empty(self, tmp_path: Path) -> None:
+        """Regression guard, not a RED case: ZERO candidate branches means
+        there is nothing the missing content-match signal COULD have
+        changed -- a fully measured "nothing in flight", not an error."""
+        with patch(
+            f"{_LINKER}._run_git",
+            side_effect=[
+                (0, "", ""),  # fetch origin
+                (0, "", ""),  # for-each-ref: no matching branches
+            ],
+        ):
+            branches, error = find_in_flight_branches(tmp_path, _LIVE_RECORD_ID)
+        assert branches == []
+        assert error is None

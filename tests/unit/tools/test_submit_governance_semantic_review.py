@@ -224,12 +224,17 @@ class TestOctaveContentStage5:
             "octave_validation",
             "dry_run",
         }
-        # Additive top-level keys: semantic_review (#77) and the #108.4 Option-L
-        # real_validation_available signal. No pre-existing key is removed or
-        # renamed (byte-stable contract beyond purely additive fields).
+        # Additive top-level keys: semantic_review (#77), the #108.4 Option-L
+        # real_validation_available signal, and the issue #173 slice-1
+        # in-flight signal. No pre-existing key is removed or renamed
+        # (byte-stable contract beyond purely additive fields).
         assert set(result.keys()) == post_70_keys | {
             "semantic_review",
             "real_validation_available",
+            "in_flight",
+            "in_flight_branches",
+            "in_flight_pr_urls",
+            "in_flight_pr_lookup_error",
         }
 
 
