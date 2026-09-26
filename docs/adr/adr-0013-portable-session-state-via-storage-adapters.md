@@ -10,7 +10,7 @@ ACCEPTED
 - **Author**: requirements-steward (codex, via control-room session)
 - **Created**: 2026-04-25
 - **Version**: 1.1
-- **Revision**: 1.0→1.1 2026-09-26: R1 gains the `COORDINATION_DOCUMENT` class (ruling `HO-ADR-0013-COORDINATION-DOCUMENT-CLASS-20260926`)
+- **Revision**: 1.0→1.1 2026-09-26: R1 gains the `COORDINATION_DOCUMENT` class (ruling `HO-ADR-0013-COORDINATION-DOCUMENT-CLASS-20260926`); same v1.1, same PR, same day: R1 never-shared class extended to credentials (SR F1), R8 tombstone/revocation generalised to Coordination Documents (SR F3), R3/R4/R5/R7/R9 identity/versioning/adapter-free/queue/concurrency coverage extended to Coordination Documents, R6 screen provenance records both screening outcomes, and R10 gains five Coordination Document testable invariants (SR F5)
 - **Updated**: 2026-09-26
 - **Ratified**: 2026-04-26 (human authority via control-room session)
 - **Phase**: D2 design
@@ -63,9 +63,9 @@ Classification is mandatory. Unknown state is treated as `LOCAL_MUTABLE` until e
 2. **Text only.** `.md`, `.oct.md`, `.json` and `.jsonl` files only. Binaries, design assets, CSV/SQL/PDF exports and backups are never eligible.
 3. **Per-writer, append-only.** Each writer (a lane, machine or cloud session) writes only its own files, so carrier merges cannot conflict. A file that several writers rewrite, such as a shared work queue, is not itself eligible. It becomes a `DERIVED_PROJECTION` rebuilt locally from per-writer entries, consistent with R9 (append-first, compact-later, no Last-Write-Wins).
 4. **Cloud sessions write only to their own inbox.** A local role-bound agent promotes inbox content into shared state.
-5. **Never-shared data class.** Client data, personal data and financial data are never shared through any carrier. They must be kept out of Coordination Documents. A document that contains them is not eligible and stays local. Such data is not redacted for publication.
+5. **Never-shared data class.** Client data, personal data, financial data, and credentials — API keys, tokens, passwords, private keys, and other secrets — are never shared through any carrier. They must be kept out of Coordination Documents, not redacted for publication. A document that contains any of them is not eligible and stays local; any credential finding makes the document categorically ineligible.
 6. **Publication screen.** Before any Coordination Document reaches any carrier, it passes a screen with two layers, and a hit in either layer blocks publication:
-   - a deterministic pattern pre-screen (for example email addresses, phone numbers, currency amounts and key-shaped secrets);
+   - a deterministic pattern pre-screen (for example email addresses, phone numbers, currency amounts, and credential patterns such as API keys, tokens, passwords, and private keys);
    - a single cheap-model agent pass over the provider-agnostic AIClient port (PROD I3), judging whether the document contains never-shared data.
 
    A blocked document stays local and is reported, not rewritten. Publication requires an affirmative clear result from the agent pass; any other result — uncertain, malformed, timed out or errored — blocks publication. If never-shared data is found in a document after publication, it is revoked through R8 (tombstone, then hard delete where the carrier supports it). If the screen is unavailable, publication does not happen, so the screen fails closed. Local operation is unaffected (PROD I6).
@@ -113,6 +113,8 @@ Every Portable Memory Artifact is scoped by this identity tuple:
 
 Restore must refuse artifacts whose identity tuple does not match the requested tuple. This prevents silent hydration from forks, renames, worktrees, or personal clones. A mismatch is a structured restore error, not an empty fallback. This preserves PROD I3 by making context synthesis deterministic for the intended identity and PROD I1 by preserving provenance.
 
+Coordination Document artifacts carry the same identity tuple, scoped and validated identically; a Coordination Document is rejected on restore under the same mismatch rule as a Portable Memory Artifact.
+
 ### R4: Portable artifact schema, versioning, and migration
 
 Portable Memory Artifacts are versioned records. Each artifact includes: artifact id, artifact kind, identity tuple, schema version, producer version, minimum reader version, created timestamp, monotonic sequence id, parent ids, redaction provenance, classification label, payload hash, and payload.
@@ -127,6 +129,8 @@ Migration rules:
 
 This protects provider-agnostic context shape (PROD I3) and avoids lifecycle corruption (PROD I1). Fail-closed behavior aligns with credential safety posture under PROD I2.
 
+The same versioning, migration, and `minimum_reader_version` rules apply unchanged to Coordination Document artifacts; a reader too old for a published Coordination Document's `minimum_reader_version` fails closed exactly as it would for a Portable Memory Artifact.
+
 ### R5: Lifecycle binding
 
 PSS binds storage to the existing lifecycle:
@@ -136,7 +140,7 @@ PSS binds storage to the existing lifecycle:
 3. In-session refreshes: May update cache or outbox metadata, but must not change the snapshot seen by that session.
 4. `clock_out`: Redact, archive locally, produce Portable Memory Artifacts, then Publish Portable State through the adapter.
 
-The named snapshot prevents intra-session context drift. If portable memory changes remotely after `clock_in`, the current session does not see it through `get_context`; the next session can restore a newer snapshot. This preserves PROD I5 and keeps context synthesis identical within a session regardless of provider, CLI, or machine (PROD I3). Local archive and session close remain functional even if no remote carrier exists (PROD I1 and PROD I6).
+The named snapshot prevents intra-session context drift. If portable memory changes remotely after `clock_in`, the current session does not see it through `get_context`; the next session can restore a newer snapshot. This preserves PROD I5 and keeps context synthesis identical within a session regardless of provider, CLI, or machine (PROD I3). Local archive and session close remain functional even if no remote carrier exists (PROD I1 and PROD I6). `get_context` remains adapter-free for Coordination Documents exactly as it does for Portable Memory Artifacts: zero network I/O, zero writes (PROD I5), unchanged by R1/R2's addition of the new artifact kind.
 
 ### R6: Redaction provenance metadata
 
@@ -152,7 +156,7 @@ Redaction is the publication gate. A `redaction_success` boolean is insufficient
 
 `write_redacted_artifact()` must fail closed without complete provenance metadata. This prevents stale redactor output from being treated as safe after rules change. It directly enforces PROD I2.
 
-Coordination Documents are not redacted. They either pass the R1 publication screen unchanged or they are not published. A published Coordination Document still carries screen provenance: screen version, pattern-set hash, agent model, input hash and timestamp.
+Coordination Documents are not redacted. They either pass the R1 publication screen unchanged or they are not published. A published Coordination Document carries screen provenance recording both required screening outcomes, in addition to screen version and timestamp: the deterministic pre-screen result (pattern-set hash, pass/hit) and the agent-pass verdict (model, verdict value = clear, input hash). Publication without both outcomes recorded fails closed, the same fail-closed posture R1 rule 6 requires when the screen itself is unavailable.
 
 ### R7: Publish acknowledgement, durable queue, and unpublished status
 
@@ -160,11 +164,17 @@ Coordination Documents are not redacted. They either pass the R1 publication scr
 
 The durable outbound queue is Local State, for example `.hestai/state/portable/outbox/{artifact_id}.json`. Retry may happen on later `clock_in`, `clock_out`, or explicit Publish Portable State, but never inside `get_context`. A publish acknowledgement records artifact id, carrier namespace, sequence id, durable carrier receipt if any, and final status. This preserves lifecycle integrity without making remote publication mandatory (PROD I1 and PROD I6).
 
+This durable-queue and unpublished-status contract applies unchanged to Coordination Documents: a Coordination Document blocked by the R1 publication screen, or queued pending it, follows the same local-archive-success/portable-publish-failure-or-queued reporting and the same `unpublished_memory_exists: true` signal as a Portable Memory Artifact.
+
 ### R8: Tombstone and revocation semantics
 
-PSS is not append-only-only. It is append-first with explicit revocation. A Portable Memory Artifact may be revoked by a tombstone artifact that identifies the target artifact id, reason, timestamp, publisher identity, and redaction provenance if the tombstone is driven by post-hoc redaction failure.
+PSS is not append-only-only. It is append-first with explicit revocation, for both artifact kinds.
 
-Restore must exclude tombstoned artifacts from Context Projection. Compaction must preserve revocation semantics. If a carrier supports hard delete, deletion may be used after tombstone publication, but hard delete is not the only revocation mechanism. This is required for correction, removal, and right-to-forget paths, and it protects PROD I2 when missed sensitive data is discovered after publication.
+A Portable Memory Artifact may be revoked by a tombstone artifact that identifies the target artifact id, reason, timestamp, publisher identity, and redaction provenance if the tombstone is driven by post-hoc redaction failure.
+
+A Coordination Document is revoked by a tombstone that names the target artifact's identity — artifact id, path, and identity tuple (R3) — and carries that artifact's screen provenance (R6) together with the specific finding that triggered revocation (a pre-screen pattern hit or a post-hoc discovery of never-shared data, including credentials). The tombstone is published before any hard delete is attempted; hard delete, where the carrier supports it, follows tombstone publication and never precedes it.
+
+Restore and Context Projection must exclude tombstoned artifacts of either kind. Compaction must preserve revocation semantics. If a carrier supports hard delete, deletion may be used only after tombstone publication, but hard delete is not the only revocation mechanism. This is required for correction, removal, and right-to-forget paths, and it protects PROD I2 when missed sensitive data — including credentials — is discovered after publication.
 
 ### R9: Concurrency model
 
@@ -172,7 +182,7 @@ PSS uses append-first, monotonic IDs, compact-later. It explicitly rejects Last-
 
 Each publish appends a monotonic artifact id and parent references. Restore merges valid artifacts by identity tuple and monotonic order. Duplicate artifact ids are idempotent. Conflicting compactions do not delete source events until their tombstone and parent coverage are validated. Compaction is a separate projection step, not the authoritative event stream.
 
-This preserves lifecycle evidence (PROD I1) and keeps context deterministic across machines (PROD I3).
+This preserves lifecycle evidence (PROD I1) and keeps context deterministic across machines (PROD I3). The same append-first, monotonic-id, no-Last-Write-Wins model applies unchanged to Coordination Documents; per-writer append-only (R1 rule 3) is this concurrency model applied to the new artifact kind, not a separate one.
 
 ### R10: Testable invariants
 
@@ -185,6 +195,14 @@ Future implementation must add fixtures for these invariants before behavior is 
 - Hydration failure produces a structured error, not silent empty fallback.
 
 These invariants directly test PROD I5, PROD I6, PROD I2, PROD I3, and PROD I1 respectively.
+
+Coordination Document invariants (R1/R6/R8), also PROD I2:
+
+- A document with any pre-screen hit is never published.
+- Any agent verdict other than affirmative clear blocks publication.
+- An unallowlisted path is never published.
+- Screen unavailable → nothing published; local operation is unaffected.
+- A revoked Coordination Document is excluded from restore.
 
 ### R11: Anti-pattern: no custom Git refs
 
@@ -218,7 +236,7 @@ Positive consequences:
 - Multi-machine continuity becomes possible without syncing raw `.hestai/state/`.
 - Existing LocalFilesystem behavior remains the default and complete offline mode.
 - `get_context` stays pure, local, and deterministic.
-- Credential safety is strengthened by provenance rather than weakened by remote storage.
+- Credential safety is strengthened by provenance rather than weakened by remote storage — this applies to Portable Memory Artifacts; Coordination Documents instead rely on exclusion (the never-shared data class) plus the two-layer publication screen, since they are never redacted.
 - Future carriers can be added without changing stdio JSON-RPC transport.
 - Wrong-memory hydration from forks, clones, and worktrees becomes explicitly detectable.
 
@@ -228,6 +246,7 @@ Negative consequences:
 - Publication can lag behind local archival, so callers must surface unpublished memory status.
 - A future non-local adapter must meet strict capability requirements before it can publish.
 - Session-bound snapshots require tool contracts to carry or resolve session identity during context reads.
+- Coordination Documents are published unredacted after screening; safety rests entirely on the never-shared data class, the explicit allowlist, the two-layer publication screen, and R8 revocation — not on redaction provenance.
 
 Neutral consequences:
 
@@ -246,6 +265,8 @@ Class S: Raw sync. Rejected. Syncing `.hestai/state/` directly would publish unc
 Custom Git refs. Rejected. The phantom-substrate evidence from commit `9dad66035922363a3d18e154d85e31fedb680f87` proves default clone, fetch, push, checkout, index, and reflog behavior are unsuitable for portable memory.
 
 Last-Write-Wins remote state. Rejected. LWW selects a winner, not a complete memory set. PSS needs append-first events and compact-later projections to preserve concurrent session evidence.
+
+Redacting Coordination Documents. Rejected in favor of never-shared exclusion (operator option b, 2026-09-26): redaction risks stale-rule leakage for free-form coordination text, so ineligible documents stay local instead.
 
 ## References
 
