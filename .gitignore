@@ -45,7 +45,7 @@ Thumbs.db
 # Tier 1: System governance (MCP-delivered, never committed)
 .hestai-sys
 # Tier 3: Working state (gitignored, symlinked from .hestai/state/)
-.hestai-state/
+.hestai-state
 .hestai/state
 
 # Raw debate transcripts (OCTAVE compressed versions are committed)
