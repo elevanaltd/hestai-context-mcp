@@ -167,7 +167,9 @@ def test_core_keys_inside_blocks_do_not_double_count(tmp_path: Path) -> None:
 
 def _without_meta(key: str) -> str:
     return "".join(
-        ln for ln in _record(_GOOD_BLOCKS).splitlines(keepends=True) if f"  {key}::" not in ln[:12]
+        ln
+        for ln in _record(_GOOD_BLOCKS).splitlines(keepends=True)
+        if not ln.startswith(f"  {key}::")
     )
 
 

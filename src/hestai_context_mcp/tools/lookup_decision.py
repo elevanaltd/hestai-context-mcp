@@ -106,7 +106,7 @@ def lookup_decision(
     except OSError as exc:
         return agr_read.error_envelope(
             code="RECORD_PARSE_FAILED",
-            category="schema_violation",
+            category="io_failure",
             message="DECISION_RECORD file could not be read.",
             tool=_TOOL,
             context={

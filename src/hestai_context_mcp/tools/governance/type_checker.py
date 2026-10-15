@@ -119,6 +119,7 @@ RESERVED_FIELD_NAMES = frozenset({"DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"}
 # RULINGS blocks (first-match parsing would let a nested copy take over the record).
 TOPIC_BLOCK_RESERVED_KEYS = frozenset(
     {
+        "VERSION",
         "TOKEN",
         "ID",
         "TYPE",
@@ -528,12 +529,6 @@ def _check_agr_invariants(
     # the #10/#9 precedent.
     _check_reasoning_density(content, errors)
 
-    # --- #14: no top-level reserved key inside CURRENT / RULINGS (v1.3 §1.7) ---
-    _check_topic_block_keys(content, errors)
-
-    # --- #15: no core key ahead of the META header (v1.3) ---
-    _check_core_key_placement(content, errors)
-
 
 _META_HEADER_RE = re.compile(r"^META:\s*$")
 
@@ -734,13 +729,24 @@ def validate_octave_content(working_dir: Path, content: str) -> ValidationResult
         return ValidationResult(valid=False, errors=errors, warnings=warnings)
 
 
+def _strip_block_lines(content: str) -> str:
+    """Drop every line inside a CURRENT / RULINGS block (headers are kept).
+
+    The read parser excludes these lines from record fields; Gate A extracts
+    every invariant input from the same block-excluded text so the write side
+    and the read side agree on what the record declares (#203 S1).
+    """
+    return "".join(line for block, line in annotate_lines(content) if block is None)
+
+
 def _validate_impl(
     working_dir: Path,
-    content: str,
+    raw_content: str,
     errors: list[str],
     warnings: list[str],
 ) -> ValidationResult:
     """Internal validation implementation."""
+    content = _strip_block_lines(raw_content)
     # --- Check 1: OCTAVE sentinel at document start (Bug 7) ---
     sentinel = _extract_sentinel(content)
     if sentinel is None:
@@ -796,6 +802,9 @@ def _validate_impl(
         # ratification-provenance WARNING (#12). Collect-more-errors; the
         # offending field is named in each message for operator UX.
         _check_agr_invariants(working_dir, content, token, errors, warnings)
+        # #14/#15 need the block lines, so they read the raw (unstripped) text.
+        _check_topic_block_keys(raw_content, errors)
+        _check_core_key_placement(raw_content, errors)
 
     elif card_type in _FACET_CARD_TYPES:
         token = _extract_id(content)

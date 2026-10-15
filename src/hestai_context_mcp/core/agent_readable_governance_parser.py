@@ -131,7 +131,7 @@ def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
     """
     block: str | None = None
     header_indent = 0
-    for line in text.splitlines():
+    for line in text.splitlines(keepends=True):
         header = _BLOCK_HEADER_RE.match(line)
         if header:
             block = header.group(2)
