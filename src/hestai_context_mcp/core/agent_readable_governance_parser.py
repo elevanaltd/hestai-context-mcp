@@ -90,7 +90,10 @@ _FIELD_LINE_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]*)::(.*?)\s*$")
 # Topic-record blocks (ADR-RFC-ARCH-004 v1.3 §1.7). ``CURRENT:`` / ``RULINGS:``
 # open a block; the block runs while following lines are blank or indented
 # deeper than the header. Regex + indent only — no structural OCTAVE parsing.
-_BLOCK_HEADER_RE = re.compile(r"^(\s*)(CURRENT|RULINGS):\s*$")
+# Only a header at the record's top-level indentation (column 0) opens a block;
+# a header-shaped line deeper than that is just a line of the enclosing block
+# (or of META) and can neither open nor reset a block.
+_BLOCK_HEADER_RE = re.compile(r"^()(CURRENT|RULINGS):\s*$")
 _RULING_ENTRY_RE = re.compile(r"^\s*(R\d+):\s*$")
 _CURRENT_ENTRY_RE = re.compile(r"^\s*(R\d+)::(.*?)\s*$")
 
@@ -119,7 +122,7 @@ class TopicBlocks(TypedDict):
     rulings: list[RulingEntry]
 
 
-def _annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
+def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
     """Yield ``(block_name | None, line)`` for every line of ``text``.
 
     ``block_name`` is ``CURRENT`` / ``RULINGS`` for lines inside such a block
@@ -147,7 +150,7 @@ def iter_block_lines(text: str) -> Iterator[tuple[str, str]]:
     ``fields``) and by Gate A (to reject reserved top-level keys nested in a
     block).
     """
-    for block, line in _annotate_lines(text):
+    for block, line in annotate_lines(text):
         if block is not None:
             yield block, line
 
@@ -242,7 +245,7 @@ def _parse_impl(text: str) -> DecisionRecord:
 
     # Lines inside CURRENT/RULINGS blocks are NOT META: keep them out of
     # ``fields`` so a nested key (e.g. TOPIC, SCOPE) cannot shadow a META field.
-    for block, raw_line in _annotate_lines(text):
+    for block, raw_line in annotate_lines(text):
         if block is not None:
             continue
         match = _FIELD_LINE_RE.match(raw_line)

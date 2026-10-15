@@ -116,17 +116,22 @@ def test_nested_block_header_bypass_is_rejected(tmp_path: Path) -> None:
 @pytest.mark.parametrize("key", ["TOKEN", "STATUS", "DECISION", "TIER", "BECAUSE", "AUTHORED_AT"])
 def test_core_key_before_meta_is_rejected(tmp_path: Path, key: str) -> None:
     body = _record().split("===DECISION_RECORD===\n", 1)[1]
-    text = f"===DECISION_RECORD===\n{key}::HIJACK\n" + body
+    value = "OTHER-TOPIC-20261015" if key == "TOKEN" else "HIJACK"
+    text = f"===DECISION_RECORD===\n{key}::{value}\n" + body
     result = validate_octave_content(tmp_path, text)
     assert not result.valid
-    assert any(f"'{key}'" in e and "more than once" in e for e in result.errors)
+    assert any(f"'{key}'" in e and "before the META" in e for e in result.errors)
 
 
-def test_duplicate_core_key_after_meta_is_rejected(tmp_path: Path) -> None:
-    text = _record().replace("===END===", "STATUS::RATIFIED\n===END===")
+def test_nested_repeat_of_core_key_after_meta_is_allowed(tmp_path: Path) -> None:
+    """ES-style records repeat DECISION/STATUS inside later sub-sections.
+
+    Only a copy AHEAD of META can win first-match, so later repeats are not
+    rejected (rejecting them would fail legitimate elevana-studio records).
+    """
+    text = _record().replace("===END===", "AMENDMENT:\n  STATUS::RATIFIED\n===END===")
     result = validate_octave_content(tmp_path, text)
-    assert not result.valid
-    assert any("'STATUS'" in e and "more than once" in e for e in result.errors)
+    assert result.valid, result.errors
 
 
 def test_single_core_key_after_meta_block_is_allowed(tmp_path: Path) -> None:
@@ -147,4 +152,4 @@ def test_core_keys_inside_blocks_do_not_double_count(tmp_path: Path) -> None:
         '    RULED::"Operator, 2026-10-15"\n    STATUS::x\n',
     )
     result = validate_octave_content(tmp_path, _record(blocks))
-    assert not any("more than once" in e for e in result.errors)
+    assert not any("before the META" in e for e in result.errors)

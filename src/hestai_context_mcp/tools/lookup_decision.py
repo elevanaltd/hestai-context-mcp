@@ -12,10 +12,12 @@ walking) — no rebuilt parsing or enumeration logic.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from hestai_context_mcp.core.agent_readable_governance_parser import collect_topic_blocks
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    collect_topic_blocks,
+    parse_decision_record,
+)
 from hestai_context_mcp.tools.governance import agr_read
 
 _TOOL = "lookup_decision"
@@ -96,7 +98,25 @@ def lookup_decision(
             contract_ref=_CONTRACT_REF,
         )
 
-    parsed = agr_read.load_parsed(path)
+    # Read the file ONCE and derive both the parsed fields and the topic blocks
+    # from the same text (consistent snapshot). A read failure maps to the
+    # §3.1.1 envelope rather than escaping as an exception.
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return agr_read.error_envelope(
+            code="RECORD_PARSE_FAILED",
+            category="schema_violation",
+            message="DECISION_RECORD file could not be read.",
+            tool=_TOOL,
+            context={
+                "token": token,
+                "path": agr_read.rel_path(working_path, path),
+                "parse_error": f"record unreadable: {type(exc).__name__}",
+            },
+            contract_ref=_CONTRACT_REF,
+        )
+    parsed = parse_decision_record(text)
     if not agr_read.record_is_parseable(parsed):
         return agr_read.error_envelope(
             code="RECORD_PARSE_FAILED",
@@ -122,7 +142,7 @@ def lookup_decision(
         "authored_at": parsed["authored_at"],
         "path": agr_read.rel_path(working_path, path),
         "fields": parsed["fields"],
-        "current_state": _current_state(path, parsed["fields"]),
+        "current_state": _current_state(text, parsed["fields"]),
     }
 
     resolution_chain: list[dict[str, Any]] = []
@@ -148,9 +168,8 @@ def lookup_decision(
     }
 
 
-def _current_state(path: Path, fields: dict[str, str]) -> list[dict[str, str]] | None:
-    """Return the CURRENT block rules for a topic record, else ``None`` (pure read)."""
+def _current_state(text: str, fields: dict[str, str]) -> list[dict[str, str]] | None:
+    """Return the CURRENT block rules for a topic record, else ``None`` (pure)."""
     if "TOPIC" not in fields:
         return None
-    text = path.read_text(encoding="utf-8", errors="replace")
     return [{"id": e["id"], "rule": e["rule"]} for e in collect_topic_blocks(text)["current"]]

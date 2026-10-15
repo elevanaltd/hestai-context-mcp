@@ -21,7 +21,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from hestai_context_mcp.core.agent_readable_governance_parser import iter_block_lines
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    annotate_lines,
+    iter_block_lines,
+)
 from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 
 # ---------------------------------------------------------------------------
@@ -527,6 +530,36 @@ def _check_agr_invariants(
 
     # --- #14: no top-level reserved key inside CURRENT / RULINGS (v1.3 §1.7) ---
     _check_topic_block_keys(content, errors)
+
+    # --- #15: no core key ahead of the META header (v1.3) ---
+    _check_core_key_placement(content, errors)
+
+
+_META_HEADER_RE = re.compile(r"^META:\s*$")
+
+
+def _check_core_key_placement(content: str, errors: list[str]) -> None:
+    """Reject a top-level core key placed BEFORE the ``META:`` header.
+
+    The read parser and Gate A keep the FIRST match of each core key over the
+    whole text, so a copy placed ahead of META would override the real value.
+    Placement is otherwise NOT restricted to META: some records legitimately
+    declare e.g. STATUS/TIER/DECISION after the META block, and later (nested)
+    repeats can never win first-match. Lines inside CURRENT / RULINGS are
+    handled by #14. A no-op when the record has no ``META:`` header.
+    """
+    for block, line in annotate_lines(content):
+        if _META_HEADER_RE.match(line):
+            return
+        if block is not None:
+            continue
+        m = _META_FIELD_LINE_RE.match(line)
+        if m is not None and m.group(1) in TOPIC_BLOCK_RESERVED_KEYS:
+            errors.append(
+                f"Core key '{m.group(1)}' appears before the META block "
+                "(ADR-RFC-ARCH-004 v1.3 §4.1 #15); first-match parsing would let "
+                "this misplaced copy override the value declared in META."
+            )
 
 
 def _check_topic_block_keys(content: str, errors: list[str]) -> None:

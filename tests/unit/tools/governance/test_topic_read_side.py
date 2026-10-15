@@ -125,12 +125,22 @@ def test_lookup_file_vanishes_after_discovery_returns_envelope(tmp_path: Path, m
     assert result["error"]["context"]["token"] == _TOPIC_TOKEN
 
 
+def _pin_discovery(monkeypatch, tmp_path: Path) -> Path:
+    """Make discovery return the topic record path without reading it."""
+    from hestai_context_mcp.tools.governance import agr_read
+
+    path = tmp_path / ".hestai" / "decisions" / f"{_TOPIC_TOKEN}.oct.md"
+    monkeypatch.setattr(agr_read, "discover_record", lambda working, token: path)
+    return path
+
+
 def test_lookup_read_oserror_returns_envelope(tmp_path: Path, monkeypatch) -> None:
     _seed(tmp_path)
+    path = _pin_discovery(monkeypatch, tmp_path)
     real = Path.read_text
 
     def flaky(self: Path, *args, **kwargs):
-        if self.name == f"{_TOPIC_TOKEN}.oct.md":
+        if self == path:
             raise PermissionError("denied")
         return real(self, *args, **kwargs)
 
@@ -140,14 +150,15 @@ def test_lookup_read_oserror_returns_envelope(tmp_path: Path, monkeypatch) -> No
     assert result["error"]["code"] == "RECORD_PARSE_FAILED"
 
 
-def test_lookup_reads_record_file_once(tmp_path: Path, monkeypatch) -> None:
+def test_lookup_reads_record_file_once_after_discovery(tmp_path: Path, monkeypatch) -> None:
     _seed(tmp_path)
+    path = _pin_discovery(monkeypatch, tmp_path)
     real = Path.read_text
-    calls: list[str] = []
+    calls: list[Path] = []
 
     def counting(self: Path, *args, **kwargs):
-        if self.name == f"{_TOPIC_TOKEN}.oct.md":
-            calls.append(self.name)
+        if self == path:
+            calls.append(self)
         return real(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", counting)
