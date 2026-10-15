@@ -523,7 +523,9 @@ def submit_review(
     # Normalize empty strings to None for internal processing
     annotation = model_annotation if model_annotation else None
     sha = commit_sha if commit_sha else None
-    fixes = [f.strip() if isinstance(f, str) else f for f in wording_fixes] if wording_fixes else None
+    fixes = (
+        [f.strip() if isinstance(f, str) else f for f in wording_fixes] if wording_fixes else None
+    )
 
     # Step 1: Validate inputs
     error = _validate_inputs(repo, pr_number, role, verdict, assessment, fixes)

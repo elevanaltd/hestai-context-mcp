@@ -41,6 +41,10 @@ from hestai_context_mcp.tools.clock_in import validate_working_dir
 from hestai_context_mcp.tools.governance.intake_context import assemble_intake_context
 from hestai_context_mcp.tools.governance.linker import run_linker
 from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+from hestai_context_mcp.tools.shared.review_gate_retrigger import (
+    _GH_API_TIMEOUT_SECONDS,
+    _GhCliClient,
+)
 from hestai_context_mcp.tools.submit_review import submit_review
 
 logger = logging.getLogger(__name__)
@@ -51,9 +55,15 @@ logger = logging.getLogger(__name__)
 # integration NEVER auto-merges — it posts an advisory/assistive SR verdict and
 # the human owns the merge (Human Primacy, PROD::I3).
 
-# review_governance verdict -> review-gate verdict. Only a clean APPROVED clears
-# the gate; CONCERNS and BLOCKED both route the record to the human as BLOCKED.
-_GATE_VERDICT_MAP = {"APPROVED": "APPROVED", "CONCERNS": "BLOCKED", "BLOCKED": "BLOCKED"}
+# review_governance verdict -> review-gate verdict. APPROVED and WORDING (wording-only
+# findings, posted as "SR APPROVED (wording fixes pending)") clear the gate;
+# CONCERNS and BLOCKED both route the record to the human as BLOCKED.
+_GATE_VERDICT_MAP = {
+    "APPROVED": "APPROVED",
+    "WORDING": "APPROVED",
+    "CONCERNS": "BLOCKED",
+    "BLOCKED": "BLOCKED",
+}
 
 # Parse "owner/name" + pr_number from a GitHub PR URL
 # (e.g. https://github.com/owner/name/pull/123).
@@ -125,6 +135,14 @@ def _compose_sr_assessment(assessment: str, concerns: list[str]) -> str:
         if joined:
             body = f"{body}\n\nConcerns: {joined}"
     return body
+
+
+def _resolve_pr_head_sha(repo: str, pr_number: int) -> str | None:
+    """Best-effort PR head SHA for the SR footer; ``None`` on any failure."""
+    try:
+        return _GhCliClient().get_pr_head_sha(repo, pr_number, timeout=_GH_API_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001 -- fail-soft: a missing SHA never blocks the post.
+        return None
 
 
 async def _run_semantic_review(
@@ -199,6 +217,22 @@ async def _run_semantic_review(
     pr_number = int(match.group("number"))
     assessment = _compose_sr_assessment(review.get("assessment", ""), concerns)
 
+    # WORDING carries its fixes; without any usable fix it must NOT approve.
+    wording_fixes = [str(f) for f in (review.get("wording_fixes") or []) if str(f).strip()]
+    if review_verdict == "WORDING":
+        if wording_fixes:
+            base["wording_fixes"] = wording_fixes
+        else:
+            gate_verdict = "BLOCKED"
+            base["gate_verdict"] = gate_verdict
+
+    submit_kwargs: dict[str, Any] = {}
+    if wording_fixes and review_verdict == "WORDING":
+        submit_kwargs["wording_fixes"] = wording_fixes
+    head_sha = _resolve_pr_head_sha(repo, pr_number)
+    if head_sha:
+        submit_kwargs["commit_sha"] = head_sha
+
     try:
         post = submit_review(
             repo=repo,
@@ -207,6 +241,7 @@ async def _run_semantic_review(
             verdict=gate_verdict,
             assessment=assessment,
             model_annotation=reviewer_model,
+            **submit_kwargs,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: posting must not undo the PR.
         return {**base, "posted": False, "error": f"posting SR verdict failed: {exc}"}
