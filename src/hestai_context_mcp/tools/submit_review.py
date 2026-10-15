@@ -100,6 +100,7 @@ def _validate_inputs(
     role: str,
     verdict: str,
     assessment: str,
+    wording_fixes: list[str] | None = None,
 ) -> str | None:
     """Validate submit_review inputs. Returns error message or None if valid."""
     if role not in VALID_ROLES:
@@ -110,6 +111,25 @@ def _validate_inputs(
 
     if not assessment or not assessment.strip():
         return "Assessment must not be empty"
+
+    if wording_fixes:
+        if role != "SR" or verdict != "APPROVED":
+            return (
+                "wording_fixes are allowed only for role 'SR' with verdict "
+                f"'APPROVED' (got role '{role}', verdict '{verdict}'). Nothing posted."
+            )
+        for fix in wording_fixes:
+            if not isinstance(fix, str) or not fix.strip():
+                return "Each wording fix must be a non-empty string"
+            # One fix = one physical line: a line break could start a second
+            # line carrying another role's verdict. splitlines() recognises the
+            # same separators the real matchers split on.
+            if len(fix.splitlines()) != 1 or "\x85" in fix:
+                return "Each wording fix must be a single line (no line breaks)"
+            # A metadata-shaped HTML comment in fix text would precede the real
+            # footer and win parse_review_metadata()'s first-match; reject it.
+            if "<!--" in fix or "-->" in fix:
+                return "Each wording fix must not contain HTML comment delimiters ('<!--', '-->')"
 
     if pr_number < 1:
         return f"Invalid PR number: {pr_number}. Must be a positive integer"
@@ -416,6 +436,7 @@ def submit_review(
     model_annotation: str = "",
     commit_sha: str = "",
     dry_run: bool = False,
+    wording_fixes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Submit a structured review comment on a GitHub PR.
 
@@ -451,6 +472,14 @@ def submit_review(
         model_annotation: Optional model name (e.g., 'Gemini') for annotation.
         commit_sha: Optional PR head SHA the reviewer verified.
         dry_run: If True, validate format without posting.
+        wording_fixes: Optional list of pending wording fixes. Allowed ONLY
+            for ``role="SR"`` with ``verdict="APPROVED"``; any other
+            combination is a validation error and nothing is posted. Each fix
+            must be a non-empty single line. Empty list behaves like None.
+            The comment reads ``SR APPROVED (wording fixes pending):`` with a
+            numbered list; the footer gains flat ``conditions``/``pending``
+            keys. The review gate itself is unchanged (still clears via the
+            existing SR matchers).
 
     Returns:
         Dict with the following top-level fields:
@@ -498,9 +527,12 @@ def submit_review(
     # Normalize empty strings to None for internal processing
     annotation = model_annotation if model_annotation else None
     sha = commit_sha if commit_sha else None
+    fixes = (
+        [f.strip() if isinstance(f, str) else f for f in wording_fixes] if wording_fixes else None
+    )
 
     # Step 1: Validate inputs
-    error = _validate_inputs(repo, pr_number, role, verdict, assessment)
+    error = _validate_inputs(repo, pr_number, role, verdict, assessment, fixes)
     if error:
         return {
             "status": "error",
@@ -518,6 +550,7 @@ def submit_review(
         assessment=assessment,
         model_annotation=annotation,
         commit_sha=sha,
+        wording_fixes=fixes,
     )
 
     # Step 2a: Cross-role gate-corruption guard (elevana-studio#1851,

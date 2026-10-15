@@ -442,3 +442,9 @@ class TestHumanPrimacy:
         assert "pr merge" not in lowered
         assert "pulls/{" not in lowered or "/merge" not in lowered
         assert "auto_merge" not in lowered
+
+
+@pytest.fixture(autouse=True)
+def _no_live_pr_head_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stage 5 resolves the PR head SHA via gh; never hit the network in tests."""
+    monkeypatch.setattr(sg, "_resolve_pr_head_sha", lambda repo, n: None, raising=True)

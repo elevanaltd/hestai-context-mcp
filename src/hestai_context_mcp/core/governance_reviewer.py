@@ -48,7 +48,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from hestai_context_mcp.ports.ai_client import (
     AIClient,
@@ -69,7 +69,7 @@ __all__ = [
     "review_governance",
 ]
 
-Verdict = Literal["APPROVED", "CONCERNS", "BLOCKED"]
+Verdict = Literal["APPROVED", "CONCERNS", "BLOCKED", "WORDING"]
 
 # The analysis tier is the default for this reviewer (issue #77): a stronger,
 # balanced model than the synthesis-tier default. Tier resolution itself lives
@@ -113,7 +113,8 @@ class ReviewResult(TypedDict):
     """Structured result of a scoped semantic review (PROD::I4).
 
     Keys:
-        verdict:    ``"APPROVED"`` | ``"CONCERNS"`` | ``"BLOCKED"``.
+        verdict:    ``"APPROVED"`` | ``"CONCERNS"`` | ``"BLOCKED"`` | ``"WORDING"``
+                    (wording-only findings; carries ``wording_fixes``).
         assessment: One-paragraph semantic assessment (never schema).
         concerns:   Zero or more concrete concern strings.
         reviewer_available:
@@ -130,6 +131,8 @@ class ReviewResult(TypedDict):
     concerns: list[str]
     reviewer_available: bool
     metrics: ReviewMetrics
+    # Present only when verdict == "WORDING": one entry per pending fix.
+    wording_fixes: NotRequired[list[str]]
 
 
 # --- Prompt assembly (SEMANTIC-scoped; NEVER schema) ----------------------
@@ -157,14 +160,21 @@ _REVIEW_SYSTEM_PROMPT = (
     "facet card. Your job is semantic judgement only.\n"
     "\n"
     "Respond in this exact line-oriented form:\n"
-    "VERDICT::<APPROVED|CONCERNS|BLOCKED>\n"
+    "VERDICT::<APPROVED|WORDING|CONCERNS|BLOCKED>\n"
     "ASSESSMENT::<one paragraph of semantic assessment>\n"
+    "WORDING_FIXES::[<fix>; <fix>; ...]   (single line; empty list [] unless "
+    "VERDICT is WORDING)\n"
     "CONCERNS::[<concern>; <concern>; ...]   (empty list [] if none)\n"
     "\n"
     "Use APPROVED when there is no semantic problem, CONCERNS for non-blocking "
     "semantic doubts a human should weigh, and BLOCKED for a clear semantic "
-    "contradiction or precedence violation. You inform the human; you do not "
-    "merge."
+    "contradiction or precedence violation. Use WORDING ONLY when every finding "
+    "is purely wording: phrasing, citation placement, or over-strong language "
+    "that does not change what the decision means; list each required fix, one "
+    "per entry, in WORDING_FIXES and leave CONCERNS empty. Anything touching "
+    "precedence, contradiction, scope or concept-validity is NEVER WORDING: it "
+    "stays CONCERNS or BLOCKED. If in doubt between WORDING and CONCERNS, choose "
+    "CONCERNS. You inform the human; you do not merge."
 )
 
 
@@ -274,7 +284,10 @@ def _blocked(
     }
 
 
-_VERDICT_RE = re.compile(r"^\s*VERDICT::\s*(APPROVED|CONCERNS|BLOCKED)\b", re.MULTILINE)
+_VERDICT_RE = re.compile(r"^\s*VERDICT::\s*(APPROVED|CONCERNS|BLOCKED|WORDING)\b", re.MULTILINE)
+# Single-line by contract (no DOTALL): keeps this greedy match from swallowing
+# the CONCERNS line that follows it.
+_WORDING_FIXES_RE = re.compile(r"^\s*WORDING_FIXES::\s*\[(.*)\]\s*$", re.MULTILINE)
 _ASSESSMENT_RE = re.compile(r"^\s*ASSESSMENT::\s*(.+?)\s*$", re.MULTILINE)
 _CONCERNS_RE = re.compile(r"^\s*CONCERNS::\s*\[(.*)\]\s*$", re.MULTILINE | re.DOTALL)
 
@@ -325,6 +338,30 @@ def _parse_review(
         }
 
     verdict: Verdict = verdict_match.group(1)  # type: ignore[assignment]
+    if verdict == "WORDING":
+        fixes_match = _WORDING_FIXES_RE.search(raw)
+        fixes = _parse_concerns(fixes_match.group(1)) if fixes_match else []
+        if not fixes or concerns:
+            # WORDING must be purely wording: no listed fixes, or any substantive
+            # concern alongside, degrades to CONCERNS (never APPROVED).
+            concerns = concerns or [
+                "Reviewer returned WORDING without a usable WORDING_FIXES list."
+            ]
+            return {
+                "verdict": "CONCERNS",
+                "assessment": assessment,
+                "concerns": concerns,
+                "reviewer_available": True,
+                "metrics": metrics,
+            }
+        return {
+            "verdict": "WORDING",
+            "assessment": assessment,
+            "concerns": [],
+            "reviewer_available": True,
+            "metrics": metrics,
+            "wording_fixes": fixes,
+        }
     return {
         "verdict": verdict,
         "assessment": assessment,
