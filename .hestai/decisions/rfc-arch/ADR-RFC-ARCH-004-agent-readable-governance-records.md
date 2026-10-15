@@ -71,7 +71,7 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 | Field | Type | Notes |
 |---|---|---|
 | `TYPE` | literal | MUST be `DECISION_RECORD` |
-| `VERSION` | semver-2-segment | `MAJOR.MINOR` per §1.5. Current: `1.2` (records authored before the v1.1/v1.2 amendments remain valid at `1.0`; v1.1 and v1.2 are both MINOR-additive — see §1.5). |
+| `VERSION` | semver-2-segment | `MAJOR.MINOR` per §1.5. Current: `1.3` (records authored before the v1.1/v1.2/v1.3 amendments remain valid at `1.0`; v1.1, v1.2 and v1.3 are all MINOR-additive — see §1.5). |
 | `TOKEN` | string | Globally unique identifier within the repository (see §1.3) |
 | `STATUS` | enum | One of `PROPOSED`, `RATIFIED`, `SUPERSEDED`, `VOID` (see §1.4) |
 | `TIER` | enum | One of `STRATEGIC`, `TACTICAL`, `OPERATIONAL`. Semantic gravity per the cited research brief. |
@@ -155,7 +155,7 @@ Current schema is `1.3`. Future additive extensions become `1.4`, `1.5`, etc.
 
 **v1.2 (MINOR-additive, per HO-GOVERNANCE-AMEND-IN-PLACE-20260926, 2026-09-26)**: ecosystem-wide in-place amendment practice is adopted for governance artefacts. Records gain the optional `REVISION` field (§1.2) — one line per in-place amendment, `<YYYY-MM-DD>: <what changed>` — logged instead of a schema `VERSION` bump; `VERSION` stays the schema-version identifier, never a per-record edit counter. `AMENDS` (§1.6) gains an in-place-amendment reading: a thin ruling record's `AMENDS` edge may mean the ruling amended the cited artefact in place rather than only a partial-replacement stack. Both readings are MINOR-additive: no existing record's structural parse changes, and a `1.0`/`1.1` record without `REVISION` remains fully valid. Parsers written against `1.0`/`1.1` continue to parse `1.2` records by ignoring the unknown optional field.
 
-**v1.3 (MINOR-additive, per issue #203, operator ruling 2026-10-15)**: topic records. The optional `TOPIC` field (§1.2) and the optional top-level `CURRENT` / `RULINGS` blocks (§1.7) are added, with two new value-level Gate A invariants (§4.1 #14, #15). No required field is added, and no existing record's parse changes: a `1.0`–`1.2` record carries none of the new names and remains fully valid, and parsers written against `1.2` ignore the unknown optional field and blocks.
+**v1.3 (MINOR-additive, per issue #203, operator ruling 2026-10-15)**: topic records. The optional `TOPIC` field (§1.2) and the optional top-level `CURRENT` / `RULINGS` blocks (§1.7) are added, with two new value-level Gate A invariants (§4.1 #14, #15). No required field is added, and no existing record's parse changes: a `1.0`–`1.2` record carries none of the new names and remains fully valid, and the core fields (§1.2 required set) parse identically under a `1.2` reader. A `1.2` reader does NOT ignore the blocks: its flat line-anchored parser surfaces every nested assignment (`R2`, `RULE`, `VERBATIM`, …, first match wins) in `fields`, and a nested core key could shadow a core field there. That is why §4.1 #14 forbids core keys inside the blocks, so a `1.2` reader still resolves the core fields correctly. v1.3 readers exclude block lines from `fields`.
 
 **Spec-only period (CLOSED)**: Between this ADR's merge and the code landing, AGR records were authored by hand and conformed to §1.1–§1.6 as if the validator (§4) were running. The validator has now landed: Gate A (`type_checker.validate_octave_content`) enforces the §4.1 invariants against every record under `.hestai/decisions/**/*.oct.md`, regardless of authoring date — the **v1.0 envelope PLUS the v1.1 additive §4.1 #13 density invariant** (≤40 words, no embedded newline on `DECISION`/`BECAUSE`). There is no grandfather clause: every record, old or new, MUST satisfy the currently-enforced invariant set (the three pre-existing verbose records were migrated to compliant bytecode when #13 landed).
 
@@ -186,14 +186,14 @@ RULINGS:
     RULE::"<same one-line rule>"
     VERBATIM::"<the operator's words, byte-exact>"
     RULED::"<who, when, session/ceremony>"
-    REPLACES::R1                    // optional
+    REPLACES::R1
 ```
 
 - `CURRENT` lists the rules currently in force, in order, one `R<n>::"<rule>"` line each. It restates the live `RULE` lines mechanically and is never hand-edited.
 - `RULINGS` holds one nested entry per in-force ruling: `RULE`, `VERBATIM`, `RULED`, and optional `REPLACES` (the `R<n>` it replaced).
 - A replaced ruling is removed in place and logged with a `REVISION` line (§1.2); git keeps the old text. The record does not grow a history section.
 - A block opens only at a header in column 0 and runs until the next non-blank line indented no deeper than the header. A header-shaped line indented deeper is an ordinary line of the enclosing block (or of `META`) and can neither open nor reset a block. Lines inside a block are not `META`: the read parser excludes them from `fields`, so a nested key cannot shadow a `META` field.
-- **Key-collision rule (§4.1 #14)**: the read parser keeps the FIRST match of each key, so a top-level reserved key nested inside a block could take over the record. Entries inside `CURRENT` and `RULINGS` MUST NOT use `TOKEN`, `ID`, `TYPE`, `STATUS`, `TIER`, `DECISION`, `BECAUSE`, `AUTHORED_AT` or `SUPERSEDED_BY` as a key.
+- **Key-collision rule (§4.1 #14)**: the read parser keeps the FIRST match of each key, so a top-level reserved key nested inside a block could take over the record. Entries inside `CURRENT` and `RULINGS` MUST NOT use `VERSION`, `TOKEN`, `ID`, `TYPE`, `STATUS`, `TIER`, `DECISION`, `BECAUSE`, `AUTHORED_AT` or `SUPERSEDED_BY` as a key. Gate A also extracts every invariant input from the block-excluded text, so a nested line can never satisfy or override a check.
 
 Delivery of rulings into these blocks through `append_ruling` is **planned (slice S2 of #203) and not shipped by v1.3**; until then topic records are authored through the existing `submit_governance` modes. The blocks are collected by a regex-only helper (North Star §4; no AST, no LLM) and read by the tools in §3.2 and §3.3.
 
@@ -303,7 +303,7 @@ Resolves a single AGR by `TOKEN`. Pure read.
 }
 ```
 
-The `current_state` field (additive per §3.1.1; v1.3) carries the in-force rules from a topic record's `CURRENT` block (§1.7), in order, as `{id, rule}` entries. It is a list (empty when the block is absent) when the record declares `TOPIC`, and `null` otherwise. All other record keys are unchanged. Like the rest of the record it is derived by a pure read (PROD::I5). The record file is read once; an unreadable file returns the `RECORD_PARSE_FAILED` envelope below rather than raising.
+The `current_state` field (additive per §3.1.1; v1.3) carries the in-force rules from a topic record's `CURRENT` block (§1.7), in order, as `{id, rule}` entries. It is a list (empty when the block is absent) when the record declares `TOPIC`, and `null` otherwise. All other record keys are unchanged. Like the rest of the record it is derived by a pure read (PROD::I5). The record file is read once; an unreadable file returns the `RECORD_PARSE_FAILED` code with category `io_failure` (§3.1.1) rather than raising.
 
 The `resolution_chain_status` field (additive per §3.1.1; issue #87) is a completeness signal so a caller can distinguish a `resolution_chain` that reached its terminal from one truncated by a broken link or a cycle. It is derived from the same `walk_supersession_chain` outcome that produces `resolution_chain`, with **no** extra read:
 
@@ -317,7 +317,7 @@ The field is **always present** (a defined PROD::I4 key) and never removes or re
 
 - `TOKEN_NOT_FOUND` (category: `input_validation`) — no record at the requested TOKEN; `context.token` echoed.
 - `TOKEN_MALFORMED` (`input_validation`) — TOKEN does not match §1.3 regex.
-- `RECORD_PARSE_FAILED` (`schema_violation`) — file found but OCTAVE envelope or required fields fail to parse; `context.path` and `context.parse_error` populated. Implementation choice: treat as fatal for the read, do NOT silently skip.
+- `RECORD_PARSE_FAILED` (`schema_violation`) — file found but OCTAVE envelope or required fields fail to parse; `context.path` and `context.parse_error` populated. Implementation choice: treat as fatal for the read, do NOT silently skip. If the file cannot be read at all (I/O error after discovery), the same code is returned with category `io_failure` and `context.parse_error` naming the exception class.
 - `WORKING_DIR_INVALID` (`io_failure`) — path does not exist or is not a directory.
 
 ### 3.3 `list_decisions(working_dir, scope?, status?, tier?, topic?)`
@@ -499,7 +499,7 @@ The validator is a CLI tool (name suggestion: `validate_agent_readable_governanc
 11. **`HUMAN_ADR_REF` form (v1.1)** — when present, the ref is EITHER a well-formed greppable TOKEN (matches the §1.3 TOKEN regex; the v1.1 canonical cross-repo-survivable form per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 — validated as a token, NOT path-resolved) OR a v1.0 path that resolves to a file under the repository. The §1.3 TOKEN pattern admits no path separator and no `.`, so the two forms are mutually exclusive: token-form is matched first; anything else is treated as a path and must resolve under the repo. A ref that is neither is a hard error.
 12. **Ratification provenance (warning)** — when `STATUS != PROPOSED` and `RATIFIED_BY` is absent, the validator emits a **warning** (not error) per §4.2. Closes a portion of the TOKEN-squatting / lookalike-record gap without forcing legacy `HO-*` records into rework. May be promoted to error in a MINOR bump (see §11 Q5).
 13. **Reasoning-field density (v1.1)** — `DECISION` and `BECAUSE` are each AT MOST 40 words and contain NO embedded newline (the v1.1 bytecode form, §1.2). A value-level check ONLY: the structural flat-regex parse is unchanged (no structural parser change), so write/read parity (the shared `type_checker` ↔ `agr_read` constants) is preserved. Per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101). Severity: error.
-14. **Topic-block key collision (v1.3)** — inside a `CURRENT` or `RULINGS` block (§1.7) no line may use a top-level reserved key (`TOKEN`, `ID`, `TYPE`, `STATUS`, `TIER`, `DECISION`, `BECAUSE`, `AUTHORED_AT`, `SUPERSEDED_BY`) as its key. Every offending line is reported with the key and the block named. Regex-only; a no-op for records without these blocks. Severity: error.
+14. **Topic-block key collision (v1.3)** — inside a `CURRENT` or `RULINGS` block (§1.7) no line may use a top-level reserved key (`VERSION`, `TOKEN`, `ID`, `TYPE`, `STATUS`, `TIER`, `DECISION`, `BECAUSE`, `AUTHORED_AT`, `SUPERSEDED_BY`) as its key. All other invariants (#1–#13) are evaluated over the record with CURRENT/RULINGS lines excluded, matching the read parser. Every offending line is reported with the key and the block named. Regex-only; a no-op for records without these blocks. Severity: error.
 15. **Core key ahead of META (v1.3)** — none of the top-level core keys named in #14 may appear before the `META:` header (outside the blocks). The parser and Gate A keep the first match of each key over the whole record, so an earlier copy would override the value declared in META. Placement after the META block, and later nested repeats, remain admissible (some records declare `STATUS`/`TIER`/`DECISION` after META; a later copy cannot win first-match). A no-op when no `META:` header exists. Severity: error.
 
 ### 4.2 Severities
