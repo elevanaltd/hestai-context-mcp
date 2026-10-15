@@ -15,7 +15,7 @@ META:
   APPLIES_TO::"merged decision records ∧ human ADRs ∧ ratified standards ∧ clauses self-declared immutable∨supersession-only[e.g. ADR-RFC-ARCH-002 §0.2]"
   RELATED::"provenance only: elevana-studio HO-DECISION-RECORD-SHAPE-AND-AMENDMENT-DISCIPLINE-20260909 Rule 2; THIS record is normative ecosystem-wide ∴ drift in the source record does not change this rule"
   THIN_RULING_RECORD::"each amendment ruling → thin ruling record carrying who∧when∧why∧what_changed + pointer to amended artefact ∨ dated verbatim RULINGS entry in the amended topic record (its own ruling record); never restates amended content"
-  INTERIM_PATH::"until ADR-RFC-ARCH-004 §3.5 propose_decision_amendment broker exists → in-place edit travels as normal human-reviewed PR; topic records → submit_governance append_ruling is the broker from #203 S2"
+  INTERIM_PATH::"until ADR-RFC-ARCH-004 §3.5 propose_decision_amendment broker exists → in-place edit travels as normal human-reviewed PR; topic records → submit_governance append_ruling becomes the broker once #203 S2 ships"
   SCOPE_GUARD::"human merge sole semantic gate ∧ no auto-merge ∧ TOKEN uniqueness unchanged"
   FIRST_APPLICATION::"ADR-0013 R1 COORDINATION_DOCUMENT class → proposed in PR #190[ADR-0013 v1.1 in-place edit ⊕ thin ruling record HO-ADR-0013-COORDINATION-DOCUMENT-CLASS-20260926]; this record's own in-place amendments of ADR-RFC-ARCH-002/004/005 are the first merged application"
   DECISION::"Ecosystem-wide: amend governance artefacts in place → replace clause ∧ one-line REVISION entry; git = correction log; thin ruling record ∨ topic RULINGS entry per amendment; no stacking; nothing immutable"
@@ -26,5 +26,5 @@ META:
   AMENDED_ARTEFACTS::".hestai/decisions/rfc-arch/ADR-RFC-ARCH-004-agent-readable-governance-records.md v1.1→v1.2, edited in place: §1.2 adds optional REVISION field, §1.6 adds in-place-amendment AMENDS reading, §0.2 intro reworded from immutable-in-PR-D-scope to fixed-inputs-amendable-via-governance[not added to this record's AMENDS list — ADR-RFC-ARCH-004 carries no TOKEN, lookup_token_deterministic resolves False]; .hestai/decisions/rfc-arch/ADR-RFC-ARCH-002-information-architecture-contract.md §0.2 intro + §7 'PE-immutable' line reworded from supersession-only/immutable framing to amendable-in-place-via-proper-governance, header gains a 2026-09-26 revision note, the three PE amendments themselves unchanged; .hestai/decisions/rfc-arch/ADR-RFC-ARCH-005-facet-abi-and-retrieval.md §0.2 intro reworded from immutable-in-PR-C-scope to fixed-inputs-amendable-via-governance[same TOKEN-less reasoning as ADR-004 — no AMENDS edge added]"
   RATIFIED_BY::"human:operator<shaunbuswell>"
   RATIFIED_AT::"2026-09-26T00:00:00Z"
-  REVISION::"2026-10-15: THIN_RULING_RECORD, DECISION, INTERIM_PATH admit topic RULINGS entries ∧ append_ruling broker from #203 S2; ruling HO-TOPIC-RECORDS-AND-APPEND-RULING-20261015 (hestai-context-mcp#203)"
+  REVISION::"2026-10-15: THIN_RULING_RECORD, DECISION, INTERIM_PATH admit topic RULINGS entries ∧ append_ruling broker once #203 S2 ships; ruling HO-TOPIC-RECORDS-AND-APPEND-RULING-20261015 (hestai-context-mcp#203)"
 ===END===

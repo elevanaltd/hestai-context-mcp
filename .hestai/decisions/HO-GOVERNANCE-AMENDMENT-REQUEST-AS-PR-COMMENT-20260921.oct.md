@@ -18,7 +18,7 @@ META:
   SCOPE_GUARD::"No identity enforcement: PR author is always the operator's GitHub login ∴ instigating agent located by lane coordination ∨ cooperative lane-ceremony marker match per HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921 LANE_MARKER_TEST, never authenticated by the tool ∧ no push to another lane's in-flight branch ∧ no second PR ∧ human merge remains sole semantic gate"
   DECISION::"in-flight TOKEN amendment → caller locates agent working in-flight branch → hands amendment over; agent unlocatable → submit_governance posts amendment request as comment on in-flight PR[blocked-review channel] → owning agent applies on own branch"
   BECAUSE::"Instigating agent identifiable only via lane working branch; tool cannot[every PR = operator login] ∴ PR comment = existing blocked-review async channel → owner handles amendments like review findings ⊕ no new ownership model ∧ no cross-lane push"
-  MARKER_FALLBACK::"lane ownership unproven by POSTED-BY marker ∧ lane_ceremony match → comment channel applies; marker test defined in HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921 LANE_MARKER_TEST"
+  MARKER_FALLBACK::"in-flight PR body POSTED-BY marker absent ∨ its ceremony ≠ caller-supplied lane_ceremony → comment channel applies; marker match → push per HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921 LANE_MARKER_TEST"
   RATIFIED_BY::"human:operator<shaunbuswell>"
   RATIFIED_AT::"2026-10-15T00:00:00Z"
   REVISION::"2026-10-15: STATUS PROPOSED → RATIFIED; MARKER_FALLBACK added; SCOPE_GUARD reworded for cooperative marker match; ruling HO-TOPIC-RECORDS-AND-APPEND-RULING-20261015 (hestai-context-mcp#203)"
