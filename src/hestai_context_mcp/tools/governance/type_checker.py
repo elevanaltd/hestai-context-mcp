@@ -21,6 +21,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    annotate_lines,
+    iter_block_lines,
+)
 from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 
 # ---------------------------------------------------------------------------
@@ -110,6 +114,23 @@ TIER_VALUES = frozenset({"STRATEGIC", "TACTICAL", "OPERATIONAL"})
 
 # §1.2 reserved names — MUST NOT appear in any v1.x record (§4.1 #7).
 RESERVED_FIELD_NAMES = frozenset({"DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"})
+
+# v1.3 §1.7: top-level keys that MUST NOT appear inside a topic record's CURRENT /
+# RULINGS blocks (first-match parsing would let a nested copy take over the record).
+TOPIC_BLOCK_RESERVED_KEYS = frozenset(
+    {
+        "VERSION",
+        "TOKEN",
+        "ID",
+        "TYPE",
+        "STATUS",
+        "TIER",
+        "DECISION",
+        "BECAUSE",
+        "AUTHORED_AT",
+        "SUPERSEDED_BY",
+    }
+)
 
 # --- ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13 reasoning-density contract ---------
 # HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED) ruled AGRs are LLM
@@ -509,6 +530,52 @@ def _check_agr_invariants(
     _check_reasoning_density(content, errors)
 
 
+_META_HEADER_RE = re.compile(r"^META:\s*$")
+
+
+def _check_core_key_placement(content: str, errors: list[str]) -> None:
+    """Reject a top-level core key placed BEFORE the ``META:`` header.
+
+    The read parser and Gate A keep the FIRST match of each core key over the
+    whole text, so a copy placed ahead of META would override the real value.
+    Placement is otherwise NOT restricted to META: some records legitimately
+    declare e.g. STATUS/TIER/DECISION after the META block, and later (nested)
+    repeats can never win first-match. Lines inside CURRENT / RULINGS are
+    handled by #14. A no-op when the record has no ``META:`` header.
+    """
+    for block, line in annotate_lines(content):
+        if _META_HEADER_RE.match(line):
+            return
+        if block is not None:
+            continue
+        m = _META_FIELD_LINE_RE.match(line)
+        if m is not None and m.group(1) in TOPIC_BLOCK_RESERVED_KEYS:
+            errors.append(
+                f"Core key '{m.group(1)}' appears before the META block "
+                "(ADR-RFC-ARCH-004 v1.3 §4.1 #15); first-match parsing would let "
+                "this misplaced copy override the value declared in META."
+            )
+
+
+def _check_topic_block_keys(content: str, errors: list[str]) -> None:
+    """Reject a top-level reserved key nested inside a CURRENT / RULINGS block.
+
+    The read parser keeps the FIRST match of each key, so a nested ``STATUS::``
+    (etc.) inside a topic-record block could take over the record. Every
+    offending line is reported with the key and the block named (collect-more-
+    errors). Regex-only; no-op for records without these blocks.
+    """
+    for block, line in iter_block_lines(content):
+        m = _META_FIELD_LINE_RE.match(line)
+        if m is None or m.group(1) not in TOPIC_BLOCK_RESERVED_KEYS:
+            continue
+        errors.append(
+            f"Key '{m.group(1)}' is a top-level reserved key and MUST NOT appear "
+            f"inside the {block} block (ADR-RFC-ARCH-004 v1.3 §1.7 / §4.1 #14); "
+            "it would shadow the record's META field under first-match parsing."
+        )
+
+
 def _check_reasoning_density(content: str, errors: list[str]) -> None:
     """Enforce the §4.1 #13 form + word-count / no-newline guard on the reasoning fields.
 
@@ -662,13 +729,24 @@ def validate_octave_content(working_dir: Path, content: str) -> ValidationResult
         return ValidationResult(valid=False, errors=errors, warnings=warnings)
 
 
+def _strip_block_lines(content: str) -> str:
+    """Drop every line inside a CURRENT / RULINGS block (headers are kept).
+
+    The read parser excludes these lines from record fields; Gate A extracts
+    every invariant input from the same block-excluded text so the write side
+    and the read side agree on what the record declares (#203 S1).
+    """
+    return "".join(line for block, line in annotate_lines(content) if block is None)
+
+
 def _validate_impl(
     working_dir: Path,
-    content: str,
+    raw_content: str,
     errors: list[str],
     warnings: list[str],
 ) -> ValidationResult:
     """Internal validation implementation."""
+    content = _strip_block_lines(raw_content)
     # --- Check 1: OCTAVE sentinel at document start (Bug 7) ---
     sentinel = _extract_sentinel(content)
     if sentinel is None:
@@ -724,6 +802,9 @@ def _validate_impl(
         # ratification-provenance WARNING (#12). Collect-more-errors; the
         # offending field is named in each message for operator UX.
         _check_agr_invariants(working_dir, content, token, errors, warnings)
+        # #14/#15 need the block lines, so they read the raw (unstripped) text.
+        _check_topic_block_keys(raw_content, errors)
+        _check_core_key_placement(raw_content, errors)
 
     elif card_type in _FACET_CARD_TYPES:
         token = _extract_id(content)

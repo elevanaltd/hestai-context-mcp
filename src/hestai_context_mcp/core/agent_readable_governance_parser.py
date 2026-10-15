@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from typing import TypedDict
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,110 @@ _CORE_FIELDS = (
 # raw and left to the caller; the read tools only need scalar core fields plus
 # SUPERSEDED_BY (scalar). This is regex-only — no structural OCTAVE parsing.
 _FIELD_LINE_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]*)::(.*?)\s*$")
+
+
+# Topic-record blocks (ADR-RFC-ARCH-004 v1.3 §1.7). ``CURRENT:`` / ``RULINGS:``
+# open a block; the block runs while following lines are blank or indented
+# deeper than the header. Regex + indent only — no structural OCTAVE parsing.
+# Only a header at the record's top-level indentation (column 0) opens a block;
+# a header-shaped line deeper than that is just a line of the enclosing block
+# (or of META) and can neither open nor reset a block.
+_BLOCK_HEADER_RE = re.compile(r"^()(CURRENT|RULINGS):\s*$")
+_RULING_ENTRY_RE = re.compile(r"^\s*(R\d+):\s*$")
+_CURRENT_ENTRY_RE = re.compile(r"^\s*(R\d+)::(.*?)\s*$")
+
+
+class CurrentEntry(TypedDict):
+    """One in-force rule from the ``CURRENT`` block."""
+
+    id: str
+    rule: str
+
+
+class RulingEntry(TypedDict):
+    """One ``RULINGS`` entry: the rule, the operator's words, provenance."""
+
+    id: str
+    rule: str | None
+    verbatim: str | None
+    ruled: str | None
+    replaces: str | None
+
+
+class TopicBlocks(TypedDict):
+    """Ordered ``CURRENT`` and ``RULINGS`` content of a topic record."""
+
+    current: list[CurrentEntry]
+    rulings: list[RulingEntry]
+
+
+def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
+    """Yield ``(block_name | None, line)`` for every line of ``text``.
+
+    ``block_name`` is ``CURRENT`` / ``RULINGS`` for lines inside such a block
+    (headers excluded) and ``None`` elsewhere. A block ends at the first
+    non-blank line indented no deeper than its header.
+    """
+    block: str | None = None
+    header_indent = 0
+    for line in text.splitlines(keepends=True):
+        header = _BLOCK_HEADER_RE.match(line)
+        if header:
+            block = header.group(2)
+            header_indent = len(header.group(1))
+            yield None, line
+            continue
+        if block is not None and line.strip() and len(line) - len(line.lstrip()) <= header_indent:
+            block = None
+        yield (block if line.strip() else None), line
+
+
+def iter_block_lines(text: str) -> Iterator[tuple[str, str]]:
+    """Yield ``(block_name, line)`` for every line inside a CURRENT/RULINGS block.
+
+    Pure and regex-only; shared by the parser (to keep block lines out of META
+    ``fields``) and by Gate A (to reject reserved top-level keys nested in a
+    block).
+    """
+    for block, line in annotate_lines(text):
+        if block is not None:
+            yield block, line
+
+
+def collect_topic_blocks(text: str | None) -> TopicBlocks:
+    """Collect the ordered CURRENT and RULINGS blocks of a topic record.
+
+    Pure, regex-only, never raises. Absent blocks yield empty lists. A RULINGS
+    entry always carries all five keys; ``replaces`` is ``None`` when absent.
+    """
+    result: TopicBlocks = {"current": [], "rulings": []}
+    if not text or not text.strip():
+        return result
+
+    entry: RulingEntry | None = None
+    for block, line in iter_block_lines(text):
+        if block == "CURRENT":
+            cur = _CURRENT_ENTRY_RE.match(line)
+            if cur:
+                result["current"].append({"id": cur.group(1), "rule": _strip_quotes(cur.group(2))})
+            continue
+        start = _RULING_ENTRY_RE.match(line)
+        if start:
+            entry = {
+                "id": start.group(1),
+                "rule": None,
+                "verbatim": None,
+                "ruled": None,
+                "replaces": None,
+            }
+            result["rulings"].append(entry)
+            continue
+        field = _FIELD_LINE_RE.match(line)
+        if field and entry is not None:
+            key = field.group(1).lower()
+            if key in ("rule", "verbatim", "ruled", "replaces"):
+                entry[key] = _strip_quotes(field.group(2))  # type: ignore[literal-required]
+    return result
 
 
 def _strip_quotes(value: str) -> str:
@@ -138,7 +243,11 @@ def _parse_impl(text: str) -> DecisionRecord:
     core: dict[str, str] = {}
     extra: dict[str, str] = {}
 
-    for raw_line in text.splitlines():
+    # Lines inside CURRENT/RULINGS blocks are NOT META: keep them out of
+    # ``fields`` so a nested key (e.g. TOPIC, SCOPE) cannot shadow a META field.
+    for block, raw_line in annotate_lines(text):
+        if block is not None:
+            continue
         match = _FIELD_LINE_RE.match(raw_line)
         if not match:
             continue
