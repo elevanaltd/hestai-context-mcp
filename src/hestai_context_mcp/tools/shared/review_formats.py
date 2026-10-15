@@ -604,6 +604,7 @@ def format_review_comment(
     assessment: str,
     model_annotation: str | None = None,
     commit_sha: str | None = None,
+    wording_fixes: list[str] | None = None,
 ) -> str:
     """Format a review comment that will clear the review gate.
 
@@ -626,6 +627,13 @@ def format_review_comment(
         assessment: Review assessment content.
         model_annotation: Optional model name (e.g., 'Gemini') for annotation.
         commit_sha: Optional PR head SHA the reviewer verified.
+        wording_fixes: Optional wording fixes still pending. Allowed ONLY for
+            ``SR`` + ``APPROVED``. When non-empty the verdict line reads
+            ``SR APPROVED (wording fixes pending):`` (model annotation kept in
+            the prefix), followed by a numbered fix list and then the
+            assessment; the footer gains the flat scalars
+            ``"conditions":"wording"`` and ``"pending":<count>``. Fix text is
+            never placed in the footer. An empty list behaves like ``None``.
 
     Returns:
         Formatted review comment string with metadata on line 2.
@@ -640,6 +648,13 @@ def format_review_comment(
             pre-check with detect_header_verdict_conflict() to surface this
             as a normal validation error rather than an exception.
     """
+    fixes = list(wording_fixes) if wording_fixes else []
+    if fixes and (role != "SR" or verdict != "APPROVED"):
+        raise ValueError(
+            "wording_fixes are allowed only for role 'SR' with verdict 'APPROVED' "
+            f"(got role '{role}', verdict '{verdict}')."
+        )
+
     # Validate commit_sha: must be 7-40 hex characters, silently drop invalid
     if commit_sha is not None:
         clean_sha = commit_sha.strip()
@@ -670,7 +685,23 @@ def format_review_comment(
             "edit the assessment text or change the verdict so they match."
         )
 
-    if existing_token == keyword:
+    if fixes:
+        # Wording-fixes shape: canonical header line, numbered fixes, then the
+        # assessment. An agreeing "SR APPROVED:" header already in the
+        # assessment is stripped so the verdict is stated exactly once.
+        body = assessment
+        if existing_token is not None:
+            body = re.sub(
+                rf"^{re.escape(role)} {re.escape(existing_token)}:\s*",
+                "",
+                assessment,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        prefix = f"{role} ({_sanitize_model_label(model_annotation)})" if model_annotation else role
+        numbered = "\n".join(f"{i}. {fix}" for i, fix in enumerate(fixes, 1))
+        human_line = f"{prefix} {keyword} (wording fixes pending):\n{numbered}\n\n{body}"
+    elif existing_token == keyword:
         human_line = assessment
     else:
         # Build the prefix with optional model annotation. The annotation is
@@ -680,12 +711,16 @@ def format_review_comment(
         human_line = f"{prefix} {keyword}: {assessment}"
 
     # Build metadata dict
-    metadata: dict[str, str | None] = {
+    metadata: dict[str, str | int | None] = {
         "role": role,
         "provider": _normalize_provider(model_annotation) if model_annotation else None,
         "verdict": keyword,
         "sha": commit_sha[:7] if commit_sha else None,
     }
+    if fixes:
+        # Flat scalars only: the footer regex is non-greedy ``\{.*?\}``.
+        metadata["conditions"] = "wording"
+        metadata["pending"] = len(fixes)
     meta_json = json.dumps(metadata, separators=(",", ":"))
     meta_line = f"<!-- review: {meta_json} -->"
 
