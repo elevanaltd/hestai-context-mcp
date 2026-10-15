@@ -1,6 +1,6 @@
 # ADR-RFC-ARCH-004 — Agent-Readable Governance Records (AGR) — Format, Lifecycle, Tool Contracts
 
-- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13). **Schema v1.1** — MINOR-additive amendment transcribing HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED): §1.2 `DECISION`/`BECAUSE` bytecode density (≤40 words, no newline), §1.5 v1.1 semantics, §4.1 #13 value-level guard, `HUMAN_ADR_REF` greppable-TOKEN form. No structural parser change; v1.0 records remain valid. **Schema v1.2** — MINOR-additive amendment transcribing HO-GOVERNANCE-AMEND-IN-PLACE-20260926 (2026-09-26, operator-ruled): §1.2 optional `REVISION` field (one line per in-place amendment; never bumps `VERSION`), §1.6 in-place-amendment reading of the `AMENDS` edge, §0.2 intro reworded from "immutable in PR-D scope and not re-debated" to "fixed inputs for PR-D scope; amendable later only via proper governance" (no live clause claims permanent immutability). No structural parser change; v1.0/v1.1 records remain valid.
+- **Status**: RATIFIED — 2026-06-11 (SR + CIV stamped close-out; see §13). **Schema v1.1** — MINOR-additive amendment transcribing HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED): §1.2 `DECISION`/`BECAUSE` bytecode density (≤40 words, no newline), §1.5 v1.1 semantics, §4.1 #13 value-level guard, `HUMAN_ADR_REF` greppable-TOKEN form. No structural parser change; v1.0 records remain valid. **Schema v1.2** — MINOR-additive amendment transcribing HO-GOVERNANCE-AMEND-IN-PLACE-20260926 (2026-09-26, operator-ruled): §1.2 optional `REVISION` field (one line per in-place amendment; never bumps `VERSION`), §1.6 in-place-amendment reading of the `AMENDS` edge, §0.2 intro reworded from "immutable in PR-D scope and not re-debated" to "fixed inputs for PR-D scope; amendable later only via proper governance" (no live clause claims permanent immutability). No structural parser change; v1.0/v1.1 records remain valid. **Schema v1.3** — MINOR-additive amendment transcribing issue #203 (operator ruling, 2026-10-15, approved in the HC control room and confirmed first-party in the `read-topic-records` session): topic records. §1.2 optional `TOPIC` field; §1.7 optional `CURRENT` and `RULINGS` blocks (one long-running record per topic; in-force one-line rules plus each ruling's verbatim operator words) and the new §4.1 #14 Gate A invariant; §3.2/§3.3 read additions (`lookup_decision` `current_state`, `list_decisions` `topic` filter). §3.5 delivery of rulings via `append_ruling` is PLANNED (slice S2 of #203), not shipped by v1.3. v1.0–v1.2 records remain valid.
 - **Ratified-by**: standards-reviewer + critical-implementation-validator (stamped close-out 2026-06-11), HO-orchestrated, operator-authorised
 - **Date**: 2026-05-19
 - **Scope**: `hestai-context-mcp` repository. Specifies the L1 AGR record format and consumer-side MCP tool contracts. Specification only; code implementation is deferred to a successor PR (PR-D′ / PR-H) routed via oa-router to implementation-lead.
@@ -89,6 +89,7 @@ The opening sentinel `===DECISION_RECORD===` and closing `===END===` are require
 | `EXTENDS` | list of TOKENs | Records this record extends (additive, not replacing). May be empty. |
 | `AMENDS` | list of TOKENs | Records this record amends (partial replacement; or, under in-place amendment practice — see §1.6 — full in-place edit of the cited artefact by a thin ruling record). May be empty. |
 | `REVISION` | string | One line per in-place amendment: `<YYYY-MM-DD>: <what changed>`. Optional; never changes schema `VERSION` (§1.5) — logs a record's own in-place edits instead of a version bump. Introduced in schema v1.2 (HO-GOVERNANCE-AMEND-IN-PLACE-20260926). |
+| `TOPIC` | string | Slug naming the topic a record belongs to (e.g. `client-access`). Optional. A record with `TOPIC` MAY carry the `CURRENT`/`RULINGS` blocks (§1.7). `list_decisions(topic=)` filters on it by exact match. Introduced in schema v1.3 (#203). |
 | `SCOPE` | string or list | Free-form scope qualifier (e.g. `"hestai-context-mcp"`, `["L1", "AGR"]`). Optional. |
 | `EFFECTIVE_FROM` | ISO-8601 timestamp | When the decision takes effect; defaults to `AUTHORED_AT` if absent. |
 | `EFFECTIVE_UNTIL` | ISO-8601 timestamp | When the decision lapses (independent of supersession). Optional. |
@@ -148,11 +149,13 @@ Rules:
 - **MINOR bump** — additive. New optional fields, new admissible enum values for non-required fields, new reserved names. Parsers written against `MAJOR=N.MINOR=K` MUST tolerate `MAJOR=N.MINOR>K` by ignoring unknown optional fields.
 - No patch level. Spec corrections land at the next MINOR.
 
-Current schema is `1.2`. Future additive extensions become `1.3`, `1.4`, etc.
+Current schema is `1.3`. Future additive extensions become `1.4`, `1.5`, etc.
 
 **v1.1 (MINOR-additive, per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101)**: AGRs are treated as LLM "bytecode". The reasoning-bearing fields `DECISION` and `BECAUSE` are constrained to a single flat line of ≤40 words with no embedded newline, using compressed-OCTAVE operators for connectives (new value-level invariant §4.1 #13; no structural parser change). `HUMAN_ADR_REF` gains a greppable-TOKEN canonical form alongside the legacy path form. Both are MINOR-additive: a `1.0` record that already satisfies the ≤40-word/no-newline density (as every conforming one-sentence `DECISION`/`BECAUSE` does) remains valid, and v1.1 introduces no new required field. Parsers written against `1.0` continue to parse `1.1` records (the structural grammar is unchanged).
 
 **v1.2 (MINOR-additive, per HO-GOVERNANCE-AMEND-IN-PLACE-20260926, 2026-09-26)**: ecosystem-wide in-place amendment practice is adopted for governance artefacts. Records gain the optional `REVISION` field (§1.2) — one line per in-place amendment, `<YYYY-MM-DD>: <what changed>` — logged instead of a schema `VERSION` bump; `VERSION` stays the schema-version identifier, never a per-record edit counter. `AMENDS` (§1.6) gains an in-place-amendment reading: a thin ruling record's `AMENDS` edge may mean the ruling amended the cited artefact in place rather than only a partial-replacement stack. Both readings are MINOR-additive: no existing record's structural parse changes, and a `1.0`/`1.1` record without `REVISION` remains fully valid. Parsers written against `1.0`/`1.1` continue to parse `1.2` records by ignoring the unknown optional field.
+
+**v1.3 (MINOR-additive, per issue #203, operator ruling 2026-10-15)**: topic records. The optional `TOPIC` field (§1.2) and the optional top-level `CURRENT` / `RULINGS` blocks (§1.7) are added, with one new value-level Gate A invariant (§4.1 #14). No required field is added, and no existing record's parse changes: a `1.0`–`1.2` record carries none of the new names and remains fully valid, and parsers written against `1.2` ignore the unknown optional field and blocks.
 
 **Spec-only period (CLOSED)**: Between this ADR's merge and the code landing, AGR records were authored by hand and conformed to §1.1–§1.6 as if the validator (§4) were running. The validator has now landed: Gate A (`type_checker.validate_octave_content`) enforces the §4.1 invariants against every record under `.hestai/decisions/**/*.oct.md`, regardless of authoring date — the **v1.0 envelope PLUS the v1.1 additive §4.1 #13 density invariant** (≤40 words, no embedded newline on `DECISION`/`BECAUSE`). There is no grandfather clause: every record, old or new, MUST satisfy the currently-enforced invariant set (the three pre-existing verbose records were migrated to compliant bytecode when #13 landed).
 
@@ -169,6 +172,30 @@ Current schema is `1.2`. Future additive extensions become `1.3`, `1.4`, etc.
 - `AMENDS` does not by itself supersede; an amendment refines the cited record without retiring it. Combined `AMENDS` + `SUPERSEDED_BY` (as above) is admissible.
 - **In-place amendment practice (HO-GOVERNANCE-AMEND-IN-PLACE-20260926, schema v1.2)**: when an amendment is applied in place — the amended record or human ADR is edited directly rather than stacked — the amending thin ruling record's `AMENDS` edge means "this ruling amended that artefact in place"; the ruling record MUST NOT restate the amended content (per HO-GOVERNANCE-AMEND-IN-PLACE-20260926's own `THIN_RULING_RECORD` field). This is a reading of the existing `AMENDS` edge type, not a new edge type: the acyclicity rule above and the admissible `AMENDS` + `SUPERSEDED_BY` combination are unchanged. An artefact with no TOKEN (e.g. a human ADR outside the AGR store, or this ADR itself) cannot be an `AMENDS` target — lineage resolution (§4.1 #8) requires the cited identifier to resolve via the deterministic TOKEN lookup; such amendments are recorded via a free-form pointer field (e.g. `AMENDED_ARTEFACTS`) instead.
 - Edges MUST reference TOKENs that exist in the same repository (cross-repo edges are out of scope for §1.6 enforcement; see §4.1 invariant #8 scoping note).
+
+### 1.7 Topic records — `CURRENT` and `RULINGS` blocks (v1.3)
+
+A **topic record** is one long-running `DECISION_RECORD` per topic. It keeps `TYPE::DECISION_RECORD` (so v1.0–v1.2 readers and Gate A still work), declares `TOPIC::<slug>` in `META`, and may add two top-level blocks after `META`:
+
+```
+CURRENT:
+  R2::"<one-line rule in force>"
+  R3::"<one-line rule in force>"
+RULINGS:
+  R2:
+    RULE::"<same one-line rule>"
+    VERBATIM::"<the operator's words, byte-exact>"
+    RULED::"<who, when, session/ceremony>"
+    REPLACES::R1                    // optional
+```
+
+- `CURRENT` lists the rules currently in force, in order, one `R<n>::"<rule>"` line each. It restates the live `RULE` lines mechanically and is never hand-edited.
+- `RULINGS` holds one nested entry per in-force ruling: `RULE`, `VERBATIM`, `RULED`, and optional `REPLACES` (the `R<n>` it replaced).
+- A replaced ruling is removed in place and logged with a `REVISION` line (§1.2); git keeps the old text. The record does not grow a history section.
+- A block runs from its header line until the next non-blank line indented no deeper than the header. Lines inside a block are not `META`: the read parser excludes them from `fields`, so a nested key cannot shadow a `META` field.
+- **Key-collision rule (§4.1 #14)**: the read parser keeps the FIRST match of each key, so a top-level reserved key nested inside a block could take over the record. Entries inside `CURRENT` and `RULINGS` MUST NOT use `TOKEN`, `ID`, `TYPE`, `STATUS`, `TIER`, `DECISION`, `BECAUSE`, `AUTHORED_AT` or `SUPERSEDED_BY` as a key.
+
+Delivery of rulings into these blocks through `append_ruling` is **planned (slice S2 of #203) and not shipped by v1.3**; until then topic records are authored through the existing `submit_governance` modes. The blocks are collected by a regex-only helper (North Star §4; no AST, no LLM) and read by the tools in §3.2 and §3.3.
 
 ## 2. Placement, layer mapping, and projection rules
 
@@ -268,12 +295,15 @@ Resolves a single AGR by `TOKEN`. Pure read.
     "because": "<BECAUSE string>",
     "authored_at": "<ISO-8601>",
     "path": "<repo-relative path to the .oct.md file>",
-    "fields": { /* all other present fields, key→value */ }
+    "fields": { /* all other present fields, key→value */ },
+    "current_state": [ { "id": "R2", "rule": "<one-line rule>" }, … ] | null   // additive (v1.3, §1.7)
   },
   "resolution_chain": [ /* see trace_supersedure shape; populated when STATUS == SUPERSEDED */ ],
   "resolution_chain_status": "complete" | "broken" | "cyclic"  // additive (issue #87); see note below
 }
 ```
+
+The `current_state` field (additive per §3.1.1; v1.3) carries the in-force rules from a topic record's `CURRENT` block (§1.7), in order, as `{id, rule}` entries. It is a list (empty when the block is absent) when the record declares `TOPIC`, and `null` otherwise. All other record keys are unchanged. Like the rest of the record it is derived by a pure read (PROD::I5).
 
 The `resolution_chain_status` field (additive per §3.1.1; issue #87) is a completeness signal so a caller can distinguish a `resolution_chain` that reached its terminal from one truncated by a broken link or a cycle. It is derived from the same `walk_supersession_chain` outcome that produces `resolution_chain`, with **no** extra read:
 
@@ -290,7 +320,7 @@ The field is **always present** (a defined PROD::I4 key) and never removes or re
 - `RECORD_PARSE_FAILED` (`schema_violation`) — file found but OCTAVE envelope or required fields fail to parse; `context.path` and `context.parse_error` populated. Implementation choice: treat as fatal for the read, do NOT silently skip.
 - `WORKING_DIR_INVALID` (`io_failure`) — path does not exist or is not a directory.
 
-### 3.3 `list_decisions(working_dir, scope?, status?, tier?)`
+### 3.3 `list_decisions(working_dir, scope?, status?, tier?, topic?)`
 
 Lists AGRs with optional filtering. Pure read.
 
@@ -301,7 +331,8 @@ Lists AGRs with optional filtering. Pure read.
   "working_dir": "<path>",
   "scope": "<string or null>",     // matches SCOPE field exactly when provided; null = no filter
   "status": "PROPOSED" | "RATIFIED" | "SUPERSEDED" | "VOID" | null,
-  "tier": "STRATEGIC" | "TACTICAL" | "OPERATIONAL" | null
+  "tier": "STRATEGIC" | "TACTICAL" | "OPERATIONAL" | null,
+  "topic": "<string or null>"      // v1.3; matches the TOPIC field exactly when provided; null = no filter
 }
 ```
 
@@ -317,7 +348,8 @@ Lists AGRs with optional filtering. Pure read.
       "tier": "<tier>",
       "decision": "<short>",
       "authored_at": "<ISO-8601>",
-      "path": "<repo-relative path>"
+      "path": "<repo-relative path>",
+      "topic": "<TOPIC>"           // additive (v1.3); present ONLY on records that declare TOPIC
     },
     …
   ],
@@ -387,6 +419,8 @@ When the requested token is found but has no `SUPERSEDED_BY` (it is itself termi
 ### 3.5 `propose_decision_amendment(working_dir, token, patch, expected_record_hash)` — OPTIONAL broker
 
 Creates a pull request proposing an amendment to an AGR. **Does not mutate the canonical store.** Per ADR-0013 substrate ruling; cited in §0.2.
+
+> **v1.3 note (issue #203)**: for topic records (§1.7) this broker is to be delivered, narrowed, as `submit_governance` `append_ruling` (append or replace a ruling; the verbatim text never passes through the compiler). That delivery is **planned (slice S2 of #203) and NOT shipped** — nothing in v1.3 implements it, and the contract below is unchanged.
 
 **Input**:
 
@@ -465,6 +499,7 @@ The validator is a CLI tool (name suggestion: `validate_agent_readable_governanc
 11. **`HUMAN_ADR_REF` form (v1.1)** — when present, the ref is EITHER a well-formed greppable TOKEN (matches the §1.3 TOKEN regex; the v1.1 canonical cross-repo-survivable form per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 — validated as a token, NOT path-resolved) OR a v1.0 path that resolves to a file under the repository. The §1.3 TOKEN pattern admits no path separator and no `.`, so the two forms are mutually exclusive: token-form is matched first; anything else is treated as a path and must resolve under the repo. A ref that is neither is a hard error.
 12. **Ratification provenance (warning)** — when `STATUS != PROPOSED` and `RATIFIED_BY` is absent, the validator emits a **warning** (not error) per §4.2. Closes a portion of the TOKEN-squatting / lookalike-record gap without forcing legacy `HO-*` records into rework. May be promoted to error in a MINOR bump (see §11 Q5).
 13. **Reasoning-field density (v1.1)** — `DECISION` and `BECAUSE` are each AT MOST 40 words and contain NO embedded newline (the v1.1 bytecode form, §1.2). A value-level check ONLY: the structural flat-regex parse is unchanged (no structural parser change), so write/read parity (the shared `type_checker` ↔ `agr_read` constants) is preserved. Per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101). Severity: error.
+14. **Topic-block key collision (v1.3)** — inside a `CURRENT` or `RULINGS` block (§1.7) no line may use a top-level reserved key (`TOKEN`, `ID`, `TYPE`, `STATUS`, `TIER`, `DECISION`, `BECAUSE`, `AUTHORED_AT`, `SUPERSEDED_BY`) as its key. Every offending line is reported with the key and the block named. Regex-only; a no-op for records without these blocks. Severity: error.
 
 ### 4.2 Severities
 
