@@ -94,3 +94,35 @@ def test_head_sha_unresolvable_still_posts(captured):
 
 def test_gate_verdict_map_has_wording():
     assert sg._GATE_VERDICT_MAP["WORDING"] == "APPROVED"
+
+
+@pytest.mark.parametrize("verdict", ["CONCERNS", "BLOCKED", "APPROVED"])
+def test_non_wording_verdict_carrying_fixes_never_posts_fixes(captured, verdict):
+    """Mutant M5: wording_fixes must only ever travel with a WORDING verdict."""
+    captured["install"](_review(verdict, wording_fixes=["sneaky fix"]))
+    _run()
+    sub = captured["submit"]
+    assert "wording_fixes" not in sub
+    assert sub["verdict"] == ("APPROVED" if verdict == "APPROVED" else "BLOCKED")
+
+
+class TestResolvePrHeadSha:
+    def test_happy_path_returns_sha(self, monkeypatch):
+        calls = {}
+
+        class _Client:
+            def get_pr_head_sha(self, repo, pr_number, *, timeout):
+                calls["args"] = (repo, pr_number)
+                return _HEAD
+
+        monkeypatch.setattr(sg, "_GhCliClient", _Client, raising=True)
+        assert sg._resolve_pr_head_sha("o/r", 5) == _HEAD
+        assert calls["args"] == ("o/r", 5)
+
+    def test_exception_returns_none(self, monkeypatch):
+        class _Client:
+            def get_pr_head_sha(self, repo, pr_number, *, timeout):
+                raise RuntimeError("gh exploded")
+
+        monkeypatch.setattr(sg, "_GhCliClient", _Client, raising=True)
+        assert sg._resolve_pr_head_sha("o/r", 5) is None
