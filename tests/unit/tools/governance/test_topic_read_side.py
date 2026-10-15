@@ -101,3 +101,56 @@ def test_lookup_topic_without_current_block_gives_empty_list(tmp_path: Path) -> 
     _seed(tmp_path)
     result = lookup_decision(str(tmp_path), _OTHER_TOKEN)
     assert result["record"]["current_state"] == []
+
+
+# --- CE rework round 1: read failures return the §3.1.1 envelope ------------
+
+
+def test_lookup_file_vanishes_after_discovery_returns_envelope(tmp_path: Path, monkeypatch) -> None:
+    from hestai_context_mcp.tools.governance import agr_read
+
+    _seed(tmp_path)
+    real = agr_read.discover_record
+
+    def discover_then_delete(working: Path, token: str):
+        found = real(working, token)
+        if found is not None:
+            found.unlink()
+        return found
+
+    monkeypatch.setattr(agr_read, "discover_record", discover_then_delete)
+    result = lookup_decision(str(tmp_path), _TOPIC_TOKEN)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RECORD_PARSE_FAILED"
+    assert result["error"]["context"]["token"] == _TOPIC_TOKEN
+
+
+def test_lookup_read_oserror_returns_envelope(tmp_path: Path, monkeypatch) -> None:
+    _seed(tmp_path)
+    real = Path.read_text
+
+    def flaky(self: Path, *args, **kwargs):
+        if self.name == f"{_TOPIC_TOKEN}.oct.md":
+            raise PermissionError("denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    result = lookup_decision(str(tmp_path), _TOPIC_TOKEN)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "RECORD_PARSE_FAILED"
+
+
+def test_lookup_reads_record_file_once(tmp_path: Path, monkeypatch) -> None:
+    _seed(tmp_path)
+    real = Path.read_text
+    calls: list[str] = []
+
+    def counting(self: Path, *args, **kwargs):
+        if self.name == f"{_TOPIC_TOKEN}.oct.md":
+            calls.append(self.name)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting)
+    result = lookup_decision(str(tmp_path), _TOPIC_TOKEN)
+    assert result["ok"] is True
+    assert len(calls) == 1

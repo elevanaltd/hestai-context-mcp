@@ -95,3 +95,56 @@ def test_reserved_key_after_block_end_is_not_a_block_line(tmp_path: Path) -> Non
     blocks = _GOOD_BLOCKS + 'RATIFIED_BY::"Operator"\n'
     result = validate_octave_content(tmp_path, _record(blocks))
     assert result.valid, result.errors
+
+
+# --- CE rework round 1 ------------------------------------------------------
+
+
+def test_nested_block_header_bypass_is_rejected(tmp_path: Path) -> None:
+    text = (
+        "===DECISION_RECORD===\n"
+        "RULINGS:\n"
+        "  R2:\n"
+        "    CURRENT:\n"
+        "    STATUS::RATIFIED\n" + _record().split("===DECISION_RECORD===\n", 1)[1]
+    )
+    result = validate_octave_content(tmp_path, text)
+    assert not result.valid
+    assert any("'STATUS'" in e for e in result.errors)
+
+
+@pytest.mark.parametrize("key", ["TOKEN", "STATUS", "DECISION", "TIER", "BECAUSE", "AUTHORED_AT"])
+def test_core_key_before_meta_is_rejected(tmp_path: Path, key: str) -> None:
+    body = _record().split("===DECISION_RECORD===\n", 1)[1]
+    text = f"===DECISION_RECORD===\n{key}::HIJACK\n" + body
+    result = validate_octave_content(tmp_path, text)
+    assert not result.valid
+    assert any(f"'{key}'" in e and "more than once" in e for e in result.errors)
+
+
+def test_duplicate_core_key_after_meta_is_rejected(tmp_path: Path) -> None:
+    text = _record().replace("===END===", "STATUS::RATIFIED\n===END===")
+    result = validate_octave_content(tmp_path, text)
+    assert not result.valid
+    assert any("'STATUS'" in e and "more than once" in e for e in result.errors)
+
+
+def test_single_core_key_after_meta_block_is_allowed(tmp_path: Path) -> None:
+    """ES-style records legitimately place STATUS after the META block."""
+    text = (
+        _record()
+        .replace("  STATUS::PROPOSED\n", "")
+        .replace("===END===", "STATUS::PROPOSED\n===END===")
+    )
+    result = validate_octave_content(tmp_path, text)
+    assert result.valid, result.errors
+
+
+def test_core_keys_inside_blocks_do_not_double_count(tmp_path: Path) -> None:
+    """Block-nested keys get the #14 error only, not a duplicate-key error too."""
+    blocks = _GOOD_BLOCKS.replace(
+        '    RULED::"Operator, 2026-10-15"\n',
+        '    RULED::"Operator, 2026-10-15"\n    STATUS::x\n',
+    )
+    result = validate_octave_content(tmp_path, _record(blocks))
+    assert not any("more than once" in e for e in result.errors)

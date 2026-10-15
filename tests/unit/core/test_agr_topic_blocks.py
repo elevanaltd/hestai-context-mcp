@@ -118,3 +118,43 @@ def test_block_ends_at_next_top_level_line() -> None:
     parsed = parse_decision_record(text)
     assert parsed["fields"]["TRAILER"] == "after"
     assert collect_topic_blocks(text)["rulings"][-1]["id"] == "R3"
+
+
+# --- CE rework round 1: nested block header must not reset the block -------
+
+_NESTED_HEADER_BYPASS = """===DECISION_RECORD===
+RULINGS:
+  R2:
+    CURRENT:
+    STATUS::RATIFIED
+META:
+  TYPE::DECISION_RECORD
+  VERSION::"1.3"
+  TOKEN::TOPIC-CLIENT-ACCESS-20261015
+  TOPIC::client-access
+  STATUS::PROPOSED
+  TIER::OPERATIONAL
+  AUTHORED_AT::"2026-10-15T00:00:00Z"
+  DECISION::"Topic record"
+  BECAUSE::"One record per topic"
+===END===
+"""
+
+
+def test_nested_block_header_stays_a_block_line() -> None:
+    from hestai_context_mcp.core.agent_readable_governance_parser import iter_block_lines
+
+    lines = [line.strip() for _, line in iter_block_lines(_NESTED_HEADER_BYPASS)]
+    assert "STATUS::RATIFIED" in lines
+
+
+def test_nested_block_header_does_not_change_parsed_status() -> None:
+    assert parse_decision_record(_NESTED_HEADER_BYPASS)["status"] == "PROPOSED"
+
+
+def test_indented_header_inside_meta_does_not_open_a_block() -> None:
+    text = _TOPIC_RECORD.replace(
+        '  BECAUSE::"One record per topic"\n',
+        '  BECAUSE::"One record per topic"\n  CURRENT:\n  NOTE::"kept in META"\n',
+    )
+    assert parse_decision_record(text)["fields"]["NOTE"] == "kept in META"
