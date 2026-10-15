@@ -126,6 +126,10 @@ def _validate_inputs(
             # same separators the real matchers split on.
             if len(fix.splitlines()) != 1 or "\x85" in fix:
                 return "Each wording fix must be a single line (no line breaks)"
+            # A metadata-shaped HTML comment in fix text would precede the real
+            # footer and win parse_review_metadata()'s first-match; reject it.
+            if "<!--" in fix or "-->" in fix:
+                return "Each wording fix must not contain HTML comment delimiters ('<!--', '-->')"
 
     if pr_number < 1:
         return f"Invalid PR number: {pr_number}. Must be a positive integer"

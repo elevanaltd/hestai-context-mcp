@@ -654,6 +654,10 @@ def format_review_comment(
             "wording_fixes are allowed only for role 'SR' with verdict 'APPROVED' "
             f"(got role '{role}', verdict '{verdict}')."
         )
+    if any(not isinstance(f, str) or "<!--" in f or "-->" in f for f in fixes):
+        raise ValueError(
+            "wording_fixes must be strings without HTML comment delimiters ('<!--', '-->')."
+        )
 
     # Validate commit_sha: must be 7-40 hex characters, silently drop invalid
     if commit_sha is not None:
