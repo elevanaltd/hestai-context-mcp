@@ -63,6 +63,7 @@ def test_topic_record_with_both_blocks_passes(tmp_path: Path) -> None:
         "BECAUSE",
         "AUTHORED_AT",
         "SUPERSEDED_BY",
+        "VERSION",
     ],
 )
 def test_reserved_key_inside_rulings_is_rejected(tmp_path: Path, key: str) -> None:
@@ -91,8 +92,12 @@ def test_meta_level_reserved_keys_are_not_flagged(tmp_path: Path) -> None:
 
 
 def test_reserved_key_after_block_end_is_not_a_block_line(tmp_path: Path) -> None:
-    """A top-level line after the block closes is outside the block."""
-    blocks = _GOOD_BLOCKS + 'RATIFIED_BY::"Operator"\n'
+    """A reserved key on a top-level line after the block closes is outside it.
+
+    ``ID`` is in the #14 reserved set; if block-end detection broke, this line
+    would be read as a block line and rejected.
+    """
+    blocks = _GOOD_BLOCKS + 'ID::"after-block"\n'
     result = validate_octave_content(tmp_path, _record(blocks))
     assert result.valid, result.errors
 
@@ -113,7 +118,9 @@ def test_nested_block_header_bypass_is_rejected(tmp_path: Path) -> None:
     assert any("'STATUS'" in e for e in result.errors)
 
 
-@pytest.mark.parametrize("key", ["TOKEN", "STATUS", "DECISION", "TIER", "BECAUSE", "AUTHORED_AT"])
+@pytest.mark.parametrize(
+    "key", ["TOKEN", "STATUS", "DECISION", "TIER", "BECAUSE", "AUTHORED_AT", "VERSION"]
+)
 def test_core_key_before_meta_is_rejected(tmp_path: Path, key: str) -> None:
     body = _record().split("===DECISION_RECORD===\n", 1)[1]
     value = "OTHER-TOPIC-20261015" if key == "TOKEN" else "HIJACK"
@@ -153,3 +160,42 @@ def test_core_keys_inside_blocks_do_not_double_count(tmp_path: Path) -> None:
     )
     result = validate_octave_content(tmp_path, _record(blocks))
     assert not any("before the META" in e for e in result.errors)
+
+
+# --- cubic round 2: Gate A extraction is block-aware (P1) / VERSION (P2) ----
+
+
+def _without_meta(key: str) -> str:
+    return "".join(
+        ln for ln in _record(_GOOD_BLOCKS).splitlines(keepends=True) if f"  {key}::" not in ln[:12]
+    )
+
+
+@pytest.mark.parametrize("key", ["VERSION", "DECISION", "BECAUSE", "TIER", "AUTHORED_AT"])
+def test_nested_value_does_not_satisfy_required_field(tmp_path: Path, key: str) -> None:
+    text = _without_meta(key).replace(
+        '    RULED::"Operator, 2026-10-15"\n',
+        f'    RULED::"Operator, 2026-10-15"\n    {key}::"x"\n',
+    )
+    result = validate_octave_content(tmp_path, text)
+    assert not result.valid
+    assert any(f"Required field '{key}' is missing" in e for e in result.errors), result.errors
+
+
+def test_nested_ratified_by_does_not_suppress_provenance_warning(tmp_path: Path) -> None:
+    text = _record(_GOOD_BLOCKS).replace("STATUS::PROPOSED", "STATUS::RATIFIED")
+    text = text.replace(
+        '    RULED::"Operator, 2026-10-15"\n',
+        '    RULED::"Operator, 2026-10-15"\n    RATIFIED_BY::"someone"\n',
+    )
+    result = validate_octave_content(tmp_path, text)
+    assert any("RATIFIED_BY" in w for w in result.warnings), result.warnings
+
+
+def test_nested_bad_issue_ref_is_not_validated(tmp_path: Path) -> None:
+    text = _record(_GOOD_BLOCKS).replace(
+        '    RULED::"Operator, 2026-10-15"\n',
+        '    RULED::"Operator, 2026-10-15"\n    ISSUE_REF::"not a ref"\n',
+    )
+    result = validate_octave_content(tmp_path, text)
+    assert result.valid, result.errors

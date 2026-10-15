@@ -1,9 +1,11 @@
 """RED suite — topic-record read side (issue #203 S1).
 
 * ``list_decisions(topic=)`` filters on the free META ``TOPIC`` field (same
-  pattern as SCOPE) and returns ``topic`` (or ``None``) on every row.
+  pattern as SCOPE) and returns ``topic`` on rows of topic records only (non-topic rows omit the
+  key, preserving the pre-v1.3 row shape).
 * ``lookup_decision`` adds ``current_state: [{id, rule}]`` when the record has
-  a TOPIC; the key is ``None`` otherwise. All existing keys are unchanged.
+  a TOPIC (an empty list when it has no CURRENT block); the key is ``None``
+  for a record without a TOPIC. All existing keys are unchanged.
 """
 
 from __future__ import annotations
@@ -122,6 +124,7 @@ def test_lookup_file_vanishes_after_discovery_returns_envelope(tmp_path: Path, m
     result = lookup_decision(str(tmp_path), _TOPIC_TOKEN)
     assert result["ok"] is False
     assert result["error"]["code"] == "RECORD_PARSE_FAILED"
+    assert result["error"]["category"] == "io_failure"
     assert result["error"]["context"]["token"] == _TOPIC_TOKEN
 
 
@@ -148,6 +151,7 @@ def test_lookup_read_oserror_returns_envelope(tmp_path: Path, monkeypatch) -> No
     result = lookup_decision(str(tmp_path), _TOPIC_TOKEN)
     assert result["ok"] is False
     assert result["error"]["code"] == "RECORD_PARSE_FAILED"
+    assert result["error"]["category"] == "io_failure"
 
 
 def test_lookup_reads_record_file_once_after_discovery(tmp_path: Path, monkeypatch) -> None:
