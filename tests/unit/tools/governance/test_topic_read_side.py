@@ -55,10 +55,12 @@ def test_list_topic_filter_returns_only_matching(tmp_path: Path) -> None:
     assert result["records"][0]["topic"] == "client-access"
 
 
-def test_list_without_topic_returns_all_with_topic_key(tmp_path: Path) -> None:
+def test_list_without_topic_returns_all_topic_key_only_on_topic_rows(tmp_path: Path) -> None:
     _seed(tmp_path)
     result = list_decisions(str(tmp_path))
-    by_token = {r["token"]: r["topic"] for r in result["records"]}
+    by_token = {r["token"]: r.get("topic") for r in result["records"]}
+    plain = next(r for r in result["records"] if r["token"] == _PLAIN_TOKEN)
+    assert "topic" not in plain  # pre-v1.3 row shape preserved
     assert by_token == {
         _TOPIC_TOKEN: "client-access",
         _OTHER_TOKEN: "other-topic",

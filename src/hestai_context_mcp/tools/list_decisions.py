@@ -1,7 +1,8 @@
 """list_decisions — list AGRs with optional filtering (ADR-RFC-ARCH-004 §3.3).
 
 Pure read (PROD I5), structured return (PROD I4). Returns summary entries sorted
-by ``authored_at`` DESCENDING with optional scope/status/tier filters. Errors use
+by ``authored_at`` DESCENDING with optional scope/status/tier/topic filters. Rows
+of topic records additionally carry ``topic``. Errors use
 the §3.1.1 envelope: FILTER_INVALID, WORKING_DIR_INVALID.
 
 §3.3 incompleteness handling: a file that IS a DECISION_RECORD but fails to
@@ -35,6 +36,7 @@ def list_decisions(
     scope: str | None = None,
     status: str | None = None,
     tier: str | None = None,
+    topic: str | None = None,
 ) -> dict[str, Any]:
     """List AGRs with optional filtering. Pure read.
 
@@ -43,11 +45,15 @@ def list_decisions(
         scope: Exact-match SCOPE filter, or ``None`` for no filter.
         status: One of the STATUS enum values, or ``None``.
         tier: One of the TIER enum values, or ``None``.
+        topic: Exact-match filter on the optional META ``TOPIC`` field (topic
+            records, ADR-RFC-ARCH-004 v1.3), or ``None`` for no filter.
 
     Returns:
         On success: ``{"ok": True, "records": [...], "total": int,
         "skipped": [{"path": str, "parse_error": str}, ...]}`` with ``records``
-        sorted by ``authored_at`` DESC. ``skipped`` is always present (empty when
+        sorted by ``authored_at`` DESC; each row is ``{token, status, tier,
+        decision, authored_at, path}`` plus ``topic`` on records that declare a
+        TOPIC (the key is absent otherwise, keeping the pre-v1.3 row shape). ``skipped`` is always present (empty when
         every in-scope record parsed) and names every DECISION_RECORD that failed
         to parse, so a consumer can detect an incomplete list (§3.3). On input
         failure (bad filter / working_dir): the §3.1.1 error envelope.
@@ -101,17 +107,23 @@ def list_decisions(
             continue
         if scope is not None and parsed["fields"].get("SCOPE") != scope:
             continue
+        if topic is not None and parsed["fields"].get("TOPIC") != topic:
+            continue
 
-        records.append(
-            {
-                "token": parsed["token"],
-                "status": parsed["status"],
-                "tier": parsed["tier"],
-                "decision": parsed["decision"],
-                "authored_at": parsed["authored_at"],
-                "path": agr_read.rel_path(working_path, path),
-            }
-        )
+        row: dict[str, Any] = {
+            "token": parsed["token"],
+            "status": parsed["status"],
+            "tier": parsed["tier"],
+            "decision": parsed["decision"],
+            "authored_at": parsed["authored_at"],
+            "path": agr_read.rel_path(working_path, path),
+        }
+        # ``topic`` is additive and present ONLY on topic records, so the
+        # pre-v1.3 row shape (asserted exactly by existing consumers) is
+        # unchanged for every non-topic record.
+        if "TOPIC" in parsed["fields"]:
+            row["topic"] = parsed["fields"]["TOPIC"]
+        records.append(row)
 
     # §3.3: sorted by authored_at DESCENDING.
     records.sort(key=lambda r: r["authored_at"] or "", reverse=True)

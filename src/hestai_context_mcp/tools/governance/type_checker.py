@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from hestai_context_mcp.core.agent_readable_governance_parser import iter_block_lines
 from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 
 # ---------------------------------------------------------------------------
@@ -110,6 +111,22 @@ TIER_VALUES = frozenset({"STRATEGIC", "TACTICAL", "OPERATIONAL"})
 
 # §1.2 reserved names — MUST NOT appear in any v1.x record (§4.1 #7).
 RESERVED_FIELD_NAMES = frozenset({"DEPENDS_ON", "CONFLICTS_WITH", "ARCHIVED_AT"})
+
+# v1.3 §1.7: top-level keys that MUST NOT appear inside a topic record's CURRENT /
+# RULINGS blocks (first-match parsing would let a nested copy take over the record).
+TOPIC_BLOCK_RESERVED_KEYS = frozenset(
+    {
+        "TOKEN",
+        "ID",
+        "TYPE",
+        "STATUS",
+        "TIER",
+        "DECISION",
+        "BECAUSE",
+        "AUTHORED_AT",
+        "SUPERSEDED_BY",
+    }
+)
 
 # --- ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13 reasoning-density contract ---------
 # HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101, RATIFIED) ruled AGRs are LLM
@@ -507,6 +524,28 @@ def _check_agr_invariants(
     # Collect-more-errors with the offending field NAMED (operator UX), mirroring
     # the #10/#9 precedent.
     _check_reasoning_density(content, errors)
+
+    # --- #14: no top-level reserved key inside CURRENT / RULINGS (v1.3 §1.7) ---
+    _check_topic_block_keys(content, errors)
+
+
+def _check_topic_block_keys(content: str, errors: list[str]) -> None:
+    """Reject a top-level reserved key nested inside a CURRENT / RULINGS block.
+
+    The read parser keeps the FIRST match of each key, so a nested ``STATUS::``
+    (etc.) inside a topic-record block could take over the record. Every
+    offending line is reported with the key and the block named (collect-more-
+    errors). Regex-only; no-op for records without these blocks.
+    """
+    for block, line in iter_block_lines(content):
+        m = _META_FIELD_LINE_RE.match(line)
+        if m is None or m.group(1) not in TOPIC_BLOCK_RESERVED_KEYS:
+            continue
+        errors.append(
+            f"Key '{m.group(1)}' is a top-level reserved key and MUST NOT appear "
+            f"inside the {block} block (ADR-RFC-ARCH-004 v1.3 §1.7 / §4.1 #14); "
+            "it would shadow the record's META field under first-match parsing."
+        )
 
 
 def _check_reasoning_density(content: str, errors: list[str]) -> None:

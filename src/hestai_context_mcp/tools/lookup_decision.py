@@ -12,8 +12,10 @@ walking) — no rebuilt parsing or enumeration logic.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from hestai_context_mcp.core.agent_readable_governance_parser import collect_topic_blocks
 from hestai_context_mcp.tools.governance import agr_read
 
 _TOOL = "lookup_decision"
@@ -55,6 +57,11 @@ def lookup_decision(
         completeness signal derived from the same ``walk_supersession_chain``
         outcome, so a caller can tell a chain that reached its terminal from one
         truncated by a broken link or a cycle.
+        ``record["current_state"]`` (additive, ADR-RFC-ARCH-004 v1.3) is
+        ``[{"id": str, "rule": str}, ...]`` — the in-force rules from a topic
+        record's ``CURRENT`` block, in order — when the record has a ``TOPIC``
+        field (an empty list if the block is absent), and ``None`` for a record
+        without a TOPIC. All other record keys are unchanged.
         On failure: the §3.1.1 error envelope.
     """
     working_path = agr_read.validate_working_dir(working_dir)
@@ -115,6 +122,7 @@ def lookup_decision(
         "authored_at": parsed["authored_at"],
         "path": agr_read.rel_path(working_path, path),
         "fields": parsed["fields"],
+        "current_state": _current_state(path, parsed["fields"]),
     }
 
     resolution_chain: list[dict[str, Any]] = []
@@ -138,3 +146,11 @@ def lookup_decision(
         "resolution_chain": resolution_chain,
         "resolution_chain_status": resolution_chain_status,
     }
+
+
+def _current_state(path: Path, fields: dict[str, str]) -> list[dict[str, str]] | None:
+    """Return the CURRENT block rules for a topic record, else ``None`` (pure read)."""
+    if "TOPIC" not in fields:
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return [{"id": e["id"], "rule": e["rule"]} for e in collect_topic_blocks(text)["current"]]
