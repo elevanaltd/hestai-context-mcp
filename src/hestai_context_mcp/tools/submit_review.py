@@ -37,7 +37,6 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_self_review,
     has_sr_approval,
     has_tmg_approval,
-    neutralise_comment_delimiters,
 )
 from hestai_context_mcp.tools.shared.review_gate_retrigger import (
     retrigger_review_gate as _retrigger_review_gate,
@@ -530,12 +529,12 @@ def submit_review(
     # Normalize empty strings to None for internal processing
     annotation = model_annotation if model_annotation else None
     sha = commit_sha if commit_sha else None
-    # Issue #206: neutralise HTML comment delimiters in the free-text assessment
-    # up front so EVERY downstream check (header-conflict, cross-role guards,
-    # gate matchers) evaluates the same text that is posted. No-op otherwise.
-    if isinstance(assessment, str):
-        assessment = neutralise_comment_delimiters(assessment)
-
+    # Issue #206: HTML comment delimiters in the assessment are neutralised by
+    # format_review_comment() (Step 2), which is the single place that renders
+    # free text. The pre-format checks below (header conflict, original-first-
+    # line guard) were differentially verified to decide identically on the raw
+    # and neutralised text (tests: TestPreGuardNeutralisationIsRedundant), so no
+    # second neutralisation is done here.
     # Step 1: Validate inputs. wording_fixes are validated RAW (line breaks and
     # comment delimiters) BEFORE any trimming, so "\nfix" is refused, not rewritten.
     error = _validate_inputs(repo, pr_number, role, verdict, assessment, wording_fixes)

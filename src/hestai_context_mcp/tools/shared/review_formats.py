@@ -132,6 +132,10 @@ def detect_header_verdict_conflict(assessment: str, role: str, verdict: str) -> 
     return existing_token
 
 
+_JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+_FOOTER_UNSAFE_RE = re.compile(r"[<>}]")
+
+
 def neutralise_comment_delimiters(text: str) -> str:
     """Neutralise HTML comment delimiters in free text (issue #206).
 
@@ -667,9 +671,11 @@ def format_review_comment(
     # Issue #206: free text rendered into the comment must not be able to carry
     # a metadata-shaped HTML comment ahead of the real footer. The formatter's
     # own footer (below) is emitted AFTER this and is never altered.
+    # The FINAL neutralisation of the whole visible portion happens below, after
+    # every other transformation (e.g. _sanitize_model_label strips parentheses,
+    # which can RE-CREATE a delimiter from "<(!--"). Neutralising the raw
+    # annotation up front is therefore not sufficient on its own.
     assessment = neutralise_comment_delimiters(assessment)
-    if model_annotation:
-        model_annotation = neutralise_comment_delimiters(model_annotation)
 
     fixes = list(wording_fixes) if wording_fixes else []
     if fixes and (role != "SR" or verdict != "APPROVED"):
@@ -740,7 +746,11 @@ def format_review_comment(
     # Build metadata dict
     metadata: dict[str, str | int | None] = {
         "role": role,
-        "provider": _normalize_provider(model_annotation) if model_annotation else None,
+        "provider": (
+            _normalize_provider(neutralise_comment_delimiters(model_annotation))
+            if model_annotation
+            else None
+        ),
         "verdict": keyword,
         "sha": commit_sha[:7] if commit_sha else None,
     }
@@ -748,7 +758,22 @@ def format_review_comment(
         # Flat scalars only: the footer regex is non-greedy ``\{.*?\}``.
         metadata["conditions"] = "wording"
         metadata["pending"] = len(fixes)
-    meta_json = json.dumps(metadata, separators=(",", ":"))
+    # Final pass over the whole visible portion, AFTER all transformations and
+    # joins. Idempotent for already-neutral text, so ordinary comments are
+    # byte-identical; it is the guarantee that nothing free-text-derived can
+    # carry a delimiter ahead of the real footer.
+    human_line = neutralise_comment_delimiters(human_line)
+
+    # json.dumps does not escape "<", ">" or "}" inside string values -- a
+    # provider such as "x-->y" would close the HTML comment inside the real
+    # footer, and "}" would end the non-greedy footer regex early. Escape them
+    # as JSON \\u escapes INSIDE string literals only (the structural braces are
+    # untouched, the value round-trips through json.loads unchanged, and
+    # ordinary values are byte-identical).
+    meta_json = _JSON_STRING_RE.sub(
+        lambda m: _FOOTER_UNSAFE_RE.sub(lambda c: f"\\u{ord(c.group(0)):04x}", m.group(0)),
+        json.dumps(metadata, separators=(",", ":")),
+    )
     meta_line = f"<!-- review: {meta_json} -->"
 
     return f"{human_line}\n{meta_line}"
