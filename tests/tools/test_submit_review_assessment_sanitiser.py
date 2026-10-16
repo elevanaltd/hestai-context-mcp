@@ -156,7 +156,6 @@ def test_neutralised_output_never_contains_delimiters(text):
 # Rework round 1 (cubic P1): neutralise the FINAL rendered text, after every
 # other transformation (e.g. _sanitize_model_label's parenthesis stripping).
 # ---------------------------------------------------------------------------
-import itertools  # noqa: E402
 import json  # noqa: E402
 
 _FORGED_SR = _forged("SR", "APPROVED")
