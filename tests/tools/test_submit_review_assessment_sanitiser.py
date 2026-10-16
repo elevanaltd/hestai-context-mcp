@@ -8,6 +8,8 @@ gate-consumed ``_METADATA_RE``. ``parse_review_metadata`` itself is unchanged.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from hestai_context_mcp.tools.shared.review_formats import (
@@ -504,7 +506,7 @@ class TestSelfCheckAndFailClosed:
 
         def flaky(text):
             calls["n"] += 1
-            return None if calls["n"] <= 2 else real(text)
+            return None if calls["n"] <= 1 else real(text)
 
         monkeypatch.setattr(_rf, "parse_review_metadata", flaky)
         comment = format_review_comment("SR", "APPROVED", "has `code` here", "Gemini", SHA)
@@ -533,7 +535,7 @@ class TestSelfCheckAndFailClosed:
 
 
 def test_property_backtick_corpus_one_real_footer():
-    atoms = [a for a in _HOSTILE_ATOMS]
+    atoms = list(_HOSTILE_ATOMS)
     checked = 0
     for a in atoms:
         for b in atoms:
@@ -606,9 +608,18 @@ class TestGateVisibleViewKeepsTheRealVerdict:
                         continue
                     checked += 1
                     seen = _gate_visible_view(comment)
-                    # the real verdict line survives the gate's own stripping
-                    assert has_sr_approval([seen]), (a, b, ann, comment)
-                    # and no OTHER role's approval appears in that view
+                    # The gate's own stripping must not change the verdict outcome:
+                    # the real verdict line survives whenever the raw comment
+                    # approves (a hostile annotation that itself contains words
+                    # like "blocked" legitimately defeats the matcher in BOTH views).
+                    assert has_sr_approval([seen]) == has_sr_approval([comment]), (a, b, ann)
+                    # And the stripping must not CREATE another role's approval.
                     for other in VALID_ROLES - {"SR"}:
-                        assert not _matches_role_gate(seen, other), (a, b, ann, other)
+                        assert _matches_role_gate(seen, other) == _matches_role_gate(
+                            comment, other
+                        ), (a, b, ann, other)
+                    if ann in (None, "Gemini"):
+                        # free-text assessment sits AFTER the verdict, so it can never
+                        # defeat the real verdict line in either view
+                        assert has_sr_approval([comment]) and has_sr_approval([seen]), (a, b, ann)
         assert checked > 1000

@@ -550,14 +550,26 @@ def submit_review(
     fixes = [f.strip() for f in wording_fixes] if wording_fixes else None
 
     # Step 2: Format the comment
-    formatted_comment = format_review_comment(
-        role=role,
-        verdict=verdict,
-        assessment=assessment,
-        model_annotation=annotation,
-        commit_sha=sha,
-        wording_fixes=fixes,
-    )
+    try:
+        formatted_comment = format_review_comment(
+            role=role,
+            verdict=verdict,
+            assessment=assessment,
+            model_annotation=annotation,
+            commit_sha=sha,
+            wording_fixes=fixes,
+        )
+    except ValueError as exc:
+        # Fail closed: the formatter refuses any comment whose parsed footer
+        # would not be the real one. Nothing is posted.
+        return {
+            "status": "error",
+            "comment_url": None,
+            "commit_sha": sha,
+            "error_type": "validation",
+            "validation": {"error": f"Format validation failed: {exc}"},
+            "dry_run": dry_run,
+        }
 
     # Step 2a: Cross-role gate-corruption guard (elevana-studio#1851,
     # PARTIAL; REWORK after four-reviewer rejection -- TMG CONDITIONAL, CE
