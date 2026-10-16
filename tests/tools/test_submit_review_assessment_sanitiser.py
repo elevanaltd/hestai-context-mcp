@@ -139,3 +139,14 @@ class TestWordingFixRawValidation:
         r = _dry(wording_fixes=["  Soften X  "])
         assert r["status"] == "ok"
         assert "1. Soften X\n" in r["validation"]["formatted_comment"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["<!-->", "<!---->", "<!--->", "<<!--->>", "--><!--", "<!<!---->--> >", "-->>", "<!-- -->"],
+)
+def test_neutralised_output_never_contains_delimiters(text):
+    from hestai_context_mcp.tools.shared.review_formats import neutralise_comment_delimiters
+
+    out = neutralise_comment_delimiters(text)
+    assert "<!--" not in out and "-->" not in out

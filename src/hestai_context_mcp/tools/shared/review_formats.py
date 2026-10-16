@@ -132,6 +132,22 @@ def detect_header_verdict_conflict(assessment: str, role: str, verdict: str) -> 
     return existing_token
 
 
+def neutralise_comment_delimiters(text: str) -> str:
+    """Neutralise HTML comment delimiters in free text (issue #206).
+
+    ``<!--`` becomes ``&lt;!--`` and ``-->`` becomes ``--&gt;``. GitHub renders
+    those as the visible characters, so a reviewer can still QUOTE a footer
+    shape, but the text can neither open a comment nor match the gate-consumed
+    ``_METADATA_RE`` ahead of the real footer. The output can
+    never recombine into a delimiter. Text without delimiters is returned
+    unchanged.
+
+    ``-->`` is replaced FIRST: in ``<!-->`` the ``-->`` overlaps the opener, and
+    replacing ``<!--`` first would leave ``&lt;!-->`` (a fresh ``-->``).
+    """
+    return text.replace("-->", "--&gt;").replace("<!--", "&lt;!--")
+
+
 def _sanitize_model_label(model_annotation: str) -> str:
     """Strip characters that would corrupt the anchored "<ROLE> (<model>)" shape.
 
@@ -648,6 +664,13 @@ def format_review_comment(
             pre-check with detect_header_verdict_conflict() to surface this
             as a normal validation error rather than an exception.
     """
+    # Issue #206: free text rendered into the comment must not be able to carry
+    # a metadata-shaped HTML comment ahead of the real footer. The formatter's
+    # own footer (below) is emitted AFTER this and is never altered.
+    assessment = neutralise_comment_delimiters(assessment)
+    if model_annotation:
+        model_annotation = neutralise_comment_delimiters(model_annotation)
+
     fixes = list(wording_fixes) if wording_fixes else []
     if fixes and (role != "SR" or verdict != "APPROVED"):
         raise ValueError(

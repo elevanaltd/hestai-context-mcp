@@ -37,6 +37,7 @@ from hestai_context_mcp.tools.shared.review_formats import (
     has_self_review,
     has_sr_approval,
     has_tmg_approval,
+    neutralise_comment_delimiters,
 )
 from hestai_context_mcp.tools.shared.review_gate_retrigger import (
     retrigger_review_gate as _retrigger_review_gate,
@@ -124,7 +125,9 @@ def _validate_inputs(
             # One fix = one physical line: a line break could start a second
             # line carrying another role's verdict. splitlines() recognises the
             # same separators the real matchers split on.
-            if len(fix.splitlines()) != 1 or "\x85" in fix:
+            # Checked on the RAW string (before any trimming): splitlines()
+            # drops a trailing break, so compare against [fix] itself.
+            if fix.splitlines() != [fix]:
                 return "Each wording fix must be a single line (no line breaks)"
             # A metadata-shaped HTML comment in fix text would precede the real
             # footer and win parse_review_metadata()'s first-match; reject it.
@@ -527,12 +530,15 @@ def submit_review(
     # Normalize empty strings to None for internal processing
     annotation = model_annotation if model_annotation else None
     sha = commit_sha if commit_sha else None
-    fixes = (
-        [f.strip() if isinstance(f, str) else f for f in wording_fixes] if wording_fixes else None
-    )
+    # Issue #206: neutralise HTML comment delimiters in the free-text assessment
+    # up front so EVERY downstream check (header-conflict, cross-role guards,
+    # gate matchers) evaluates the same text that is posted. No-op otherwise.
+    if isinstance(assessment, str):
+        assessment = neutralise_comment_delimiters(assessment)
 
-    # Step 1: Validate inputs
-    error = _validate_inputs(repo, pr_number, role, verdict, assessment, fixes)
+    # Step 1: Validate inputs. wording_fixes are validated RAW (line breaks and
+    # comment delimiters) BEFORE any trimming, so "\nfix" is refused, not rewritten.
+    error = _validate_inputs(repo, pr_number, role, verdict, assessment, wording_fixes)
     if error:
         return {
             "status": "error",
@@ -542,6 +548,7 @@ def submit_review(
             "validation": {"error": error},
             "dry_run": dry_run,
         }
+    fixes = [f.strip() for f in wording_fixes] if wording_fixes else None
 
     # Step 2: Format the comment
     formatted_comment = format_review_comment(
