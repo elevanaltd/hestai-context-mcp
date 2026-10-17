@@ -341,12 +341,18 @@ def _parse_review(
     if verdict == "WORDING":
         fixes_match = _WORDING_FIXES_RE.search(raw)
         fixes = _parse_concerns(fixes_match.group(1)) if fixes_match else []
-        if not fixes or concerns:
-            # WORDING must be purely wording: no listed fixes, or any substantive
-            # concern alongside, degrades to CONCERNS (never APPROVED).
-            concerns = concerns or [
-                "Reviewer returned WORDING without a usable WORDING_FIXES list."
-            ]
+        if not fixes or concerns or concerns_match is None:
+            # WORDING must be purely wording: no listed fixes, any substantive
+            # concern alongside, or a missing explicit ``CONCERNS::[]`` line
+            # (truncated/malformed output) degrades to CONCERNS (never APPROVED).
+            if not concerns:
+                concerns = [
+                    (
+                        "Reviewer returned WORDING without a usable WORDING_FIXES list."
+                        if not fixes
+                        else "Reviewer returned WORDING without an explicit CONCERNS::[] line."
+                    )
+                ]
             return {
                 "verdict": "CONCERNS",
                 "assessment": assessment,

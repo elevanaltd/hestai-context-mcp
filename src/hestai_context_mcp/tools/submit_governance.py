@@ -229,7 +229,9 @@ async def _run_semantic_review(
     submit_kwargs: dict[str, Any] = {}
     if wording_fixes and review_verdict == "WORDING":
         submit_kwargs["wording_fixes"] = wording_fixes
-    head_sha = _resolve_pr_head_sha(repo, pr_number)
+    # Blocking gh subprocess (up to _GH_API_TIMEOUT_SECONDS): keep off the event loop.
+    loop = asyncio.get_running_loop()
+    head_sha = await loop.run_in_executor(None, _resolve_pr_head_sha, repo, pr_number)
     if head_sha:
         submit_kwargs["commit_sha"] = head_sha
 
