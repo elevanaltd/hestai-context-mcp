@@ -126,3 +126,26 @@ class TestResolvePrHeadSha:
 
         monkeypatch.setattr(sg, "_GhCliClient", _Client, raising=True)
         assert sg._resolve_pr_head_sha("o/r", 5) is None
+
+
+def test_head_sha_resolution_runs_off_the_event_loop_thread(
+    captured, monkeypatch: pytest.MonkeyPatch
+):
+    """#205 follow-ups: the blocking gh subprocess must not run on the loop thread."""
+    import threading
+
+    captured["install"](_review("APPROVED"))
+    seen: dict[str, int] = {}
+
+    def _record_thread(repo: str, n: int) -> str:
+        seen["worker"] = threading.get_ident()
+        return _HEAD
+
+    monkeypatch.setattr(sg, "_resolve_pr_head_sha", _record_thread, raising=True)
+
+    async def _go() -> int:
+        await sg._run_semantic_review("OCTAVE", _PR_URL)
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(_go())
+    assert seen["worker"] != loop_thread
