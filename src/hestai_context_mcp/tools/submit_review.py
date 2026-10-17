@@ -124,7 +124,9 @@ def _validate_inputs(
             # One fix = one physical line: a line break could start a second
             # line carrying another role's verdict. splitlines() recognises the
             # same separators the real matchers split on.
-            if len(fix.splitlines()) != 1 or "\x85" in fix:
+            # Checked on the RAW string (before any trimming): splitlines()
+            # drops a trailing break, so compare against [fix] itself.
+            if fix.splitlines() != [fix]:
                 return "Each wording fix must be a single line (no line breaks)"
             # A metadata-shaped HTML comment in fix text would precede the real
             # footer and win parse_review_metadata()'s first-match; reject it.
@@ -527,12 +529,15 @@ def submit_review(
     # Normalize empty strings to None for internal processing
     annotation = model_annotation if model_annotation else None
     sha = commit_sha if commit_sha else None
-    fixes = (
-        [f.strip() if isinstance(f, str) else f for f in wording_fixes] if wording_fixes else None
-    )
-
-    # Step 1: Validate inputs
-    error = _validate_inputs(repo, pr_number, role, verdict, assessment, fixes)
+    # Issue #206: HTML comment delimiters in the assessment are neutralised by
+    # format_review_comment() (Step 2), which is the single place that renders
+    # free text. The pre-format checks below (header conflict, original-first-
+    # line guard) were differentially verified to decide identically on the raw
+    # and neutralised text (tests: TestPreGuardNeutralisationIsRedundant), so no
+    # second neutralisation is done here.
+    # Step 1: Validate inputs. wording_fixes are validated RAW (line breaks and
+    # comment delimiters) BEFORE any trimming, so "\nfix" is refused, not rewritten.
+    error = _validate_inputs(repo, pr_number, role, verdict, assessment, wording_fixes)
     if error:
         return {
             "status": "error",
@@ -542,16 +547,29 @@ def submit_review(
             "validation": {"error": error},
             "dry_run": dry_run,
         }
+    fixes = [f.strip() for f in wording_fixes] if wording_fixes else None
 
     # Step 2: Format the comment
-    formatted_comment = format_review_comment(
-        role=role,
-        verdict=verdict,
-        assessment=assessment,
-        model_annotation=annotation,
-        commit_sha=sha,
-        wording_fixes=fixes,
-    )
+    try:
+        formatted_comment = format_review_comment(
+            role=role,
+            verdict=verdict,
+            assessment=assessment,
+            model_annotation=annotation,
+            commit_sha=sha,
+            wording_fixes=fixes,
+        )
+    except ValueError as exc:
+        # Fail closed: the formatter refuses any comment whose parsed footer
+        # would not be the real one. Nothing is posted.
+        return {
+            "status": "error",
+            "comment_url": None,
+            "commit_sha": sha,
+            "error_type": "validation",
+            "validation": {"error": f"Format validation failed: {exc}"},
+            "dry_run": dry_run,
+        }
 
     # Step 2a: Cross-role gate-corruption guard (elevana-studio#1851,
     # PARTIAL; REWORK after four-reviewer rejection -- TMG CONDITIONAL, CE
