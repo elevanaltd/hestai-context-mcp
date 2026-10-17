@@ -16,6 +16,8 @@ No LLM calls. Deterministic for identical filesystem state.
 import re
 from pathlib import Path
 
+from hestai_context_mcp.core.agent_readable_governance_parser import annotate_lines
+
 # Max characters assembled for the context budget (future Gate C backend).
 _CONTEXT_BUDGET_CHARS = 25_000
 
@@ -38,6 +40,18 @@ _CONTEXT_BUDGET_CHARS = 25_000
 _FIELD_EXACT_RE_TEMPLATE = (
     r'(?m)(?:^\s*TOKEN::\s*(?:"{token}"|{token})\s*$' r'|^\s*ID::\s*(?:"{token}"|{token})\s*$)'
 )
+
+
+def declares_token(content: str, token: str) -> bool:
+    """True iff ``content`` declares ``token`` in a TOP-LEVEL TOKEN/ID line.
+
+    Lines inside a topic record's CURRENT / RULINGS blocks are not declarations
+    (ADR-RFC-ARCH-004 v1.3 §1.7: block lines are not META), so they are dropped
+    before the exact-match search (#203 S2 follow-up a). Pure; regex only.
+    """
+    top_level = "".join(line for block, line in annotate_lines(content) if block is None)
+    pattern = re.compile(_FIELD_EXACT_RE_TEMPLATE.format(token=re.escape(token)))
+    return pattern.search(top_level) is not None
 
 
 def _search_manifest(manifest_path: Path, token: str) -> bool:
@@ -82,6 +96,8 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
     Uses a regex that matches the OCTAVE field-assignment form
     ``TOKEN::"<token>"`` or ``ID::"<token>"`` exactly, preventing
     prefix-match false positives (e.g. ``HO-FOO`` matching ``HO-FOO-BAR``).
+    Only top-level declarations count (``declares_token``): a TOKEN line nested
+    in a CURRENT / RULINGS block does not make a token exist.
 
     Args:
         working_dir: Project root directory.
@@ -94,8 +110,6 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
     decisions_root = hestai / "decisions"
     concepts_root = hestai / "context" / "concepts"
 
-    pattern = re.compile(_FIELD_EXACT_RE_TEMPLATE.format(token=re.escape(token)))
-
     for root in (decisions_root, concepts_root):
         if not root.exists():
             continue
@@ -104,7 +118,7 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
                 content = oct_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if pattern.search(content):
+            if declares_token(content, token):
                 return True
 
     return False
