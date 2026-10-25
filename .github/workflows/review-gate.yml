@@ -93,7 +93,8 @@ jobs:
       #    its own judge.  Every PR in the gate-remediation programme touches
       #    validate_review.py, so that was not theoretical.
       #
-      # 2. Explicit "ref: main": actions/checkout defaults `ref` to the
+      # 2. Explicit `ref` (first "ref: main", now the pinned SHA below):
+      #    actions/checkout defaults `ref` to the
       #    EVENT's reference/SHA when the repository being checked out is the
       #    one that triggered the workflow, and to the default branch
       #    otherwise.  In LOCAL mode the triggering repository IS
