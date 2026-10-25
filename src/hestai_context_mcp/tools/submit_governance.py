@@ -229,19 +229,29 @@ async def _run_semantic_review(
     submit_kwargs: dict[str, Any] = {}
     if wording_fixes and review_verdict == "WORDING":
         submit_kwargs["wording_fixes"] = wording_fixes
-    head_sha = _resolve_pr_head_sha(repo, pr_number)
+    # Blocking gh subprocesses (up to _GH_API_TIMEOUT_SECONDS each): keep off the
+    # event loop, and inside the fail-soft boundary (Stage-5 never raises).
+    loop = asyncio.get_running_loop()
+    try:
+        head_sha = await loop.run_in_executor(None, _resolve_pr_head_sha, repo, pr_number)
+    except Exception:  # noqa: BLE001 -- fail-soft: an unresolvable SHA degrades to no commit_sha.
+        head_sha = None
     if head_sha:
         submit_kwargs["commit_sha"] = head_sha
 
     try:
-        post = submit_review(
-            repo=repo,
-            pr_number=pr_number,
-            role="SR",
-            verdict=gate_verdict,
-            assessment=assessment,
-            model_annotation=reviewer_model,
-            **submit_kwargs,
+        post = await loop.run_in_executor(
+            None,
+            partial(
+                submit_review,
+                repo=repo,
+                pr_number=pr_number,
+                role="SR",
+                verdict=gate_verdict,
+                assessment=assessment,
+                model_annotation=reviewer_model,
+                **submit_kwargs,
+            ),
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: posting must not undo the PR.
         return {**base, "posted": False, "error": f"posting SR verdict failed: {exc}"}
