@@ -47,6 +47,27 @@ _SCRIPT_PATH_ASSIGN = re.compile(
 _PYTHON_RUN = re.compile(r"""\bpython[0-9.]*\s+(?P<target>"[^"]*"|'[^']*'|\S+)""")
 _CHDIR = re.compile(r"(?:^|[;&|(]\s*)(?:cd|pushd)\b")
 _SCRIPT_PATH_VAR = {"$SCRIPT_PATH", "${SCRIPT_PATH}"}
+_BLOCK_SCALAR = re.compile(r"[|>][-+0-9]*")
+# Any mention of the trusted root, e.g. `.review-gate-tools`, `./.review-gate-tools/x`.
+_TRUSTED_MENTION = re.compile(r"(?<![\w-])\.review-gate-tools(?![\w-])")
+_INTO = r"""\s*["']?(?:[^\s"';&|]*/)?\.review-gate-tools(?![\w-])"""
+_ARGS = r"[^;&|]*?"
+# Shell forms that write into the trusted root (#215 rework 2, invariant b).
+_RUN_WRITES = {
+    "file command": re.compile(
+        rf"\b(?:cp|mv|rm|ln|tee|install|rsync|touch|mkdir|truncate)\b{_ARGS}{_INTO}"
+    ),
+    "redirection": re.compile(rf"[0-9&]?>[>|]?{_INTO}"),
+    "sed -i": re.compile(rf"\bsed\b{_ARGS}\s-i{_ARGS}{_INTO}"),
+    "git -C": re.compile(rf"\bgit\b{_ARGS}(?:\s-C|\s--git-dir[=\s]|\s--work-tree[=\s]){_INTO}"),
+    "cd": re.compile(rf"(?:^|[;&|(]\s*)(?:cd|pushd)\s{_INTO}"),
+    "curl -o": re.compile(rf"\bcurl\b{_ARGS}(?:\s-[a-zA-Z]*o|\s--output[=\s]){_INTO}"),
+    "wget -O": re.compile(
+        rf"\bwget\b{_ARGS}(?:\s-[a-zA-Z]*[OP]|\s--output-document[=\s]|\s--directory-prefix[=\s])"
+        rf"{_INTO}"
+    ),
+    "archive": re.compile(rf"\b(?:tar\b{_ARGS}\s-C|unzip\b{_ARGS}\s-d){_INTO}"),
+}
 
 
 def _workflow_text() -> str:
@@ -218,10 +239,118 @@ def _guard_sparse(text: str) -> None:
     assert blocks.get("sparse-checkout") == EXPECTED_SPARSE
 
 
+def _resolves_to_trusted_root(value: str) -> bool:
+    """``.review-gate-tools``, ``./.review-gate-tools`` and ``.review-gate-tools/`` are one path."""
+    path = _scalar(value)
+    while path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/") == TRUSTED_ROOT
+
+
 def _guard_tooling_path(text: str) -> None:
     """The trusted judge lands where the validator invocation looks for it."""
     scalars, _ = _with_block(_tooling_step_lines(text))
-    assert scalars.get("path") == TRUSTED_ROOT
+    assert _resolves_to_trusted_root(scalars.get("path", ""))
+
+
+def _steps(lines: list[str]) -> list[range]:
+    """Line spans of every list item under every ``steps:`` key, in file order."""
+    spans: list[range] = []
+    i = 0
+    while i < len(lines):
+        parsed = _split_key(lines[i])
+        i += 1
+        if parsed is None or parsed[1] != "steps" or _scalar(parsed[2]):
+            continue
+        key_indent, dash, start = parsed[0], None, None
+        while i < len(lines):
+            line = lines[i]
+            if line.strip() and not line.lstrip().startswith("#"):
+                if _indent(line) <= key_indent:
+                    break
+                dash = _indent(line) if dash is None else dash
+                if _indent(line) == dash and line.lstrip().startswith("-"):
+                    if start is not None:
+                        spans.append(range(start, i))
+                    start = i
+            i += 1
+        if start is not None:
+            spans.append(range(start, i))
+    return spans
+
+
+def _run_lines(lines: list[str]) -> dict[int, str]:
+    return {i: code for body in _block_bodies(lines, "run") for i, code in body}
+
+
+def _run_write(code: str) -> str | None:
+    """Name of the first write form in a shell line that targets the trusted root."""
+    if not _TRUSTED_MENTION.search(code):
+        return None
+    return next((name for name, form in _RUN_WRITES.items() if form.search(code)), None)
+
+
+def _guard_single_writer(text: str) -> None:
+    """(a) Exactly one step targets the trusted root: the pinned tooling checkout."""
+    lines = text.splitlines()
+    writers = []
+    for span in _steps(lines):
+        for i in span:
+            parsed = _split_key(lines[i])
+            if parsed is None or parsed[1] != "path":
+                continue
+            values = [parsed[2]]
+            if _BLOCK_SCALAR.fullmatch(_scalar(parsed[2])):
+                values = [
+                    lines[j]
+                    for j in range(i + 1, span.stop)
+                    if lines[j].strip() and _indent(lines[j]) > parsed[0]
+                ]
+            if any(_resolves_to_trusted_root(v) for v in values):
+                writers.append(span)
+                break
+    assert len(writers) == 1, f"{len(writers)} steps target {TRUSTED_ROOT}; only one may"
+    assert writers[0] == _tooling_step_span(text), f"the {TRUSTED_ROOT} writer is not {STEP_NAME!r}"
+    _guard_ref(text)
+
+
+def _guard_no_run_writes(text: str) -> None:
+    """(b) No run body writes into the trusted root; reads stay allowed."""
+    for i, code in _run_lines(text.splitlines()).items():
+        form = _run_write(code)
+        assert form is None, f"line {i + 1} writes into {TRUSTED_ROOT} ({form}): {code!r}"
+
+
+def _guard_order(text: str) -> None:
+    """(c) Between the pinned checkout and the validator run, the judge is only ever read."""
+    lines = text.splitlines()
+    steps = _steps(lines)
+    run_lines = _run_lines(lines)
+    tooling_span = _tooling_step_span(text)
+    assert tooling_span in steps, f"{STEP_NAME!r} is not a list item under steps:"
+    tooling = steps.index(tooling_span)
+
+    def invokes_validator(span: range) -> bool:
+        for i in span:
+            code = run_lines.get(i, "")
+            if re.match(r"(?:echo|printf)\b", code):
+                continue
+            for m in _PYTHON_RUN.finditer(code):
+                target = m["target"].strip("\"'")
+                if target in _SCRIPT_PATH_VAR or "validate_review" in target:
+                    return True
+        return False
+
+    validators = [k for k, span in enumerate(steps) if invokes_validator(span)]
+    assert len(validators) == 1, f"expected one step to run the validator, found {len(validators)}"
+    assert tooling < validators[0], f"{STEP_NAME!r} must run before the validator"
+    for span in steps[tooling + 1 : validators[0]]:
+        for i in span:
+            line = lines[i]
+            if line.lstrip().startswith("#") or not _TRUSTED_MENTION.search(line):
+                continue
+            assert i in run_lines, f"line {i + 1} names {TRUSTED_ROOT} outside a run body"
+            assert _run_write(run_lines[i]) is None, f"line {i + 1} writes into {TRUSTED_ROOT}"
 
 
 def _guard_validator_invocation(text: str) -> None:
@@ -276,6 +405,9 @@ GUARDS: dict[str, Callable[[str], None]] = {
     "sparse": _guard_sparse,
     "tooling_path": _guard_tooling_path,
     "validator_invocation": _guard_validator_invocation,
+    "single_writer": _guard_single_writer,
+    "no_run_writes": _guard_no_run_writes,
+    "order": _guard_order,
 }
 
 
