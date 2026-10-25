@@ -84,7 +84,7 @@ jobs:
       # Checked out into a subdirectory of the already-checked-out repo.
       # Must come AFTER the target repo checkout to survive git clean.
       #
-      # UNCONDITIONAL + PINNED TO A BRANCH (issue #116 P0-1).  Two separate
+      # UNCONDITIONAL + EXPLICITLY PINNED (issue #116 P0-1).  Two separate
       # things are required here, and the first is useless without the second.
       #
       # 1. Unconditional: this step used to be skipped in local mode, so this
@@ -105,17 +105,31 @@ jobs:
       #    it already took the default branch), which is exactly why the
       #    defect survived in the one case the gate needed it not to.
       #
-      # "main" is hardcoded rather than read from
+      # "main" was hardcoded rather than read from
       # github.event.repository.default_branch: in remote mode that context
       # describes the CONSUMING repository, not this one, so it would resolve
-      # a branch name from the wrong repo.  Pinning to a released TAG instead
-      # of a branch is a separate hardening decision, deliberately not taken
-      # here.
+      # a branch name from the wrong repo.
+      #
+      # PINNED TO A COMMIT (#170): `ref` is the full SHA of the commit tagged
+      # review-gate-v1, per HO-REVIEW-GATE-PIN-RELEASE-20261025.  A branch or
+      # tag name is mutable, so a merge here would silently change the judge
+      # of every consuming repo.  tests/test_review_gate_workflow_pin.py
+      # enforces the full-SHA shape.
+      #
+      # RELEASE PROCEDURE (to change the judge):
+      #   1. Tag the new gate commit on main as review-gate-vN.
+      #   2. Open a PR here moving this `ref` to that commit's full SHA.
+      #   3. After it merges, the operator re-points org ruleset 12626210
+      #      (workflows[0].sha) at the merge commit.
+      #
+      # COUPLING RULE: a review_formats.py verdict-format change ships with a
+      # re-pin.  The gate parses verdicts with the review_formats.py at this
+      # SHA, so a format change without a re-pin is not live in the gate.
       - name: Checkout review-gate tooling
         uses: actions/checkout@v4
         with:
           repository: elevanaltd/hestai-context-mcp
-          ref: main
+          ref: 7153bfd1e788f342617d258e978edbf577550e8f
           path: .review-gate-tools
           sparse-checkout: |
             scripts/validate_review.py
