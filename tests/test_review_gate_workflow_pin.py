@@ -32,8 +32,21 @@ EXPECTED_SPARSE = [
     "scripts/validate_review.py",
     "src/hestai_context_mcp/tools/shared/review_formats.py",
 ]
+TRUSTED_ROOT = ".review-gate-tools"
+TRUSTED_VALIDATOR = f"{TRUSTED_ROOT}/scripts/validate_review.py"
 
-_STEP_NAME_LINE = re.compile(r"^(?P<indent>\s*)- name:\s*(?P<name>.+?)\s*$")
+_STEP_NAME_LINE = re.compile(
+    r"""^(?P<indent>\s*)-\s+(?P<q>['"]?)name(?P=q)\s*:\s*(?P<name>.+?)\s*$"""
+)
+# A path-like token naming the validator, in any spelling (file, module, absolute).
+_VALIDATOR_REF = re.compile(r"""[^\s"'=()$;|&<>`]*validate_review[^\s"'();|&<>`]*""")
+_SCRIPT_PATH_ASSIGN = re.compile(
+    r"""(?:^|[\s;&|(])(?:(?:export|local|readonly|declare(?:\s+-\w+)*)\s+)?"""
+    r"""SCRIPT_PATH\+?=(?P<value>"[^"]*"|'[^']*'|\S*)"""
+)
+_PYTHON_RUN = re.compile(r"""\bpython[0-9.]*\s+(?P<target>"[^"]*"|'[^']*'|\S+)""")
+_CHDIR = re.compile(r"(?:^|[;&|(]\s*)(?:cd|pushd)\b")
+_SCRIPT_PATH_VAR = {"$SCRIPT_PATH", "${SCRIPT_PATH}"}
 
 
 def _workflow_text() -> str:
@@ -52,8 +65,53 @@ def _scalar(raw: str) -> str:
     return value
 
 
-def _tooling_step_lines(text: str) -> list[str]:
-    """Return the lines of the one step named STEP_NAME, ``- name:`` line included."""
+def _key(raw: str) -> str:
+    """Normalise a mapping key: YAML reads ``if``, ``'if'``, ``"if"`` and ``if :`` alike."""
+    return _scalar(raw)
+
+
+def _split_key(line: str) -> tuple[int, str, str] | None:
+    """``(key indent, normalised key, raw value)`` of a mapping line; ``- `` items allowed."""
+    if not line.strip() or line.lstrip().startswith("#"):
+        return None
+    indent = _indent(line)
+    rest = line[indent:]
+    if rest.startswith("- "):
+        after = rest[2:]
+        indent += 2 + _indent(after)
+        rest = after.lstrip(" ")
+    key, sep, value = rest.partition(":")
+    if not sep:
+        return None
+    return indent, _key(key), value
+
+
+def _block_bodies(lines: list[str], key: str) -> list[list[tuple[int, str]]]:
+    """Code lines ``(index, text)`` under every ``key:`` (block scalar or one-line value)."""
+    bodies: list[list[tuple[int, str]]] = []
+    i = 0
+    while i < len(lines):
+        parsed = _split_key(lines[i])
+        i += 1
+        if parsed is None or parsed[1] != key:
+            continue
+        key_indent, _, raw = parsed
+        value = _scalar(raw)
+        if not re.fullmatch(r"[|>][-+0-9]*", value):
+            bodies.append([(i - 1, value)] if value else [])
+            continue
+        body: list[tuple[int, str]] = []
+        while i < len(lines) and (not lines[i].strip() or _indent(lines[i]) > key_indent):
+            code = lines[i].strip()
+            if code and not code.startswith("#"):
+                body.append((i, code))
+            i += 1
+        bodies.append(body)
+    return bodies
+
+
+def _tooling_step_span(text: str) -> range:
+    """Line indices of the one step named STEP_NAME, ``- name:`` line included."""
     lines = text.splitlines()
     starts = [
         (i, len(m.group("indent")))
@@ -68,7 +126,12 @@ def _tooling_step_lines(text: str) -> list[str]:
         if line.strip() and not line.lstrip().startswith("#") and _indent(line) <= dash_indent:
             end = j
             break
-    return lines[start:end]
+    return range(start, end)
+
+
+def _tooling_step_lines(text: str) -> list[str]:
+    span = _tooling_step_span(text)
+    return text.splitlines()[span.start : span.stop]
 
 
 def _step_keys(step: list[str]) -> dict[str, str]:
@@ -79,7 +142,7 @@ def _step_keys(step: list[str]) -> dict[str, str]:
         if not line.strip() or line.lstrip().startswith("#") or _indent(line) != key_indent:
             continue
         key, _, value = line.strip().partition(":")
-        keys[key] = value
+        keys[_key(key)] = value
     return keys
 
 
@@ -90,7 +153,10 @@ def _with_block(step: list[str]) -> tuple[dict[str, str], dict[str, list[str]]]:
         (
             i
             for i, line in enumerate(step)
-            if _indent(line) == key_indent and line.strip() == "with:"
+            if _indent(line) == key_indent
+            and (parsed := _split_key(line)) is not None
+            and parsed[1] == "with"
+            and not _scalar(parsed[2])
         ),
         None,
     )
@@ -111,6 +177,7 @@ def _with_block(step: list[str]) -> tuple[dict[str, str], dict[str, list[str]]]:
         if _indent(line) != arg_indent:
             continue
         key, _, value = line.strip().partition(":")
+        key = _key(key)
         if _scalar(value) == "|":
             items: list[str] = []
             while i < len(body) and (not body[i].strip() or _indent(body[i]) > arg_indent):
@@ -151,11 +218,64 @@ def _guard_sparse(text: str) -> None:
     assert blocks.get("sparse-checkout") == EXPECTED_SPARSE
 
 
+def _guard_tooling_path(text: str) -> None:
+    """The trusted judge lands where the validator invocation looks for it."""
+    scalars, _ = _with_block(_tooling_step_lines(text))
+    assert scalars.get("path") == TRUSTED_ROOT
+
+
+def _guard_validator_invocation(text: str) -> None:
+    """The validator runs from the trusted checkout only (#170 item 2).
+
+    validate_review.py loads review_formats.py from its own directory, so pinning
+    where the script runs from pins both halves of the judge.
+    """
+    lines = text.splitlines()
+    exempt = set(_tooling_step_span(text))  # the sparse list names the PR-relative path
+    exempt |= {i for body in _block_bodies(lines, "script") for i, _ in body}  # JS, not shell
+    for i, line in enumerate(lines):
+        if i in exempt or line.lstrip().startswith("#"):
+            continue
+        for ref in _VALIDATOR_REF.findall(line):
+            assert ref == TRUSTED_VALIDATOR, f"line {i + 1} names the validator as {ref!r}"
+        # A relative SCRIPT_PATH resolves against the cwd, and an env-supplied one is not ours.
+        if (parsed := _split_key(line)) is not None:
+            assert parsed[1] not in {
+                "working-directory",
+                "SCRIPT_PATH",
+            }, f"line {i + 1} sets {parsed[1]!r}"
+    runs = 0
+    for body in _block_bodies(lines, "run"):
+        assigned = False
+        body_runs = 0
+        for i, code in body:
+            for m in _SCRIPT_PATH_ASSIGN.finditer(code):
+                value = _scalar(m["value"])
+                assert value == TRUSTED_VALIDATOR, f"line {i + 1} sets SCRIPT_PATH to {value!r}"
+                assigned = True
+            if re.match(r"(?:echo|printf)\b", code):
+                continue
+            for m in _PYTHON_RUN.finditer(code):
+                target = m["target"].strip("\"'")
+                if target in _SCRIPT_PATH_VAR:
+                    assert assigned, f"line {i + 1} runs $SCRIPT_PATH before assigning it"
+                else:
+                    assert target == TRUSTED_VALIDATOR, f"line {i + 1} runs python on {target!r}"
+                body_runs += 1
+        assert not (
+            body_runs and any(_CHDIR.search(code) for _, code in body)
+        ), "a run block that invokes the validator changes directory"
+        runs += body_runs
+    assert runs >= 1, "no run block invokes the validator"
+
+
 GUARDS: dict[str, Callable[[str], None]] = {
     "repository": _guard_repository,
     "ref": _guard_ref,
     "unconditional": _guard_unconditional,
     "sparse": _guard_sparse,
+    "tooling_path": _guard_tooling_path,
+    "validator_invocation": _guard_validator_invocation,
 }
 
 
