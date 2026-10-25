@@ -85,3 +85,26 @@ def test_submit_review_exception_is_contained(
     out = asyncio.run(sg._run_semantic_review("OCTAVE", _PR_URL))
     assert out["posted"] is False
     assert "gh timed out" in out["error"]
+
+
+def test_head_sha_run_in_executor_scheduling_failure_degrades_and_posts(
+    stubs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_in_executor ITSELF raising for the SHA call (not the worker) still posts."""
+    real_loop_getter = asyncio.get_running_loop
+
+    class _Loop:
+        def __init__(self, inner: asyncio.AbstractEventLoop) -> None:
+            self._inner = inner
+
+        def run_in_executor(self, executor: Any, func: Any, *args: Any) -> Any:
+            if getattr(func, "__name__", "") == "_resolve_pr_head_sha" or func is (
+                sg._resolve_pr_head_sha
+            ):
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            return self._inner.run_in_executor(executor, func, *args)
+
+    monkeypatch.setattr(sg.asyncio, "get_running_loop", lambda: _Loop(real_loop_getter()))
+    out = asyncio.run(sg._run_semantic_review("OCTAVE", _PR_URL))
+    assert out["posted"] is True
+    assert "commit_sha" not in stubs["submit"]

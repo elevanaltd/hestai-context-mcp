@@ -81,3 +81,21 @@ def test_prompt_defines_wording_outcome_and_keeps_substantive_scope():
     assert "use wording only when every finding is purely wording" in flat
     assert "leave concerns empty" in flat
     assert "never schema" in p.lower() or "NEVER comment on schema" in p
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("block", ["[;]", "[ ; ]", "[;;\n;]"])
+def test_wording_with_separator_only_concerns_degrades_to_concerns(block):
+    """#210 round 2: separator-only CONCERNS content is malformed, not empty."""
+    r = _parse(f"VERDICT::WORDING\nASSESSMENT::x\nWORDING_FIXES::[fix a]\nCONCERNS::{block}")
+    assert r["verdict"] == "CONCERNS"
+    assert r["concerns"]
+    assert "wording_fixes" not in r
+
+
+def test_wording_with_whitespace_only_concerns_is_accepted():
+    r = _parse("VERDICT::WORDING\nASSESSMENT::x\nWORDING_FIXES::[fix a]\nCONCERNS::[ ]")
+    assert r["verdict"] == "WORDING"
+    assert r["wording_fixes"] == ["fix a"]
