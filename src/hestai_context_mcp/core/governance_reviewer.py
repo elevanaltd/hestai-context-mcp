@@ -341,18 +341,20 @@ def _parse_review(
     if verdict == "WORDING":
         fixes_match = _WORDING_FIXES_RE.search(raw)
         fixes = _parse_concerns(fixes_match.group(1)) if fixes_match else []
-        if not fixes or concerns or concerns_match is None:
+        # Accept WORDING only when the CONCERNS block is WHITESPACE-ONLY: content
+        # of just separators (``[;]``) is malformed output, not an empty list.
+        concerns_malformed = concerns_match is not None and bool(concerns_match.group(1).strip())
+        if not fixes or concerns or concerns_match is None or concerns_malformed:
             # WORDING must be purely wording: no listed fixes, any substantive
             # concern alongside, or a missing explicit ``CONCERNS::[]`` line
             # (truncated/malformed output) degrades to CONCERNS (never APPROVED).
             if not concerns:
-                concerns = [
-                    (
-                        "Reviewer returned WORDING without a usable WORDING_FIXES list."
-                        if not fixes
-                        else "Reviewer returned WORDING without an explicit CONCERNS::[] line."
-                    )
-                ]
+                if not fixes:
+                    concerns = ["Reviewer returned WORDING without a usable WORDING_FIXES list."]
+                elif concerns_malformed:
+                    concerns = ["Reviewer returned WORDING with a malformed CONCERNS block."]
+                else:
+                    concerns = ["Reviewer returned WORDING without an explicit CONCERNS::[] line."]
             return {
                 "verdict": "CONCERNS",
                 "assessment": assessment,
