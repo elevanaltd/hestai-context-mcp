@@ -227,3 +227,37 @@ def test_readmes_and_other_typed_markdown_stay_out_of_list_and_skipped(tmp_path:
     (root / "bare-other.md").write_text("---\ntype: BUILD_PLAN\n---\nbody\n", encoding="utf-8")
     result = list_decisions(str(tmp_path))
     assert result["records"] == [] and result["skipped"] == []
+
+
+# --- pre-review: a mid-chain record that becomes unreadable is an envelope, not a crash ---
+
+
+def test_unreadable_mid_chain_record_returns_an_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_record(tmp_path, token=A, status="SUPERSEDED", superseded_by=B)
+    b_path = write_record(tmp_path, token=B)
+    real_discover, real_read = agr_read.discover_record, Path.read_text
+
+    def discover(working_dir: Path, token: str) -> Path | None:
+        return b_path if token == B else real_discover(working_dir, token)
+
+    def flaky_read(self: Path, *args: object, **kwargs: object) -> str:
+        if self == b_path:
+            raise PermissionError("unreadable")
+        return real_read(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agr_read, "discover_record", discover)
+    monkeypatch.setattr(Path, "read_text", flaky_read)
+
+    traced = trace_supersedure(str(tmp_path), A)
+    assert traced["ok"] is False
+    assert traced["error"]["code"] == "RECORD_PARSE_FAILED"
+    assert traced["error"]["context"]["token"] == B
+    assert traced["error"]["context"]["path"] == b_path.relative_to(tmp_path).as_posix()
+    assert [e["token"] for e in traced["error"]["context"]["chain"]] == [A]
+
+    looked_up = lookup_decision(str(tmp_path), A)
+    assert looked_up["ok"] is True
+    assert looked_up["resolution_chain_status"] == "unparseable"
+    assert looked_up["rejected_at"]["token"] == B
