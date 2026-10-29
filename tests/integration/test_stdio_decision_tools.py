@@ -219,3 +219,50 @@ async def test_c5_fork_shape_is_pinned_at_the_stdio_boundary(client: Client, rep
     assert error["context"]["successors"] == [y, x]
     assert [e["token"] for e in error["context"]["chain"]] == [frozen]
     assert error["context"]["chain"][0]["fork"] is True
+
+
+async def test_c6_unparseable_shape_is_pinned_at_the_stdio_boundary(
+    client: Client, repo: Path
+) -> None:
+    """Slice C6: a rejected YAML record mid-chain stops both walks with a structured shape.
+
+    Chain: frozen OCTAVE ``old`` --(derived: RATIFIED YAML ``mid`` lists it in ``supersedes:``)-->
+    ``mid`` --(explicit ``superseded_by``)--> ``bad`` (YAML with an unquoted ``status``).
+    """
+    old, mid, bad = "HO-STDIO-C6OLD-20260101", "HO-STDIO-C6MID-20261009", "HO-STDIO-C6BAD-20261010"
+    old_path = write_record(repo, token=old)
+    write_yaml_record(repo, token=mid, status="RATIFIED", supersedes=old, superseded_by=bad)
+    bad_path = write_yaml_record(repo, token=bad)
+    bad_path.write_text(
+        bad_path.read_text(encoding="utf-8").replace('status: "RATIFIED"', "status: RATIFIED"),
+        encoding="utf-8",
+    )
+    before = old_path.read_bytes()
+    bad_rel = bad_path.relative_to(repo).as_posix()
+    bad_line = bad_path.read_text(encoding="utf-8").split("\n").index("status: RATIFIED") + 1
+
+    looked_up = await _call(client, "lookup_decision", working_dir=str(repo), token=old)
+    assert looked_up["ok"] is True
+    assert looked_up["record"]["status"] == "SUPERSEDED"
+    assert looked_up["resolution_chain_status"] == "unparseable"
+    assert looked_up["rejected_at"] == {
+        "token": bad,
+        "path": bad_rel,
+        "line": bad_line,
+        "construct": "unquoted_value",
+    }
+    assert [e["token"] for e in looked_up["resolution_chain"]] == [old, mid]
+
+    traced = await _call(client, "trace_supersedure", working_dir=str(repo), token=old)
+    assert traced["ok"] is False
+    error = traced["error"]
+    assert error["code"] == "RECORD_PARSE_FAILED"
+    assert error["tool"] == "trace_supersedure"
+    context = error["context"]
+    assert context["token"] == bad
+    assert context["path"] == bad_rel
+    assert context["line"] == bad_line
+    assert context["construct"] == "unquoted_value"
+    assert isinstance(context["parse_error"], str) and "unquoted_value" in context["parse_error"]
+    assert [e["token"] for e in context["chain"]] == [old, mid]
+    assert old_path.read_bytes() == before
