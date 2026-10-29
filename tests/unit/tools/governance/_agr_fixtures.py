@@ -11,6 +11,7 @@ test are the ones that must stay pure (PROD I5); these helpers set up state.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 # Non-secret governance identifiers used across the read-side suite.
 TOKEN_RATIFIED = "HO-CONTEXT-MCP-DOGFOOD-RATIFIED-20260601"
@@ -211,3 +212,64 @@ def snapshot_tree(working_dir: Path) -> dict[str, tuple[float, int]]:
             st = p.stat()
             snap[str(p.relative_to(working_dir))] = (st.st_mtime_ns, st.st_size)
     return snap
+
+
+def yaml_quote(value: str) -> str:
+    """Quote ``value`` for the one-line double-quoted YAML subset (``\\"`` and ``\\\\`` only)."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def yaml_record_text(
+    *,
+    token: str,
+    status: str = "RATIFIED",
+    tier: str = "STRATEGIC",
+    authored_at: str = "2026-06-01T00:00:00Z",
+    decision: str = "A binding decision sentence.",
+    because: str = "A one-sentence rationale.",
+    scope: str | None = None,
+    topic: str | None = None,
+    superseded_by: str | None = None,
+    extra_lines: list[str] | None = None,
+    body: str = "# Notes\n\nFree-form markdown body.\n",
+) -> str:
+    """Return the text of a quoted-YAML front-matter DECISION_RECORD (PR-4 slice A)."""
+    lines = [
+        "---",
+        f"type: {yaml_quote('DECISION_RECORD')}",
+        f"version: {yaml_quote('1.0')}",
+        f"token: {yaml_quote(token)}",
+        f"status: {yaml_quote(status)}",
+        f"tier: {yaml_quote(tier)}",
+        f"authored_at: {yaml_quote(authored_at)}",
+        f"decision: {yaml_quote(decision)}",
+        f"because: {yaml_quote(because)}",
+    ]
+    if scope is not None:
+        lines.append(f"scope: {yaml_quote(scope)}")
+    if topic is not None:
+        lines.append(f"topic: {yaml_quote(topic)}")
+    if superseded_by is not None:
+        lines.append(f"superseded_by: {yaml_quote(superseded_by)}")
+    if extra_lines:
+        lines.extend(extra_lines)
+    lines.append("---")
+    return "\n".join(lines) + "\n" + body
+
+
+def write_yaml_record(
+    working_dir: Path,
+    *,
+    token: str,
+    group: str | None = None,
+    filename: str | None = None,
+    **kwargs: Any,
+) -> Path:
+    """Write a YAML front-matter DECISION_RECORD as ``<token>.md`` and return its path."""
+    root = decisions_dir(working_dir)
+    if group:
+        root = root / group
+        root.mkdir(parents=True, exist_ok=True)
+    path = root / (filename or f"{token}.md")
+    path.write_text(yaml_record_text(token=token, **kwargs), encoding="utf-8")
+    return path
