@@ -1,0 +1,34 @@
+===DECISION_RECORD===
+META:
+  TYPE::DECISION_RECORD
+  VERSION::"1.1"
+  TOKEN::HO-TOPIC-RECORDS-YAML-SYNTAX-20261029
+  STATUS::RATIFIED
+  TIER::STRATEGIC
+  COMPRESSION_TIER::CONSERVATIVE
+  LOSS_PROFILE::"[preserve:decision∧operator_quote∧build_order∧scope_exclusions∧re_review_trigger∧IDs,drop:discussion_prose]"
+  AUTHORED_AT::"2026-10-29T00:00:00Z"
+  RATIFIED_BY::"human:operator<shaunbuswell>"
+  RATIFIED_AT::"2026-10-29T00:00:00Z"
+  ISSUE_REF::"repo:hestai-context-mcp#203"
+  CEREMONY_REF::"625fb59c-a1a2-466b-bb95-608cb4285017"
+  AUTHORING_SESSION::"holistic-orchestrator:hc-control-room-20260929"
+  EXTENDS::[HO-TOPIC-RECORDS-AND-APPEND-RULING-20261015]
+  OPERATOR_RULING::"Shaun Buswell, 2026-10-29, HC control room session, first-party, answering 'OCTAVE or YAML for topic records' (HC recommendation: YAML): '2. YAML'"
+  SCOPE::"Topic-record syntax and build order only; existing OCTAVE records stay valid and unmigrated (EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025 NON_EFFECTS); no existing record content changes"
+  DECISION::"Topic records→quoted-YAML records via submit_governance content-mode YAML path[EPIC4 PR-5] ∧ order PR-4→PR-5→topic S2 ∧ PR-4 keeps S1 TOPIC∧current_state for OCTAVE ∧ defines YAML TOPIC/CURRENT/RULINGS form ∧ S2 append_ruling builds on PR-5"
+  BECAUSE::"No topic records exist yet; EPIC4 makes quoted-YAML the new write format; one write path avoids building append twice; ruling lists fit YAML∧drop S2 OCTAVE escaping; HC, topic lane∧HW-PROGRAMME concur on order"
+  RE_REVIEW_TRIGGER::"Re-open if EPIC4 PR-5 is parked or reverted ∨ a YAML header cannot carry CURRENT/RULINGS under regex-only readers"
+  RELATED_DECISIONS::[
+    EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025,
+    HO-GOVERNANCE-AMEND-IN-PLACE-20260926
+  ]
+  AFFECTS::[
+    "submit_governance append_ruling",
+    "lookup_decision current_state",
+    "list_decisions topic filter",
+    "ADR-RFC-ARCH-004 topic-record section",
+    "hestai-context-mcp#203",
+    "EPIC4 PR-4 ∧ PR-5"
+  ]
+===END===
