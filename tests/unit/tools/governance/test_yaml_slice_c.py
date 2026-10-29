@@ -191,7 +191,7 @@ def test_type_decision_record_in_any_quoting_is_a_candidate(spelling: str) -> No
     [
         '---\ntype: "OTHER"\ntoken: "' + A + '"\n---\n',
         "---\ntype: OTHER\n---\n",
-        "---\ntype: DECISION_RECORD extra\n---\n",
+        # (`type: DECISION_RECORD extra` moved to the F4 candidate tests below)
         "---\ntype: DECISION_RECORD_X\n---\n",
         "---\ntitle: DECISION_RECORD\n---\n",
         "---\n  type: DECISION_RECORD\n---\n",
