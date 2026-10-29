@@ -459,7 +459,18 @@ def walk_supersession_chain(
                 "chain": chain,
             }
 
-        content = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # Unreadable mid-walk (permissions, deleted after discovery): stop with the
+            # same structured outcome as a rejected record rather than raising.
+            return {
+                "outcome": "unparseable",
+                "token": current,
+                "path": rel_path(working_dir, path),
+                "detail": {},
+                "chain": chain,
+            }
         loaded = parse_decision_record(content)
         if is_yaml_front_matter(content) and not record_is_parseable(loaded):
             return {
