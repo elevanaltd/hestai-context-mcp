@@ -67,3 +67,6 @@ debates/*.lock
 # including this repo's own. Never tracked: the whole point is that it is not
 # the tree under review.
 /.review-gate-tools/
+
+# HestAI system governance (auto-added, not committed)
+.hestai-sys/

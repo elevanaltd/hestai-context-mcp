@@ -86,7 +86,7 @@ def test_markdown_body_after_closing_fence_is_ignored() -> None:
     [
         "extra: bare",  # unquoted value
         "extra: 'single'",  # single-quoted
-        'extra: "tab\\tescape"',  # other escape
+        # (the slice-A `\t` case was removed: B2 ruling 2026-10-29 makes `\t` a valid escape)
         'extra: "unicode \\u00e9"',  # other escape
         'extra: "unterminated',  # unterminated
         'extra: "a" trailing',  # trailing garbage

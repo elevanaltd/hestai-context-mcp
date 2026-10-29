@@ -230,8 +230,11 @@ def yaml_record_text(
     scope: str | None = None,
     topic: str | None = None,
     superseded_by: str | None = None,
+    supersedes: str | None = None,
     extra_lines: list[str] | None = None,
     body: str = "# Notes\n\nFree-form markdown body.\n",
+    decision_literal: str | None = None,
+    eol: str = "\n",
 ) -> str:
     """Return the text of a quoted-YAML front-matter DECISION_RECORD (PR-4 slice A)."""
     lines = [
@@ -242,7 +245,7 @@ def yaml_record_text(
         f"status: {yaml_quote(status)}",
         f"tier: {yaml_quote(tier)}",
         f"authored_at: {yaml_quote(authored_at)}",
-        f"decision: {yaml_quote(decision)}",
+        f"decision: {decision_literal if decision_literal is not None else yaml_quote(decision)}",
         f"because: {yaml_quote(because)}",
     ]
     if scope is not None:
@@ -251,10 +254,12 @@ def yaml_record_text(
         lines.append(f"topic: {yaml_quote(topic)}")
     if superseded_by is not None:
         lines.append(f"superseded_by: {yaml_quote(superseded_by)}")
+    if supersedes is not None:
+        lines.append(f"supersedes: {yaml_quote(supersedes)}")
     if extra_lines:
         lines.extend(extra_lines)
     lines.append("---")
-    return "\n".join(lines) + "\n" + body
+    return eol.join(lines) + eol + body
 
 
 def write_yaml_record(
