@@ -188,3 +188,34 @@ async def test_rejected_yaml_record_names_path_line_and_construct_over_stdio(
     listed = await _call(client, "list_decisions", working_dir=str(repo))
     entry = next(s for s in listed["skipped"] if s["path"].endswith(f"{bad}.md"))
     assert (entry["line"], entry["construct"]) == (context["line"], "block_scalar")
+
+
+async def test_c5_fork_shape_is_pinned_at_the_stdio_boundary(client: Client, repo: Path) -> None:
+    """Slice C5: OCTAVE X-successor plus a RATIFIED YAML Y listing the record in ``supersedes:``.
+
+    ``successors`` is documented as the sorted (lexicographic) list of both TOKENs.
+    """
+    x, y, frozen = "HO-STDIO-FORKZ-20260901", "HO-STDIO-FORKA-20261008", "HO-STDIO-FORKED-20260101"
+    write_record(repo, token=frozen, status="SUPERSEDED", superseded_by=x)
+    write_record(repo, token=x)
+    write_yaml_record(repo, token=y, status="RATIFIED", supersedes=frozen)
+
+    looked_up = await _call(client, "lookup_decision", working_dir=str(repo), token=frozen)
+    assert looked_up["ok"] is True
+    assert looked_up["resolution_chain_status"] == "forked"
+    assert looked_up["successors"] == [y, x] == sorted([x, y])  # derived Y sorts BEFORE explicit X
+    assert looked_up["record"]["status"] == "SUPERSEDED"
+    (entry,) = looked_up["resolution_chain"]
+    assert entry["token"] == frozen
+    assert entry["superseded_by"] is None and entry["fork"] is True
+    assert entry["successors"] == [y, x]
+
+    traced = await _call(client, "trace_supersedure", working_dir=str(repo), token=frozen)
+    assert traced["ok"] is False
+    error = traced["error"]
+    assert error["code"] == "CHAIN_FORK_DETECTED"
+    assert error["tool"] == "trace_supersedure"
+    assert error["context"]["fork_at_token"] == frozen
+    assert error["context"]["successors"] == [y, x]
+    assert [e["token"] for e in error["context"]["chain"]] == [frozen]
+    assert error["context"]["chain"][0]["fork"] is True

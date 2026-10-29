@@ -229,23 +229,22 @@ def test_same_successor_from_both_sources_is_not_a_fork(tmp_path: Path) -> None:
     assert [e["token"] for e in traced["chain"]] == [OLD, NEW]
 
 
-def test_derived_status_is_unconditional_across_proposed_and_void_targets(tmp_path: Path) -> None:
+def test_derived_status_applies_to_proposed_and_ratified_targets(tmp_path: Path) -> None:
+    # (slice C1 ruling: a VOID target now stays VOID; see test_yaml_slice_c.py)
     write_record(tmp_path, token=OLD, status="PROPOSED")
-    write_yaml_record(tmp_path, token=OLD2, status="VOID")
+    write_yaml_record(tmp_path, token=OLD2)
     write_yaml_record(tmp_path, token=NEW, supersedes=f"{OLD},{OLD2}")
     rows = {r["token"]: r["status"] for r in list_decisions(str(tmp_path))["records"]}
     assert rows == {OLD: "SUPERSEDED", OLD2: "SUPERSEDED", NEW: "RATIFIED"}
     assert list_decisions(str(tmp_path), status="PROPOSED")["records"] == []
 
 
-def test_void_deriving_record_still_derives_and_reports_its_own_terminal_status(
-    tmp_path: Path,
-) -> None:
+def test_void_deriving_record_derives_no_edge(tmp_path: Path) -> None:
+    # (slice C1 ruling replaces the slice-B "VOID source still derives" expectation)
     write_record(tmp_path, token=OLD)
     write_yaml_record(tmp_path, token=NEW, status="VOID", supersedes=OLD)
-    result = trace_supersedure(str(tmp_path), OLD)
-    assert [e["token"] for e in result["chain"]] == [OLD, NEW]
-    assert result["terminal_status"] == "VOID"
+    assert agr_read.derive_supersession(tmp_path) == {}
+    assert [e["token"] for e in trace_supersedure(str(tmp_path), OLD)["chain"]] == [OLD]
 
 
 # --- FORK ----------------------------------------------------------------------
