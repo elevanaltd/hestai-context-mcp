@@ -76,6 +76,9 @@ def list_decisions(
         return _filter_invalid("tier", tier)
 
     records: list[dict[str, Any]] = []
+    # Read-time supersession overlay: a record a YAML ``supersedes:`` names lists
+    # (and filters) as SUPERSEDED.
+    derived = agr_read.derive_supersession(working_path)
     skipped: list[dict[str, Any]] = []
     for path in agr_read.iter_record_paths(working_path):
         is_agr, parsed = agr_read.classify_file(path)
@@ -103,6 +106,8 @@ def list_decisions(
                 }
             )
             continue
+
+        parsed = agr_read.apply_derived_supersession(parsed, derived)
 
         if status is not None and parsed["status"] != status:
             continue

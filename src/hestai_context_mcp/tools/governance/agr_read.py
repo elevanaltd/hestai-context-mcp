@@ -28,6 +28,7 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     has_yaml_decision_header,
     is_yaml_front_matter,
     parse_decision_record,
+    parse_supersedes_list,
 )
 
 # §1.3 TOKEN format + the §1.2 required-field contract + the v1.1 §4.1 #13
@@ -312,20 +313,101 @@ def classify_file(path: Path) -> tuple[bool, DecisionRecord]:
     return is_decision_record(content), parse_decision_record(content)
 
 
-def chain_entry(working_dir: Path, parsed: DecisionRecord, path: Path) -> dict[str, Any]:
-    """Build one §3.4 chain entry from a parsed record + its path."""
-    return {
+def derive_supersession(working_dir: Path) -> dict[str, list[str]]:
+    """Map each superseded TOKEN to the sorted tokens of the YAML records that supersede it.
+
+    Edges come ONLY from a parseable YAML record's ``supersedes:`` list; OCTAVE
+    records (including legacy prose ``SUPERSEDES``) and rejected YAML records
+    derive nothing. A pure corpus scan (PROD I5): no file is written, and the
+    superseded record's own file is never consulted or touched.
+    """
+    root = decisions_root(working_dir)
+    if not root.exists():
+        return {}
+    edges: dict[str, set[str]] = {}
+    for path in sorted(root.rglob("*.md")):
+        if path.name.endswith(".oct.md") or not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not is_yaml_front_matter(content):
+            continue
+        parsed = parse_decision_record(content)
+        raw = parsed["fields"].get("SUPERSEDES")
+        deriver = parsed["token"]
+        if raw is None or deriver is None or not record_is_parseable(parsed):
+            continue
+        for target in parse_supersedes_list(raw):
+            edges.setdefault(target, set()).add(deriver)
+    return {target: sorted(derivers) for target, derivers in sorted(edges.items())}
+
+
+def successors_of(parsed: DecisionRecord, derived: dict[str, list[str]]) -> list[str]:
+    """Sorted distinct successors of a record: its SUPERSEDED_BY plus derived edges.
+
+    More than one means a FORK (never silently resolved to one of them).
+    """
+    found = set(derived.get(parsed.get("token") or "", []))
+    explicit = parsed.get("fields", {}).get("SUPERSEDED_BY")
+    if explicit:
+        found.add(explicit)
+    return sorted(found)
+
+
+def apply_derived_supersession(
+    parsed: DecisionRecord, derived: dict[str, list[str]]
+) -> DecisionRecord:
+    """Overlay derived supersession on a parsed record (returns a copy; file untouched).
+
+    OR rule: a record with a derived edge reads ``SUPERSEDED`` (whatever its file
+    says). When it has exactly one successor overall and no explicit
+    ``SUPERSEDED_BY``, that successor is surfaced as ``fields["SUPERSEDED_BY"]``.
+    On a fork ``fields`` is left exactly as the file has it.
+    """
+    token = parsed.get("token")
+    derived_successors = derived.get(token or "")
+    if not derived_successors:
+        return parsed
+    out: DecisionRecord = {**parsed, "fields": dict(parsed["fields"])}
+    out["status"] = "SUPERSEDED"
+    if "SUPERSEDED_BY" not in out["fields"] and len(derived_successors) == 1:
+        out["fields"]["SUPERSEDED_BY"] = derived_successors[0]
+    return out
+
+
+def chain_entry(
+    working_dir: Path,
+    parsed: DecisionRecord,
+    path: Path,
+    successors: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build one §3.4 chain entry from a parsed record + its path.
+
+    On a fork (``successors`` has more than one TOKEN) ``superseded_by`` is
+    ``None`` and the entry additionally carries ``fork: True`` and ``successors``.
+    """
+    entry: dict[str, Any] = {
         "token": parsed.get("token"),
         "status": parsed.get("status"),
         "authored_at": parsed.get("authored_at"),
         "superseded_by": parsed.get("fields", {}).get("SUPERSEDED_BY"),
         "path": rel_path(working_dir, path),
     }
+    if successors is not None and len(successors) > 1:
+        entry["superseded_by"] = None
+        entry["fork"] = True
+        entry["successors"] = successors
+    return entry
 
 
-def walk_supersession_chain(working_dir: Path, start_token: str) -> dict[str, Any]:
-    """Follow SUPERSEDED_BY pointers from ``start_token`` to the terminal.
+def walk_supersession_chain(
+    working_dir: Path, start_token: str, derived: dict[str, list[str]] | None = None
+) -> dict[str, Any]:
+    """Follow supersession edges from ``start_token`` to the terminal.
 
+    Edges are a record's ``SUPERSEDED_BY`` OR a derived YAML ``supersedes:`` edge.
     Pure read. The caller guarantees ``start_token`` already resolves on disk.
 
     Returns a structured result (PROD I4) — one of:
@@ -333,10 +415,16 @@ def walk_supersession_chain(working_dir: Path, start_token: str) -> dict[str, An
       * ``{"outcome": "broken", "broken_at_token", "missing_successor_token",
          "chain": [...]}``
       * ``{"outcome": "cycle", "cycle_at_token", "chain": [...]}``
+      * ``{"outcome": "fork", "fork_at_token", "successors": [...], "chain": [...]}``
+        — a record with two DIFFERENT successors; the walk stops there and
+        reports both rather than picking one. The same successor named by both
+        sources is not a fork.
 
     Cycle detection is fail-closed (visited-set) — never an unbounded walk
-    (§3.4). The chain follows the ``SUPERSEDED_BY`` subgraph only.
+    (§3.4).
     """
+    if derived is None:
+        derived = derive_supersession(working_dir)
     chain: list[dict[str, Any]] = []
     visited: set[str] = set()
     current = start_token
@@ -360,10 +448,18 @@ def walk_supersession_chain(working_dir: Path, start_token: str) -> dict[str, An
                 "chain": chain,
             }
 
-        parsed = load_parsed(path)
-        entry = chain_entry(working_dir, parsed, path)
+        parsed = apply_derived_supersession(load_parsed(path), derived)
+        successors = successors_of(parsed, derived)
+        entry = chain_entry(working_dir, parsed, path, successors)
         chain.append(entry)
 
+        if len(successors) > 1:
+            return {
+                "outcome": "fork",
+                "fork_at_token": current,
+                "successors": successors,
+                "chain": chain,
+            }
         successor = entry["superseded_by"]
         if not successor:
             return {

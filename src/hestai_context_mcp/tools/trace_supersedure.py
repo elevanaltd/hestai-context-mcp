@@ -29,7 +29,10 @@ def trace_supersedure(working_dir: str, token: str) -> dict[str, Any]:
 
     Returns:
         On success: ``{"ok": True, "chain": [...], "terminal_token",
-        "terminal_status"}``. On failure: the §3.1.1 error envelope.
+        "terminal_status"}``. On failure: the §3.1.1 error envelope
+        (CHAIN_CYCLE_DETECTED, CHAIN_BROKEN, or CHAIN_FORK_DETECTED — the last
+        carries ``fork_at_token``, both ``successors`` and the ``chain`` so far).
+        Edges are a record's ``SUPERSEDED_BY`` or a YAML ``supersedes:`` edge.
     """
     working_path = agr_read.validate_working_dir(working_dir)
     if working_path is None:
@@ -64,6 +67,20 @@ def trace_supersedure(working_dir: str, token: str) -> dict[str, Any]:
             message="SUPERSEDED_BY traversal revisited a TOKEN already in the chain.",
             tool=_TOOL,
             context={"cycle_at_token": walk["cycle_at_token"]},
+            contract_ref=_CONTRACT_REF,
+        )
+
+    if outcome == "fork":
+        return agr_read.error_envelope(
+            code="CHAIN_FORK_DETECTED",
+            category="schema_violation",
+            message="A record has two different successors (SUPERSEDED_BY and/or supersedes:).",
+            tool=_TOOL,
+            context={
+                "fork_at_token": walk["fork_at_token"],
+                "successors": walk["successors"],
+                "chain": walk["chain"],
+            },
             contract_ref=_CONTRACT_REF,
         )
 

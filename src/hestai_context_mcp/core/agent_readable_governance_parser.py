@@ -356,6 +356,11 @@ _YAML_TYPE_LINE_RE = re.compile(r'^type:[ ]+"DECISION_RECORD"[ \t]*$')
 _YAML_TOKEN_LINE_RE = re.compile(r'^token:[ ]+"([^"\\]+)"[ \t]*$')
 _YAML_BLOCK_KEYS = frozenset({"current", "rulings"})
 
+# ADR-RFC-ARCH-004 §1.3 TOKEN format. Core must not import ``tools``; a test pins
+# this string to ``type_checker._TOKEN_FORMAT_RE.pattern`` so they cannot drift.
+TOKEN_FORMAT_PATTERN = r"^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$"
+_TOKEN_FORMAT_RE = re.compile(TOKEN_FORMAT_PATTERN)
+
 
 def _is_control(codepoint: int) -> bool:
     """C0 controls and DEL: the characters a quoted scalar may never carry literally."""
@@ -515,6 +520,22 @@ def extract_yaml_token(text: str | None) -> str | None:
     return None
 
 
+def parse_supersedes_list(value: str) -> list[str]:
+    """Split a YAML ``supersedes:`` value into TOKENS, or raise ``invalid_supersedes``.
+
+    The value is a comma-separated list (whitespace around entries is ignored; one
+    token is a list of one). Every entry must match the §1.3 TOKEN pattern, empty
+    entries and duplicates are rejected, so prose can never become an edge.
+    """
+    entries = [entry.strip() for entry in value.split(",")]
+    for entry in entries:
+        if not _TOKEN_FORMAT_RE.fullmatch(entry):
+            raise YamlSyntaxError("invalid_supersedes", f"not a TOKEN: {entry!r}")
+    if len(set(entries)) != len(entries):
+        raise YamlSyntaxError("invalid_supersedes", "duplicate TOKEN")
+    return entries
+
+
 def _split_yaml_pair(line: str) -> tuple[str, str]:
     """Split a top-level fenced line into ``(key, rest-after-colon)`` or raise."""
     if line[:1] in (" ", "\t"):
@@ -611,6 +632,7 @@ def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
         return None, {"line": last + 1, "construct": "missing_closing_fence"}
 
     pairs: dict[str, str] = {}
+    key_lines: dict[str, int] = {}
     headers: set[str] = set()
     state = _BlockState()
     for index in range(1, close):
@@ -637,6 +659,15 @@ def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
         except YamlSyntaxError as exc:
             return None, {"line": index + 1, "construct": exc.construct}
         pairs[key] = value
+        key_lines[key] = index + 1
+
+    if "supersedes" in pairs:
+        try:
+            targets = parse_supersedes_list(pairs["supersedes"])
+            if pairs.get("token") in targets:
+                raise YamlSyntaxError("invalid_supersedes", "a record cannot supersede itself")
+        except YamlSyntaxError as exc:
+            return None, {"line": key_lines["supersedes"], "construct": exc.construct}
 
     core = {k.lower(): v for k, v in pairs.items() if k.upper() in _CORE_FIELDS}
     record: DecisionRecord = {
