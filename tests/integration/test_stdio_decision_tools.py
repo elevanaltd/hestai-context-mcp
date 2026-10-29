@@ -17,7 +17,11 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
-from tests.unit.tools.governance._agr_fixtures import write_record, write_yaml_record
+from tests.unit.tools.governance._agr_fixtures import (
+    write_record,
+    write_yaml_record,
+    yaml_topic_lines,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -108,3 +112,79 @@ async def test_malformed_yaml_record_round_trips_as_structured_envelope(
     assert looked_up["error"]["code"] == "RECORD_PARSE_FAILED"
     listed = await _call(client, "list_decisions", working_dir=str(repo))
     assert [s["path"] for s in listed["skipped"]] == [f".hestai/decisions/{bad}.md"]
+
+
+# --- slice B: YAML topic blocks, supersedes edges, FORK over the real stdio transport ----
+
+T_TOPIC = "HO-STDIO-TOPIC-20261005"
+T_FROZEN = "HO-STDIO-FROZEN-20260101"
+T_FROZEN_NEW = "HO-STDIO-SUCCESSOR-20261006"
+T_FORK_EXPLICIT = "HO-STDIO-EXPLICIT-20260901"
+
+
+async def test_yaml_topic_record_round_trip(client: Client, repo: Path) -> None:
+    write_yaml_record(
+        repo,
+        token=T_TOPIC,
+        topic="client-access",
+        extra_lines=yaml_topic_lines(
+            [("R2", "Access is granted per project.")],
+            [{"id": "R2", "rule": "Access is granted per project.", "ruled": "Operator"}],
+        ),
+    )
+    looked_up = await _call(client, "lookup_decision", working_dir=str(repo), token=T_TOPIC)
+    assert looked_up["record"]["current_state"] == [
+        {"id": "R2", "rule": "Access is granted per project."}
+    ]
+    assert looked_up["record"]["fields"] == {"TOPIC": "client-access"}
+    listed = await _call(client, "list_decisions", working_dir=str(repo), topic="client-access")
+    assert [r["token"] for r in listed["records"]] == [T_TOPIC]
+    assert listed["records"][0]["topic"] == "client-access"
+
+
+async def test_yaml_supersedes_marks_a_frozen_octave_record_and_trace_walks_it(
+    client: Client, repo: Path
+) -> None:
+    frozen = write_record(repo, token=T_FROZEN, authored_at="2026-01-01T00:00:00Z")
+    before = frozen.read_bytes()
+    write_yaml_record(repo, token=T_FROZEN_NEW, supersedes=T_FROZEN)
+    looked_up = await _call(client, "lookup_decision", working_dir=str(repo), token=T_FROZEN)
+    assert looked_up["record"]["status"] == "SUPERSEDED"
+    assert looked_up["record"]["fields"]["SUPERSEDED_BY"] == T_FROZEN_NEW
+    assert looked_up["resolution_chain_status"] == "complete"
+    traced = await _call(client, "trace_supersedure", working_dir=str(repo), token=T_FROZEN)
+    assert [(e["token"], e["status"]) for e in traced["chain"]] == [
+        (T_FROZEN, "SUPERSEDED"),
+        (T_FROZEN_NEW, "RATIFIED"),
+    ]
+    assert traced["terminal_token"] == T_FROZEN_NEW
+    assert frozen.read_bytes() == before
+
+
+async def test_fork_is_reported_over_stdio_never_resolved(client: Client, repo: Path) -> None:
+    write_record(repo, token=T_FROZEN, status="SUPERSEDED", superseded_by=T_FORK_EXPLICIT)
+    write_record(repo, token=T_FORK_EXPLICIT)
+    write_yaml_record(repo, token=T_FROZEN_NEW, supersedes=T_FROZEN)
+    successors = sorted([T_FORK_EXPLICIT, T_FROZEN_NEW])
+    looked_up = await _call(client, "lookup_decision", working_dir=str(repo), token=T_FROZEN)
+    assert looked_up["resolution_chain_status"] == "forked"
+    assert looked_up["successors"] == successors
+    traced = await _call(client, "trace_supersedure", working_dir=str(repo), token=T_FROZEN)
+    assert traced["ok"] is False
+    assert traced["error"]["code"] == "CHAIN_FORK_DETECTED"
+    assert traced["error"]["context"]["successors"] == successors
+
+
+async def test_rejected_yaml_record_names_path_line_and_construct_over_stdio(
+    client: Client, repo: Path
+) -> None:
+    bad = "HO-STDIO-REJECT-20261007"
+    path = write_yaml_record(repo, token=bad, extra_lines=["extra: |"])
+    looked_up = await _call(client, "lookup_decision", working_dir=str(repo), token=bad)
+    context = looked_up["error"]["context"]
+    assert context["path"] == path.relative_to(repo).as_posix()
+    assert context["construct"] == "block_scalar"
+    assert context["line"] == path.read_text(encoding="utf-8").split("\n").index("extra: |") + 1
+    listed = await _call(client, "list_decisions", working_dir=str(repo))
+    entry = next(s for s in listed["skipped"] if s["path"].endswith(f"{bad}.md"))
+    assert (entry["line"], entry["construct"]) == (context["line"], "block_scalar")
