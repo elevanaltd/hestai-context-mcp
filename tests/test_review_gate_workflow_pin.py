@@ -15,6 +15,10 @@ located by its ``- name:`` line and scoped by indentation.
 Each guard is a function of the workflow text. ``MUTATIONS`` applies realistic
 edits to the real workflow and asserts the named guard catches each one;
 ``EQUIVALENT_EDITS`` asserts that harmless rewrites are not rejected.
+
+This is a regression tripwire, not a sandbox: variable indirection or obfuscation
+of the path is out of scope. Containment is the ruleset 12626210 sha pin plus the
+five-role review of every change to this workflow.
 """
 
 from __future__ import annotations
@@ -48,25 +52,23 @@ _PYTHON_RUN = re.compile(r"""\bpython[0-9.]*\s+(?P<target>"[^"]*"|'[^']*'|\S+)""
 _CHDIR = re.compile(r"(?:^|[;&|(]\s*)(?:cd|pushd)\b")
 _SCRIPT_PATH_VAR = {"$SCRIPT_PATH", "${SCRIPT_PATH}"}
 _BLOCK_SCALAR = re.compile(r"[|>][-+0-9]*")
-# Any mention of the trusted root, e.g. `.review-gate-tools`, `./.review-gate-tools/x`.
-_TRUSTED_MENTION = re.compile(r"(?<![\w-])\.review-gate-tools(?![\w-])")
-_INTO = r"""\s*["']?(?:[^\s"';&|]*/)?\.review-gate-tools(?![\w-])"""
-_ARGS = r"[^;&|]*?"
-# Shell forms that write into the trusted root (#215 rework 2, invariant b).
-_RUN_WRITES = {
-    "file command": re.compile(
-        rf"\b(?:cp|mv|rm|ln|tee|install|rsync|touch|mkdir|truncate)\b{_ARGS}{_INTO}"
+# Any mention of the trusted root, in any spelling: a plain substring, so attached
+# options (`-o.review-gate-tools/x`, `-C.review-gate-tools`) count as mentions too.
+_TRUSTED_MENTION = re.compile(re.escape(TRUSTED_ROOT.lstrip(".")))
+# Invariant (b), rework 3: an ALLOWLIST. A run line that mentions the trusted root
+# must fully match one of these, or it fails closed. None of them admits a file
+# redirection; the only redirection allowed is fd duplication (`2>&1`) on the
+# validator invocation, which writes no file.
+_TRUSTED_LITERAL = re.escape(TRUSTED_VALIDATOR)
+_RUN_ALLOWLIST = {
+    "SCRIPT_PATH assignment": re.compile(rf"""SCRIPT_PATH=(["']?){_TRUSTED_LITERAL}\1"""),
+    "validator invocation": re.compile(
+        r"""(?:[A-Za-z_]\w*=\$\()?python[0-9.]*\s+"""
+        rf"""(?:"?\$SCRIPT_PATH"?|"?\$\{{SCRIPT_PATH\}}"?|{_TRUSTED_LITERAL})"""
+        r"""(?:\s+[0-9]*>&[0-9]+)*\)?"""
     ),
-    "redirection": re.compile(rf"[0-9&]?>[>|]?{_INTO}"),
-    "sed -i": re.compile(rf"\bsed\b{_ARGS}\s-i{_ARGS}{_INTO}"),
-    "git -C": re.compile(rf"\bgit\b{_ARGS}(?:\s-C|\s--git-dir[=\s]|\s--work-tree[=\s]){_INTO}"),
-    "cd": re.compile(rf"(?:^|[;&|(]\s*)(?:cd|pushd)\s{_INTO}"),
-    "curl -o": re.compile(rf"\bcurl\b{_ARGS}(?:\s-[a-zA-Z]*o|\s--output[=\s]){_INTO}"),
-    "wget -O": re.compile(
-        rf"\bwget\b{_ARGS}(?:\s-[a-zA-Z]*[OP]|\s--output-document[=\s]|\s--directory-prefix[=\s])"
-        rf"{_INTO}"
-    ),
-    "archive": re.compile(rf"\b(?:tar\b{_ARGS}\s-C|unzip\b{_ARGS}\s-d){_INTO}"),
+    # One simple command: no chaining, pipes, substitution, redirection or continuation.
+    "read-only command": re.compile(r"""(?:echo|ls|cat|sha256sum)\b[^;&|<>`\\$]*"""),
 }
 
 
@@ -283,11 +285,11 @@ def _run_lines(lines: list[str]) -> dict[int, str]:
     return {i: code for body in _block_bodies(lines, "run") for i, code in body}
 
 
-def _run_write(code: str) -> str | None:
-    """Name of the first write form in a shell line that targets the trusted root."""
+def _run_line_off_allowlist(code: str) -> bool:
+    """True if a shell line mentions the trusted root but is not an allowlisted read."""
     if not _TRUSTED_MENTION.search(code):
-        return None
-    return next((name for name, form in _RUN_WRITES.items() if form.search(code)), None)
+        return False
+    return not any(form.fullmatch(code) for form in _RUN_ALLOWLIST.values())
 
 
 def _guard_single_writer(text: str) -> None:
@@ -315,10 +317,11 @@ def _guard_single_writer(text: str) -> None:
 
 
 def _guard_no_run_writes(text: str) -> None:
-    """(b) No run body writes into the trusted root; reads stay allowed."""
+    """(b) A run line that mentions the trusted root must be on the read-only allowlist."""
     for i, code in _run_lines(text.splitlines()).items():
-        form = _run_write(code)
-        assert form is None, f"line {i + 1} writes into {TRUSTED_ROOT} ({form}): {code!r}"
+        assert not _run_line_off_allowlist(
+            code
+        ), f"line {i + 1} names {TRUSTED_ROOT} but is not an allowlisted read: {code!r}"
 
 
 def _guard_order(text: str) -> None:
@@ -350,7 +353,9 @@ def _guard_order(text: str) -> None:
             if line.lstrip().startswith("#") or not _TRUSTED_MENTION.search(line):
                 continue
             assert i in run_lines, f"line {i + 1} names {TRUSTED_ROOT} outside a run body"
-            assert _run_write(run_lines[i]) is None, f"line {i + 1} writes into {TRUSTED_ROOT}"
+            assert not _run_line_off_allowlist(
+                run_lines[i]
+            ), f"line {i + 1} names {TRUSTED_ROOT} but is not an allowlisted read"
 
 
 def _guard_validator_invocation(text: str) -> None:
