@@ -82,7 +82,7 @@ def trace_supersedure(working_dir: str, token: str) -> dict[str, Any]:
         return agr_read.error_envelope(
             code="CHAIN_CYCLE_DETECTED",
             category="schema_violation",
-            message="SUPERSEDED_BY traversal revisited a TOKEN already in the chain.",
+            message="Supersession traversal (SUPERSEDED_BY and/or supersedes:) revisited a TOKEN already in the chain.",
             tool=_TOOL,
             context={"cycle_at_token": walk["cycle_at_token"]},
             contract_ref=_CONTRACT_REF,
@@ -106,7 +106,7 @@ def trace_supersedure(working_dir: str, token: str) -> dict[str, Any]:
         return agr_read.error_envelope(
             code="CHAIN_BROKEN",
             category="schema_violation",
-            message="A record's SUPERSEDED_BY points at a TOKEN that does not exist.",
+            message="A record's successor (SUPERSEDED_BY or a supersedes: edge) names a TOKEN that does not exist.",
             tool=_TOOL,
             context={
                 "broken_at_token": walk["broken_at_token"],

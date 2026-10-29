@@ -47,13 +47,15 @@ record instead (regex-only; PyYAML is never imported)::
     (markdown body — ignored)
 
 Every fenced line is ``lowercase_key: "one-line double-quoted value"`` where the
-only escapes are ``\\"`` and ``\\\\``. Keys are uppercase-mapped into the same
+only escapes are the short escapes for backslash, double quote, LF, CR and TAB, and canonical ``\\uXXXX`` (see
+:func:`decode_yaml_scalar`). A column-0 ``current:`` / ``rulings:`` header with no
+value opens a topic block (see :func:`annotate_lines`). Keys are uppercase-mapped into the same
 :class:`DecisionRecord` shape the OCTAVE path yields. The adapter FAILS CLOSED:
 any other construct inside the fences (unquoted value, other escape, block or
 multi-line scalar, flow collection, anchor, comment, duplicate key, indentation,
-a missing closing fence, or the reserved ``current`` / ``rulings`` topic-block
-keys until the YAML topic-block slice lands) yields the empty (unparseable)
-record, never a half-read one.
+a missing closing fence, a malformed topic-block line, or a reserved key nested
+in a block) yields the empty (unparseable) record, never a half-read one;
+:func:`diagnose_yaml_record` reports the line and construct.
 """
 
 from __future__ import annotations
