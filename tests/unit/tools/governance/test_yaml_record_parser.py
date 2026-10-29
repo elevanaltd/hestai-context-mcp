@@ -95,9 +95,9 @@ def test_markdown_body_after_closing_fence_is_ignored() -> None:
         'extra: ["a", "b"]',  # flow seq
         'extra: {"a": "b"}',  # flow map
         'extra: &anchor "x"',  # anchor
-        'extra: *anchor',  # alias
+        "extra: *anchor",  # alias
         'extra: "x" # comment',  # trailing comment
-        '# a comment line',  # comment line
+        "# a comment line",  # comment line
         '  indented: "x"',  # continuation / indented
         '- "list item"',  # sequence item
         'Upper: "x"',  # not lowercase key

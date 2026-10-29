@@ -33,6 +33,27 @@ The canonical DECISION_RECORD envelope (§1.1)::
 
 Quote-optionality (§1.1): values may be bare or double-quoted; the parser strips
 a single surrounding pair of double quotes from extracted values.
+
+Quoted-YAML front matter (PR-4 slice A)
+---------------------------------------
+A record whose FIRST line is ``---`` is read as a quoted-YAML front-matter
+record instead (regex-only; PyYAML is never imported)::
+
+    ---
+    type: "DECISION_RECORD"
+    token: "HO-EXAMPLE-20261029"
+    ...
+    ---
+    (markdown body — ignored)
+
+Every fenced line is ``lowercase_key: "one-line double-quoted value"`` where the
+only escapes are ``\\"`` and ``\\\\``. Keys are uppercase-mapped into the same
+:class:`DecisionRecord` shape the OCTAVE path yields. The adapter FAILS CLOSED:
+any other construct inside the fences (unquoted value, other escape, block or
+multi-line scalar, flow collection, anchor, comment, duplicate key, indentation,
+a missing closing fence, or the reserved ``current`` / ``rulings`` topic-block
+keys until the YAML topic-block slice lands) yields the empty (unparseable)
+record, never a half-read one.
 """
 
 from __future__ import annotations
@@ -202,6 +223,21 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
+def _empty_record() -> DecisionRecord:
+    """The stable all-``None`` record returned for empty or unparseable input."""
+    return {
+        "token": None,
+        "type": None,
+        "version": None,
+        "status": None,
+        "tier": None,
+        "decision": None,
+        "because": None,
+        "authored_at": None,
+        "fields": {},
+    }
+
+
 def parse_decision_record(text: str | None) -> DecisionRecord:
     """Parse a DECISION_RECORD AGR document into a structured dict.
 
@@ -216,17 +252,7 @@ def parse_decision_record(text: str | None) -> DecisionRecord:
         A :class:`DecisionRecord`. All nine keys are always present. Core fields
         are ``None`` when absent/unparseable; ``fields`` is ``{}`` in that case.
     """
-    empty: DecisionRecord = {
-        "token": None,
-        "type": None,
-        "version": None,
-        "status": None,
-        "tier": None,
-        "decision": None,
-        "because": None,
-        "authored_at": None,
-        "fields": {},
-    }
+    empty = _empty_record()
 
     if not text or not text.strip():
         return empty
@@ -238,8 +264,113 @@ def parse_decision_record(text: str | None) -> DecisionRecord:
         return empty
 
 
+_YAML_FENCE = "---"
+# ``lowercase_key: "value"`` — value is one line of non-quote/non-backslash
+# characters or the two permitted escapes (``\\"`` and ``\\\\``) and nothing after.
+_YAML_LINE_RE = re.compile(r'^([a-z][a-z0-9_]*):[ ]+"((?:[^"\\]|\\["\\])*)"[ \t]*$')
+_YAML_ESCAPE_RE = re.compile(r'\\(["\\])')
+_YAML_TYPE_LINE_RE = re.compile(r'^type:[ ]+"DECISION_RECORD"[ \t]*$')
+_YAML_TOKEN_LINE_RE = re.compile(r'^token:[ ]+"([^"\\]+)"[ \t]*$')
+# Keys reserved for the (pending) YAML topic-block slice: rejected, not half-read.
+_YAML_RESERVED_KEYS = frozenset({"current", "rulings"})
+
+
+def _yaml_fenced_lines(text: str) -> list[str] | None:
+    """Return the lines between the opening and closing ``---`` fences.
+
+    ``None`` when the text does not open with a ``---`` first line or has no
+    closing fence. Pure; regex/split only.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip() != _YAML_FENCE:
+        return None
+    for index in range(1, len(lines)):
+        if lines[index].rstrip() == _YAML_FENCE:
+            return lines[1:index]
+    return None
+
+
+def _yaml_opening_lines(text: str) -> list[str] | None:
+    """Lines after an opening ``---`` up to the closing fence (or EOF if unclosed)."""
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip() != _YAML_FENCE:
+        return None
+    body: list[str] = []
+    for line in lines[1:]:
+        if line.rstrip() == _YAML_FENCE:
+            break
+        body.append(line)
+    return body
+
+
+def has_yaml_decision_header(text: str | None) -> bool:
+    """True iff ``text`` opens with ``---`` and declares ``type: "DECISION_RECORD"``.
+
+    Scoping signal only (like the OCTAVE ``TYPE::DECISION_RECORD`` check): it is
+    True for a malformed YAML record too, so such a record surfaces as
+    unparseable rather than being silently out of scope. Lines after the closing
+    fence are never consulted. Pure, regex-only.
+    """
+    if not text:
+        return False
+    fenced = _yaml_opening_lines(text)
+    return fenced is not None and any(_YAML_TYPE_LINE_RE.match(line) for line in fenced)
+
+
+def extract_yaml_token(text: str | None) -> str | None:
+    """Return the fenced ``token: "…"`` value of a YAML record, else ``None``.
+
+    Independent of whole-record parseability so a malformed record can still be
+    located by TOKEN and reported as RECORD_PARSE_FAILED. Body is ignored.
+    """
+    if not text:
+        return None
+    fenced = _yaml_opening_lines(text)
+    if fenced is None:
+        return None
+    for line in fenced:
+        match = _YAML_TOKEN_LINE_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _parse_yaml_impl(text: str) -> DecisionRecord | None:
+    """Parse a YAML front-matter record; ``None`` means unparseable (fail closed)."""
+    fenced = _yaml_fenced_lines(text)
+    if fenced is None:
+        return None
+    pairs: dict[str, str] = {}
+    for line in fenced:
+        if not line.strip():
+            continue
+        match = _YAML_LINE_RE.match(line)
+        if not match:
+            return None
+        key = match.group(1)
+        if key in _YAML_RESERVED_KEYS or key in pairs:
+            return None
+        pairs[key] = _YAML_ESCAPE_RE.sub(r"\1", match.group(2))
+    core = {k.lower(): v for k, v in pairs.items() if k.upper() in _CORE_FIELDS}
+    return {
+        "token": core.get("token"),
+        "type": core.get("type"),
+        "version": core.get("version"),
+        "status": core.get("status"),
+        "tier": core.get("tier"),
+        "decision": core.get("decision"),
+        "because": core.get("because"),
+        "authored_at": core.get("authored_at"),
+        "fields": {k.upper(): v for k, v in pairs.items() if k.upper() not in _CORE_FIELDS},
+    }
+
+
 def _parse_impl(text: str) -> DecisionRecord:
     """Internal regex-only extraction (raises only on truly unexpected input)."""
+    if text.startswith(_YAML_FENCE):
+        yaml_parsed = _parse_yaml_impl(text)
+        return yaml_parsed if yaml_parsed is not None else _empty_record()
+
     core: dict[str, str] = {}
     extra: dict[str, str] = {}
 
