@@ -278,3 +278,26 @@ def write_yaml_record(
     path = root / (filename or f"{token}.md")
     path.write_text(yaml_record_text(token=token, **kwargs), encoding="utf-8")
     return path
+
+
+def yaml_topic_lines(
+    current: list[tuple[str, str]] | None = None,
+    rulings: list[dict[str, str]] | None = None,
+) -> list[str]:
+    """Return fenced ``current:`` / ``rulings:`` block lines for ``yaml_record_text(extra_lines=…)``.
+
+    ``rulings`` entries are ``{"id": "R2", "rule": …, "verbatim": …, "ruled": …,
+    "replaces": …}`` (only the keys present are written, in that order).
+    """
+    lines: list[str] = []
+    if current is not None:
+        lines.append("current:")
+        lines.extend(f"  {rid}: {yaml_quote(rule)}" for rid, rule in current)
+    if rulings is not None:
+        lines.append("rulings:")
+        for entry in rulings:
+            lines.append(f"  {entry['id']}:")
+            for key in ("rule", "verbatim", "ruled", "replaces"):
+                if key in entry:
+                    lines.append(f"    {key}: {yaml_quote(entry[key])}")
+    return lines

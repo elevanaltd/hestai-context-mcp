@@ -158,11 +158,8 @@ def test_lookup_decision_malformed_yaml_is_parse_failed_naming_both_syntaxes(
     assert "OCTAVE" in parse_error and "YAML" in parse_error
 
 
-def test_lookup_decision_yaml_with_topic_block_header_is_rejected(tmp_path: Path) -> None:
-    write_yaml_record(tmp_path, token=T_YAML, extra_lines=["current:"])
-    result = lookup_decision(str(tmp_path), T_YAML)
-    assert result["ok"] is False
-    assert result["error"]["code"] == "RECORD_PARSE_FAILED"
+# (slice-A test_lookup_decision_yaml_with_topic_block_header_is_rejected removed: superseded by
+# the B3 ruling; see test_yaml_topic_blocks.py)
 
 
 def test_list_decisions_includes_yaml_and_applies_filters(tmp_path: Path) -> None:

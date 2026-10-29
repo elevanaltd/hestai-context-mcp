@@ -102,8 +102,8 @@ def test_markdown_body_after_closing_fence_is_ignored() -> None:
         '- "list item"',  # sequence item
         'Upper: "x"',  # not lowercase key
         'status: "DUP"',  # duplicate key
-        "current:",  # interim rule: topic block header
-        "rulings:",  # interim rule: topic block header
+        # (the slice-A bare `current:` / `rulings:` cases were removed: B3 ruling
+        # 2026-10-29 replaces the interim reject with real YAML topic blocks)
         'current: "scalar"',  # reserved key as a scalar
         "no colon here",
     ],
