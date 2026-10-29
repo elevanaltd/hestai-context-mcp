@@ -188,7 +188,7 @@ def collect_topic_blocks(text: str | None) -> TopicBlocks:
     # YAML topic blocks are out of scope until their slice lands: a YAML record
     # carries no CURRENT/RULINGS (the adapter rejects those keys), and its
     # markdown body must never be scanned for OCTAVE-shaped block headers.
-    if text.startswith(_YAML_FENCE):
+    if is_yaml_front_matter(text):
         return result
 
     entry: RulingEntry | None = None
@@ -270,35 +270,147 @@ def parse_decision_record(text: str | None) -> DecisionRecord:
 
 
 _YAML_FENCE = "---"
-# ``lowercase_key: "value"`` — value is one line of non-quote/non-backslash
-# characters or the two permitted escapes (``\\"`` and ``\\\\``) and nothing after.
-_YAML_LINE_RE = re.compile(r'^([a-z][a-z0-9_]*):[ ]+"((?:[^"\\]|\\["\\])*)"[ \t]*$')
-_YAML_ESCAPE_RE = re.compile(r'\\(["\\])')
+
+
+class YamlReject(TypedDict):
+    """Where and why a YAML front-matter record was rejected (1-based ``line``)."""
+
+    line: int
+    construct: str
+
+
+class YamlSyntaxError(ValueError):
+    """A construct outside the strict quoted-YAML subset; ``construct`` is a stable name."""
+
+    def __init__(self, construct: str, detail: str = "") -> None:
+        super().__init__(f"{construct}: {detail}" if detail else construct)
+        self.construct = construct
+
+
+# ONE escape table (B2 ruling): short escapes decode from / encode to this mapping.
+# ``\uXXXX`` is the canonical form ONLY for control characters with no short escape.
+_YAML_SHORT_ESCAPES = {"\\": "\\", '"': '"', "n": "\n", "r": "\r", "t": "\t"}
+_YAML_SHORT_ENCODE = {char: letter for letter, char in _YAML_SHORT_ESCAPES.items()}
+_YAML_LOWER_HEX_RE = re.compile(r"[0-9a-f]{4}")
+_YAML_ANY_HEX_RE = re.compile(r"[0-9a-fA-F]{4}")
+_YAML_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
 _YAML_TYPE_LINE_RE = re.compile(r'^type:[ ]+"DECISION_RECORD"[ \t]*$')
 _YAML_TOKEN_LINE_RE = re.compile(r'^token:[ ]+"([^"\\]+)"[ \t]*$')
-# Keys reserved for the (pending) YAML topic-block slice: rejected, not half-read.
-_YAML_RESERVED_KEYS = frozenset({"current", "rulings"})
+_YAML_BLOCK_KEYS = frozenset({"current", "rulings"})
 
 
-def _yaml_fenced_lines(text: str) -> list[str] | None:
-    """Return the lines between the opening and closing ``---`` fences.
+def _is_control(codepoint: int) -> bool:
+    """C0 controls and DEL: the characters a quoted scalar may never carry literally."""
+    return codepoint < 0x20 or codepoint == 0x7F
 
-    ``None`` when the text does not open with a ``---`` first line or has no
-    closing fence. Pure; regex/split only.
+
+def _needs_unicode_escape(char: str) -> bool:
+    """True for controls with NO short escape: the only chars ``\\uXXXX`` may spell."""
+    return _is_control(ord(char)) and char not in _YAML_SHORT_ENCODE
+
+
+def encode_yaml_scalar(value: str) -> str:
+    """Canonically encode ``value`` as a one-line double-quoted YAML scalar.
+
+    Pure. Short escapes for ``\\ " LF CR TAB``; ``\\uXXXX`` (four lowercase hex
+    digits) for the remaining C0 controls and DEL; every other character
+    (including non-BMP text) is written literally as UTF-8. Raises ``ValueError``
+    for a lone surrogate, which has no UTF-8 form. ``decode_yaml_scalar`` inverts
+    it exactly, and ``encode(decode(encode(x))) == encode(x)``.
     """
-    lines = text.splitlines()
-    if not lines or lines[0].rstrip() != _YAML_FENCE:
-        return None
-    for index in range(1, len(lines)):
-        if lines[index].rstrip() == _YAML_FENCE:
-            return lines[1:index]
-    return None
+    out = ['"']
+    for char in value:
+        if char in _YAML_SHORT_ENCODE:
+            out.append("\\" + _YAML_SHORT_ENCODE[char])
+        elif _needs_unicode_escape(char):
+            out.append(f"\\u{ord(char):04x}")
+        elif 0xD800 <= ord(char) <= 0xDFFF:
+            raise ValueError("lone surrogate cannot be encoded; use literal UTF-8 text")
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
+
+
+def decode_yaml_scalar(literal: str) -> str:
+    """Decode one strict double-quoted scalar literal, or raise :class:`YamlSyntaxError`.
+
+    Accepts EXACTLY the :data:`_YAML_SHORT_ESCAPES` plus canonical ``\\uXXXX``;
+    everything else raises with a stable ``construct`` name. Pure, regex/scan only.
+    """
+    text = literal.lstrip(" ")
+    if not text:
+        raise YamlSyntaxError("empty_value")
+    first = text[0]
+    indicators = {
+        "|": "block_scalar",
+        ">": "block_scalar",
+        "[": "flow_collection",
+        "{": "flow_collection",
+        "&": "anchor",
+        "*": "alias",
+        "!": "tag",
+        "#": "comment",
+    }
+    if first in indicators:
+        raise YamlSyntaxError(indicators[first])
+    if first != '"':
+        raise YamlSyntaxError("unquoted_value")
+
+    out: list[str] = []
+    i = 1
+    while True:
+        if i >= len(text):
+            raise YamlSyntaxError("unterminated_string")
+        char = text[i]
+        if char == '"':
+            break
+        if char == "\\":
+            i = _decode_escape(text, i, out)
+            continue
+        if _is_control(ord(char)):
+            raise YamlSyntaxError("control_character", f"U+{ord(char):04X}")
+        out.append(char)
+        i += 1
+    rest = text[i + 1 :].strip()
+    if rest.startswith("#"):
+        raise YamlSyntaxError("comment")
+    if rest:
+        raise YamlSyntaxError("trailing_garbage")
+    return "".join(out)
+
+
+def _decode_escape(text: str, i: int, out: list[str]) -> int:
+    """Decode the escape starting at ``text[i] == '\\'``; return the next index."""
+    if i + 1 >= len(text):
+        raise YamlSyntaxError("unterminated_string")
+    letter = text[i + 1]
+    if letter in _YAML_SHORT_ESCAPES:
+        out.append(_YAML_SHORT_ESCAPES[letter])
+        return i + 2
+    if letter != "u":
+        raise YamlSyntaxError("bad_escape", f"\\{letter}")
+    digits = text[i + 2 : i + 6]
+    if not _YAML_ANY_HEX_RE.fullmatch(digits):
+        raise YamlSyntaxError("bad_escape", "\\u needs four hex digits")
+    codepoint = int(digits, 16)
+    if 0xD800 <= codepoint <= 0xDFFF:
+        raise YamlSyntaxError("surrogate_escape", f"\\u{digits}")
+    if not _YAML_LOWER_HEX_RE.fullmatch(digits) or not _needs_unicode_escape(chr(codepoint)):
+        raise YamlSyntaxError("noncanonical_escape", f"\\u{digits}")
+    out.append(chr(codepoint))
+    return i + 6
+
+
+def _split_yaml_lines(text: str) -> list[str]:
+    """Split on LF only (tolerating CRLF); exotic Unicode separators stay inside values."""
+    return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
 
 
 def _yaml_opening_lines(text: str) -> list[str] | None:
     """Lines after an opening ``---`` up to the closing fence (or EOF if unclosed)."""
-    lines = text.splitlines()
-    if not lines or lines[0].rstrip() != _YAML_FENCE:
+    lines = _split_yaml_lines(text)
+    if lines[0].rstrip() != _YAML_FENCE:
         return None
     body: list[str] = []
     for line in lines[1:]:
@@ -310,10 +422,7 @@ def _yaml_opening_lines(text: str) -> list[str] | None:
 
 def is_yaml_front_matter(text: str | None) -> bool:
     """True iff ``text`` opens with a ``---`` fence line (YAML-syntax record)."""
-    if not text:
-        return False
-    first = text.splitlines()[0] if text.strip() else ""
-    return first.rstrip() == _YAML_FENCE
+    return bool(text) and _split_yaml_lines(text or "")[0].rstrip() == _YAML_FENCE
 
 
 def has_yaml_decision_header(text: str | None) -> bool:
@@ -348,24 +457,48 @@ def extract_yaml_token(text: str | None) -> str | None:
     return None
 
 
-def _parse_yaml_impl(text: str) -> DecisionRecord | None:
-    """Parse a YAML front-matter record; ``None`` means unparseable (fail closed)."""
-    fenced = _yaml_fenced_lines(text)
-    if fenced is None:
-        return None
+def _split_yaml_pair(line: str) -> tuple[str, str]:
+    """Split a top-level fenced line into ``(key, rest-after-colon)`` or raise."""
+    if line[:1] in (" ", "\t"):
+        raise YamlSyntaxError("comment" if line.strip().startswith("#") else "indentation")
+    if line.startswith("#"):
+        raise YamlSyntaxError("comment")
+    if line == "-" or line.startswith("- "):
+        raise YamlSyntaxError("sequence_item")
+    match = _YAML_KEY_RE.match(line)
+    if not match or (match.group(2) and not match.group(2).startswith(" ")):
+        raise YamlSyntaxError("invalid_key")
+    return match.group(1), match.group(2)
+
+
+def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
+    """Strictly parse a YAML front-matter record: ``(record, None)`` or ``(None, reject)``."""
+    lines = _split_yaml_lines(text)
+    close = next((i for i in range(1, len(lines)) if lines[i].rstrip() == _YAML_FENCE), None)
+    if close is None:
+        last = max((i for i, line in enumerate(lines) if line.strip()), default=0)
+        return None, {"line": last + 1, "construct": "missing_closing_fence"}
+
     pairs: dict[str, str] = {}
-    for line in fenced:
+    for index in range(1, close):
+        line = lines[index]
         if not line.strip():
             continue
-        match = _YAML_LINE_RE.match(line)
-        if not match:
-            return None
-        key = match.group(1)
-        if key in _YAML_RESERVED_KEYS or key in pairs:
-            return None
-        pairs[key] = _YAML_ESCAPE_RE.sub(r"\1", match.group(2))
+        try:
+            key, rest = _split_yaml_pair(line)
+            if key in _YAML_BLOCK_KEYS:
+                raise YamlSyntaxError(
+                    "block_header" if not rest.strip() else "block_header_with_value"
+                )
+            value = decode_yaml_scalar(rest)
+            if key in pairs:
+                raise YamlSyntaxError("duplicate_key", key)
+        except YamlSyntaxError as exc:
+            return None, {"line": index + 1, "construct": exc.construct}
+        pairs[key] = value
+
     core = {k.lower(): v for k, v in pairs.items() if k.upper() in _CORE_FIELDS}
-    return {
+    record: DecisionRecord = {
         "token": core.get("token"),
         "type": core.get("type"),
         "version": core.get("version"),
@@ -376,12 +509,25 @@ def _parse_yaml_impl(text: str) -> DecisionRecord | None:
         "authored_at": core.get("authored_at"),
         "fields": {k.upper(): v for k, v in pairs.items() if k.upper() not in _CORE_FIELDS},
     }
+    return record, None
+
+
+def diagnose_yaml_record(text: str | None) -> YamlReject | None:
+    """Return ``{line, construct}`` for a rejected YAML front-matter record, else ``None``.
+
+    ``None`` for OCTAVE text and for a YAML record the strict subset accepts
+    (whether it is then COMPLETE is a separate §1.2 required-field question).
+    Pure; ``line`` is 1-based in ``text``.
+    """
+    if not text or not is_yaml_front_matter(text):
+        return None
+    return _parse_yaml(text)[1]
 
 
 def _parse_impl(text: str) -> DecisionRecord:
     """Internal regex-only extraction (raises only on truly unexpected input)."""
-    if text.startswith(_YAML_FENCE):
-        yaml_parsed = _parse_yaml_impl(text)
+    if is_yaml_front_matter(text):
+        yaml_parsed = _parse_yaml(text)[0]
         return yaml_parsed if yaml_parsed is not None else _empty_record()
 
     core: dict[str, str] = {}

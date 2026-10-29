@@ -50,7 +50,8 @@ def list_decisions(
 
     Returns:
         On success: ``{"ok": True, "records": [...], "total": int,
-        "skipped": [{"path": str, "parse_error": str}, ...]}`` with ``records``
+        "skipped": [{"path": str, "parse_error": str}, ...]}`` (a rejected
+        YAML record's entry also carries ``line`` (1-based) and ``construct``) with ``records``
         sorted by ``authored_at`` DESC; each row is ``{token, status, tier,
         decision, authored_at, path}`` plus ``topic`` on records that declare a
         TOPIC (the key is absent otherwise, keeping the pre-v1.3 row shape). ``skipped`` is always present (empty when
@@ -75,7 +76,7 @@ def list_decisions(
         return _filter_invalid("tier", tier)
 
     records: list[dict[str, Any]] = []
-    skipped: list[dict[str, str]] = []
+    skipped: list[dict[str, Any]] = []
     for path in agr_read.iter_record_paths(working_path):
         is_agr, parsed = agr_read.classify_file(path)
 
@@ -93,10 +94,12 @@ def list_decisions(
         # of the index remains usable. A single legacy/non-conforming record can
         # no longer fail-close the entire call.
         if not agr_read.record_is_parseable(parsed):
+            detail = agr_read.parse_failure_detail_for_path(path)
             skipped.append(
                 {
                     "path": agr_read.rel_path(working_path, path),
-                    "parse_error": agr_read.PARSE_ERROR_WORDING,
+                    "parse_error": agr_read.parse_error_text(detail),
+                    **(detail or {}),
                 }
             )
             continue

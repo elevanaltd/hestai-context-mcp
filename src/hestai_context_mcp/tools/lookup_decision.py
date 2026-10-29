@@ -118,6 +118,7 @@ def lookup_decision(
         )
     parsed = parse_decision_record(text)
     if not agr_read.record_is_parseable(parsed):
+        detail = agr_read.parse_failure_detail(text)
         return agr_read.error_envelope(
             code="RECORD_PARSE_FAILED",
             category="schema_violation",
@@ -126,7 +127,8 @@ def lookup_decision(
             context={
                 "token": token,
                 "path": agr_read.rel_path(working_path, path),
-                "parse_error": agr_read.PARSE_ERROR_WORDING,
+                "parse_error": agr_read.parse_error_text(detail),
+                **(detail or {}),
             },
             contract_ref=_CONTRACT_REF,
         )

@@ -23,6 +23,7 @@ from typing import Any
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     DecisionRecord,
+    diagnose_yaml_record,
     extract_yaml_token,
     has_yaml_decision_header,
     is_yaml_front_matter,
@@ -75,6 +76,32 @@ _TYPE_IS_DECISION_RECORD_RE = re.compile(
 # Shared §3.1.1 wording for a record that is in scope but failed to parse. Names
 # BOTH syntaxes (OCTAVE ``.oct.md`` and quoted-YAML front-matter ``.md``).
 PARSE_ERROR_WORDING = "missing OCTAVE envelope or YAML front matter, or required §1.2 field(s)"
+
+
+def parse_failure_detail(content: str) -> dict[str, Any] | None:
+    """Return ``{"line": int, "construct": str}`` for a rejected YAML record, else ``None``.
+
+    The B1 loud-reject detail: a YAML record the strict subset refuses is reported
+    with its 1-based line and the offending construct, never silently skipped.
+    ``None`` for OCTAVE records and for YAML records that are merely incomplete.
+    """
+    reject = diagnose_yaml_record(content)
+    return None if reject is None else {"line": reject["line"], "construct": reject["construct"]}
+
+
+def parse_failure_detail_for_path(path: Path) -> dict[str, Any] | None:
+    """:func:`parse_failure_detail` for a file (``None`` if it cannot be read)."""
+    try:
+        return parse_failure_detail(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+
+
+def parse_error_text(detail: dict[str, Any] | None) -> str:
+    """The shared ``parse_error`` string, naming the line/construct when known."""
+    if detail is None:
+        return PARSE_ERROR_WORDING
+    return f"{PARSE_ERROR_WORDING}; rejected at line {detail['line']}: {detail['construct']}"
 
 
 def is_decision_record(content: str) -> bool:
