@@ -117,6 +117,11 @@ _FIELD_LINE_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]*)::(.*?)\s*$")
 _BLOCK_HEADER_RE = re.compile(r"^()(CURRENT|RULINGS):\s*$")
 _RULING_ENTRY_RE = re.compile(r"^\s*(R\d+):\s*$")
 _CURRENT_ENTRY_RE = re.compile(r"^\s*(R\d+)::(.*?)\s*$")
+_RULING_FIELDS = ("rule", "verbatim", "ruled", "replaces")
+# YAML spellings (lowercase headers/keys, one-line quoted scalars) of the same blocks.
+_YAML_BLOCK_HEADER_RE = re.compile(r"^()(current|rulings):\s*$")
+_YAML_CURRENT_ENTRY_RE = re.compile(r"^\s*(R\d+):[ ]+(.*?)\s*$")
+_YAML_RULING_FIELD_RE = re.compile(r"^\s*(rule|verbatim|ruled|replaces):[ ]+(.*?)\s*$")
 
 
 class CurrentEntry(TypedDict):
@@ -143,19 +148,48 @@ class TopicBlocks(TypedDict):
     rulings: list[RulingEntry]
 
 
+def _text_lines(text: str, yaml: bool) -> list[str]:
+    """Lines of ``text`` with line endings kept; YAML splits on LF only (see B2)."""
+    if not yaml:
+        return text.splitlines(keepends=True)
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
 def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
     """Yield ``(block_name | None, line)`` for every line of ``text``.
 
     ``block_name`` is ``CURRENT`` / ``RULINGS`` for lines inside such a block
     (headers excluded) and ``None`` elsewhere. A block ends at the first
-    non-blank line indented no deeper than its header.
+    non-blank line indented no deeper than its header. One routine serves both
+    syntaxes: OCTAVE uses the uppercase ``CURRENT:`` / ``RULINGS:`` headers over
+    the whole text; a YAML front-matter record (first line ``---``) uses the
+    lowercase headers INSIDE its fences only, so the markdown body can never open
+    a block. OCTAVE behaviour is unchanged.
     """
+    yaml = is_yaml_front_matter(text)
+    header_re = _YAML_BLOCK_HEADER_RE if yaml else _BLOCK_HEADER_RE
     block: str | None = None
     header_indent = 0
-    for line in text.splitlines(keepends=True):
-        header = _BLOCK_HEADER_RE.match(line)
+    in_fence = False
+    for index, line in enumerate(_text_lines(text, yaml)):
+        if yaml:
+            if index == 0:
+                in_fence = True
+                yield None, line
+                continue
+            if in_fence and line.rstrip() == _YAML_FENCE:
+                in_fence = False
+                block = None
+            if not in_fence:
+                yield None, line
+                continue
+        header = header_re.match(line)
         if header:
-            block = header.group(2)
+            block = header.group(2).upper()
             header_indent = len(header.group(1))
             yield None, line
             continue
@@ -176,27 +210,53 @@ def iter_block_lines(text: str) -> Iterator[tuple[str, str]]:
             yield block, line
 
 
+def _match_current(line: str, yaml: bool) -> tuple[str, str] | None:
+    """``(id, rule)`` of a CURRENT entry line in either syntax, else ``None``."""
+    if not yaml:
+        cur = _CURRENT_ENTRY_RE.match(line)
+        return (cur.group(1), _strip_quotes(cur.group(2))) if cur else None
+    ycur = _YAML_CURRENT_ENTRY_RE.match(line)
+    if not ycur:
+        return None
+    try:
+        return ycur.group(1), decode_yaml_scalar(ycur.group(2))
+    except YamlSyntaxError:
+        return None
+
+
+def _match_ruling_field(line: str, yaml: bool) -> tuple[str, str] | None:
+    """``(lowercase key, value)`` of a RULINGS field line in either syntax, else ``None``."""
+    if not yaml:
+        field = _FIELD_LINE_RE.match(line)
+        return (field.group(1).lower(), _strip_quotes(field.group(2))) if field else None
+    yfield = _YAML_RULING_FIELD_RE.match(line)
+    if not yfield:
+        return None
+    try:
+        return yfield.group(1), decode_yaml_scalar(yfield.group(2))
+    except YamlSyntaxError:
+        return None
+
+
 def collect_topic_blocks(text: str | None) -> TopicBlocks:
     """Collect the ordered CURRENT and RULINGS blocks of a topic record.
 
     Pure, regex-only, never raises. Absent blocks yield empty lists. A RULINGS
     entry always carries all five keys; ``replaces`` is ``None`` when absent.
+    Works on OCTAVE and YAML front-matter records alike (a YAML line that does
+    not decode is skipped here; ``diagnose_yaml_record`` is what reports it).
     """
     result: TopicBlocks = {"current": [], "rulings": []}
     if not text or not text.strip():
         return result
-    # YAML topic blocks are out of scope until their slice lands: a YAML record
-    # carries no CURRENT/RULINGS (the adapter rejects those keys), and its
-    # markdown body must never be scanned for OCTAVE-shaped block headers.
-    if is_yaml_front_matter(text):
-        return result
 
+    yaml = is_yaml_front_matter(text)
     entry: RulingEntry | None = None
     for block, line in iter_block_lines(text):
         if block == "CURRENT":
-            cur = _CURRENT_ENTRY_RE.match(line)
+            cur = _match_current(line, yaml)
             if cur:
-                result["current"].append({"id": cur.group(1), "rule": _strip_quotes(cur.group(2))})
+                result["current"].append({"id": cur[0], "rule": cur[1]})
             continue
         start = _RULING_ENTRY_RE.match(line)
         if start:
@@ -209,11 +269,9 @@ def collect_topic_blocks(text: str | None) -> TopicBlocks:
             }
             result["rulings"].append(entry)
             continue
-        field = _FIELD_LINE_RE.match(line)
-        if field and entry is not None:
-            key = field.group(1).lower()
-            if key in ("rule", "verbatim", "ruled", "replaces"):
-                entry[key] = _strip_quotes(field.group(2))  # type: ignore[literal-required]
+        field = _match_ruling_field(line, yaml)
+        if field and entry is not None and field[0] in _RULING_FIELDS:
+            entry[field[0]] = field[1]  # type: ignore[literal-required]
     return result
 
 
@@ -471,6 +529,79 @@ def _split_yaml_pair(line: str) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
+# Keys that must never appear inside a topic block (lowercase twins of Gate A's
+# TOPIC_BLOCK_RESERVED_KEYS): a nested copy could otherwise shadow a META field.
+_YAML_RESERVED_BLOCK_KEYS = frozenset(
+    {
+        "version",
+        "token",
+        "id",
+        "type",
+        "status",
+        "tier",
+        "decision",
+        "because",
+        "authored_at",
+        "superseded_by",
+    }
+)
+_YAML_BLOCK_LINE_RE = re.compile(r"^( *)([^\s:]+):(.*)$")
+_YAML_ENTRY_ID_RE = re.compile(r"^R\d+$")
+
+
+class _BlockState:
+    """Mutable per-record state while validating YAML topic-block lines."""
+
+    def __init__(self) -> None:
+        self.name: str | None = None
+        self.seen_ids: set[str] = set()
+        self.entry_keys: set[str] | None = None
+
+
+def _check_block_line(state: _BlockState, line: str) -> None:
+    """Validate one line inside a ``current:`` / ``rulings:`` block, or raise."""
+    if line.strip().startswith("#"):
+        raise YamlSyntaxError("comment")
+    if line[:1] == "\t":
+        raise YamlSyntaxError("indentation")
+    match = _YAML_BLOCK_LINE_RE.match(line)
+    if not match:
+        raise YamlSyntaxError("invalid_block_entry")
+    indent, key, rest = len(match.group(1)), match.group(2), match.group(3)
+    if key in _YAML_RESERVED_BLOCK_KEYS:
+        raise YamlSyntaxError("reserved_key_in_block", key)
+    if rest and not rest.startswith(" "):
+        raise YamlSyntaxError("invalid_block_entry")
+    if state.name == "current":
+        if not _YAML_ENTRY_ID_RE.match(key):
+            raise YamlSyntaxError("invalid_block_entry")
+        if indent != 2:
+            raise YamlSyntaxError("indentation")
+        decode_yaml_scalar(rest)
+        if key in state.seen_ids:
+            raise YamlSyntaxError("duplicate_key", key)
+        state.seen_ids.add(key)
+        return
+    if indent == 2:
+        if not _YAML_ENTRY_ID_RE.match(key) or rest.strip():
+            raise YamlSyntaxError("invalid_block_entry")
+        if key in state.seen_ids:
+            raise YamlSyntaxError("duplicate_key", key)
+        state.seen_ids.add(key)
+        state.entry_keys = set()
+        return
+    if indent != 4:
+        raise YamlSyntaxError("indentation")
+    if state.entry_keys is None:
+        raise YamlSyntaxError("orphan_block_line")
+    if key not in _RULING_FIELDS:
+        raise YamlSyntaxError("unknown_block_key", key)
+    decode_yaml_scalar(rest)
+    if key in state.entry_keys:
+        raise YamlSyntaxError("duplicate_key", key)
+    state.entry_keys.add(key)
+
+
 def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
     """Strictly parse a YAML front-matter record: ``(record, None)`` or ``(None, reject)``."""
     lines = _split_yaml_lines(text)
@@ -480,16 +611,26 @@ def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
         return None, {"line": last + 1, "construct": "missing_closing_fence"}
 
     pairs: dict[str, str] = {}
+    headers: set[str] = set()
+    state = _BlockState()
     for index in range(1, close):
         line = lines[index]
         if not line.strip():
             continue
         try:
+            if state.name is not None and line[:1] in (" ", "\t"):
+                _check_block_line(state, line)
+                continue
+            state = _BlockState()  # column-0 line: any open block ended
             key, rest = _split_yaml_pair(line)
             if key in _YAML_BLOCK_KEYS:
-                raise YamlSyntaxError(
-                    "block_header" if not rest.strip() else "block_header_with_value"
-                )
+                if rest.strip():
+                    raise YamlSyntaxError("block_header_with_value")
+                if key in headers:
+                    raise YamlSyntaxError("duplicate_key", key)
+                headers.add(key)
+                state.name = key
+                continue
             value = decode_yaml_scalar(rest)
             if key in pairs:
                 raise YamlSyntaxError("duplicate_key", key)
