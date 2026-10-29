@@ -30,7 +30,8 @@ def trace_supersedure(working_dir: str, token: str) -> dict[str, Any]:
     Returns:
         On success: ``{"ok": True, "chain": [...], "terminal_token",
         "terminal_status"}``. On failure: the §3.1.1 error envelope
-        (CHAIN_CYCLE_DETECTED, CHAIN_BROKEN, or CHAIN_FORK_DETECTED — the last
+        (RECORD_PARSE_FAILED for a rejected YAML record at the start or mid-chain, with
+        path/line/construct; CHAIN_CYCLE_DETECTED, CHAIN_BROKEN, or CHAIN_FORK_DETECTED — the last
         carries ``fork_at_token``, both ``successors`` and the ``chain`` so far).
         Edges are a record's ``SUPERSEDED_BY`` or a YAML ``supersedes:`` edge.
     """
@@ -59,6 +60,23 @@ def trace_supersedure(working_dir: str, token: str) -> dict[str, Any]:
 
     walk = agr_read.walk_supersession_chain(working_path, token)
     outcome = walk["outcome"]
+
+    if outcome == "unparseable":
+        detail = walk["detail"]
+        return agr_read.error_envelope(
+            code="RECORD_PARSE_FAILED",
+            category="schema_violation",
+            message="A DECISION_RECORD on the chain failed to parse (never half-read).",
+            tool=_TOOL,
+            context={
+                "token": walk["token"],
+                "path": walk["path"],
+                "parse_error": agr_read.parse_error_text(detail or None),
+                **detail,
+                "chain": walk["chain"],
+            },
+            contract_ref=_CONTRACT_REF,
+        )
 
     if outcome == "cycle":
         return agr_read.error_envelope(

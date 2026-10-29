@@ -313,12 +313,16 @@ def classify_file(path: Path) -> tuple[bool, DecisionRecord]:
     return is_decision_record(content), parse_decision_record(content)
 
 
+_EDGE_SOURCE_STATUSES = frozenset({"RATIFIED", "SUPERSEDED"})
+
+
 def derive_supersession(working_dir: Path) -> dict[str, list[str]]:
     """Map each superseded TOKEN to the sorted tokens of the YAML records that supersede it.
 
-    Edges come ONLY from a parseable YAML record's ``supersedes:`` list; OCTAVE
-    records (including legacy prose ``SUPERSEDES``) and rejected YAML records
-    derive nothing. A pure corpus scan (PROD I5): no file is written, and the
+    Edges come ONLY from a parseable YAML record's ``supersedes:`` list, and only
+    when that record's own STATUS is RATIFIED or SUPERSEDED (PROPOSED, DRAFT, VOID
+    and anything else derive nothing). OCTAVE records (including legacy prose
+    ``SUPERSEDES``) and rejected YAML records derive nothing. A pure corpus scan (PROD I5): no file is written, and the
     superseded record's own file is never consulted or touched.
     """
     root = decisions_root(working_dir)
@@ -338,6 +342,8 @@ def derive_supersession(working_dir: Path) -> dict[str, list[str]]:
         raw = parsed["fields"].get("SUPERSEDES")
         deriver = parsed["token"]
         if raw is None or deriver is None or not record_is_parseable(parsed):
+            continue
+        if parsed["status"] not in _EDGE_SOURCE_STATUSES:
             continue
         for target in parse_supersedes_list(raw):
             edges.setdefault(target, set()).add(deriver)
@@ -361,8 +367,9 @@ def apply_derived_supersession(
 ) -> DecisionRecord:
     """Overlay derived supersession on a parsed record (returns a copy; file untouched).
 
-    OR rule: a record with a derived edge reads ``SUPERSEDED`` (whatever its file
-    says). When it has exactly one successor overall and no explicit
+    OR rule: a record with a derived edge reads ``SUPERSEDED`` — except a ``VOID``
+    record, which stays ``VOID`` (it outranks SUPERSEDED) while the edge still
+    appears in its chain. When it has exactly one successor overall and no explicit
     ``SUPERSEDED_BY``, that successor is surfaced as ``fields["SUPERSEDED_BY"]``.
     On a fork ``fields`` is left exactly as the file has it.
     """
@@ -371,7 +378,8 @@ def apply_derived_supersession(
     if not derived_successors:
         return parsed
     out: DecisionRecord = {**parsed, "fields": dict(parsed["fields"])}
-    out["status"] = "SUPERSEDED"
+    if out["status"] != "VOID":
+        out["status"] = "SUPERSEDED"
     if "SUPERSEDED_BY" not in out["fields"] and len(derived_successors) == 1:
         out["fields"]["SUPERSEDED_BY"] = derived_successors[0]
     return out
@@ -415,6 +423,9 @@ def walk_supersession_chain(
       * ``{"outcome": "broken", "broken_at_token", "missing_successor_token",
          "chain": [...]}``
       * ``{"outcome": "cycle", "cycle_at_token", "chain": [...]}``
+      * ``{"outcome": "unparseable", "token", "path", "detail", "chain"}`` — a YAML
+        record on the walk (start or mid-chain) was rejected or incomplete; the walk
+        stops rather than half-read it (``detail`` is ``{line, construct}`` or ``{}``).
       * ``{"outcome": "fork", "fork_at_token", "successors": [...], "chain": [...]}``
         — a record with two DIFFERENT successors; the walk stops there and
         reports both rather than picking one. The same successor named by both
@@ -448,7 +459,17 @@ def walk_supersession_chain(
                 "chain": chain,
             }
 
-        parsed = apply_derived_supersession(load_parsed(path), derived)
+        content = path.read_text(encoding="utf-8", errors="replace")
+        loaded = parse_decision_record(content)
+        if is_yaml_front_matter(content) and not record_is_parseable(loaded):
+            return {
+                "outcome": "unparseable",
+                "token": current,
+                "path": rel_path(working_dir, path),
+                "detail": parse_failure_detail(content) or {},
+                "chain": chain,
+            }
+        parsed = apply_derived_supersession(loaded, derived)
         successors = successors_of(parsed, derived)
         entry = chain_entry(working_dir, parsed, path, successors)
         chain.append(entry)

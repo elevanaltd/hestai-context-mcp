@@ -352,7 +352,11 @@ _YAML_SHORT_ENCODE = {char: letter for letter, char in _YAML_SHORT_ESCAPES.items
 _YAML_LOWER_HEX_RE = re.compile(r"[0-9a-f]{4}")
 _YAML_ANY_HEX_RE = re.compile(r"[0-9a-fA-F]{4}")
 _YAML_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
-_YAML_TYPE_LINE_RE = re.compile(r'^type:[ ]+"DECISION_RECORD"[ \t]*$')
+# Candidate test only: ``type: DECISION_RECORD`` in ANY quoting, so a mis-quoted record is
+# found and then rejected loudly (``unquoted_value``) instead of being invisible.
+_YAML_TYPE_LINE_RE = re.compile(
+    r"^type:[ ]+(?:DECISION_RECORD|'DECISION_RECORD'|\"DECISION_RECORD\")[ \t]*$"
+)
 _YAML_TOKEN_LINE_RE = re.compile(r'^token:[ ]+"([^"\\]+)"[ \t]*$')
 _YAML_BLOCK_KEYS = frozenset({"current", "rulings"})
 
@@ -489,7 +493,7 @@ def is_yaml_front_matter(text: str | None) -> bool:
 
 
 def has_yaml_decision_header(text: str | None) -> bool:
-    """True iff ``text`` opens with ``---`` and declares ``type: "DECISION_RECORD"``.
+    """True iff ``text`` opens with ``---`` and declares ``type:`` DECISION_RECORD (any quoting).
 
     Scoping signal only (like the OCTAVE ``TYPE::DECISION_RECORD`` check): it is
     True for a malformed YAML record too, so such a record surfaces as

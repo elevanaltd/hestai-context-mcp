@@ -36,6 +36,7 @@ _WALK_OUTCOME_TO_STATUS = {
     "broken": "broken",
     "cycle": "cyclic",
     "fork": "forked",
+    "unparseable": "unparseable",
 }
 
 
@@ -55,7 +56,7 @@ def lookup_decision(
 
     Returns:
         On success: ``{"ok": True, "record": {...}, "resolution_chain": [...],
-        "resolution_chain_status": "complete"|"broken"|"cyclic"|"forked"}``. The
+        "resolution_chain_status": "complete"|"broken"|"cyclic"|"forked"|"unparseable"}``. The
         ``resolution_chain_status`` field (additive per §3.1.1, issue #87) is a
         completeness signal derived from the same ``walk_supersession_chain``
         outcome, so a caller can tell a chain that reached its terminal from one
@@ -75,6 +76,9 @@ def lookup_decision(
         and a final chain entry with ``superseded_by: None``, ``fork: True`` and
         ``successors``. A fork is never resolved to one successor; the same
         successor named by both sources is not a fork.
+        ``"unparseable"``: the resolution walk met a rejected/incomplete YAML record;
+        ``rejected_at`` is then ``{token, path, line?, construct?}`` and the chain
+        stops before it (a VOID record keeps ``VOID`` but still walks its derived edge).
         On failure: the §3.1.1 error envelope.
     """
     working_path = agr_read.validate_working_dir(working_dir)
@@ -165,7 +169,8 @@ def lookup_decision(
     resolution_chain: list[dict[str, Any]] = []
     resolution_chain_status = _CHAIN_STATUS_DEFAULT
     fork_successors: list[str] | None = None
-    if parsed["status"] == "SUPERSEDED":
+    rejected_at: dict[str, Any] | None = None
+    if parsed["status"] == "SUPERSEDED" or parsed["token"] in derived:
         walk = agr_read.walk_supersession_chain(working_path, token, derived)
         # §3.2: the resolution chain mirrors the trace_supersedure entry shape.
         # A broken/cyclic chain still surfaces the entries gathered so far so the
@@ -179,6 +184,8 @@ def lookup_decision(
         )
         if walk["outcome"] == "fork":
             fork_successors = walk["successors"]
+        if walk["outcome"] == "unparseable":
+            rejected_at = {"token": walk["token"], "path": walk["path"], **walk["detail"]}
 
     result: dict[str, Any] = {
         "ok": True,
@@ -188,6 +195,8 @@ def lookup_decision(
     }
     if fork_successors is not None:
         result["successors"] = fork_successors
+    if rejected_at is not None:
+        result["rejected_at"] = rejected_at
     return result
 
 
