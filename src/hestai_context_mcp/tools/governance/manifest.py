@@ -51,7 +51,7 @@ def _extract_token_or_id(content: str) -> str | None:
     Returns the extracted value or None if neither found.
     """
     if is_yaml_front_matter(content):
-        return extract_yaml_token(content)
+        return extract_yaml_token(content) if has_yaml_decision_header(content) else None
 
     m = _TOKEN_RE.search(content)
     if m:

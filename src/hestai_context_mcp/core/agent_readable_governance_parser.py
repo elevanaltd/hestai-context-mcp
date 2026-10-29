@@ -354,11 +354,14 @@ _YAML_SHORT_ENCODE = {char: letter for letter, char in _YAML_SHORT_ESCAPES.items
 _YAML_LOWER_HEX_RE = re.compile(r"[0-9a-f]{4}")
 _YAML_ANY_HEX_RE = re.compile(r"[0-9a-fA-F]{4}")
 _YAML_KEY_RE = re.compile(r"^([a-z][a-z0-9_]*):(.*)$")
-# Candidate test only: ``type: DECISION_RECORD`` in ANY quoting, so a mis-quoted record is
-# found and then rejected loudly (``unquoted_value``) instead of being invisible.
+# Candidate test only: ``type: DECISION_RECORD`` in ANY quoting, optionally followed by
+# whitespace and anything (a comment or trailing garbage), so a mis-written record is
+# found and then rejected loudly instead of being invisible. The value must END at the
+# boundary: ``DECISION_RECORD_X`` / ``DECISION_RECORDS`` are other types.
 _YAML_TYPE_LINE_RE = re.compile(
-    r"^type:[ ]+(?:DECISION_RECORD|'DECISION_RECORD'|\"DECISION_RECORD\")[ \t]*$"
+    r"^type:[ ]+(?:DECISION_RECORD|'DECISION_RECORD'|\"DECISION_RECORD\")(?:[ \t].*)?$"
 )
+_BOM = "\ufeff"
 _YAML_TOKEN_LINE_RE = re.compile(r'^token:[ ]+"([^"\\]+)"[ \t]*$')
 _YAML_BLOCK_KEYS = frozenset({"current", "rulings"})
 
@@ -504,7 +507,9 @@ def has_yaml_decision_header(text: str | None) -> bool:
     """
     if not text:
         return False
-    fenced = _yaml_opening_lines(text)
+    # A leading UTF-8 BOM still makes the file a candidate (it is then rejected loudly
+    # by ``diagnose_yaml_record``, never silently treated as a non-record).
+    fenced = _yaml_opening_lines(text.removeprefix(_BOM))
     return fenced is not None and any(_YAML_TYPE_LINE_RE.match(line) for line in fenced)
 
 
@@ -695,9 +700,14 @@ def diagnose_yaml_record(text: str | None) -> YamlReject | None:
 
     ``None`` for OCTAVE text and for a YAML record the strict subset accepts
     (whether it is then COMPLETE is a separate §1.2 required-field question).
-    Pure; ``line`` is 1-based in ``text``.
+    Pure; ``line`` is 1-based in ``text``. A candidate that starts with a UTF-8 BOM is
+    rejected at line 1 with the existing construct ``invalid_key`` (line 1 is not a fence).
     """
-    if not text or not is_yaml_front_matter(text):
+    if not text:
+        return None
+    if text.startswith(_BOM):
+        return {"line": 1, "construct": "invalid_key"} if has_yaml_decision_header(text) else None
+    if not is_yaml_front_matter(text):
         return None
     return _parse_yaml(text)[1]
 

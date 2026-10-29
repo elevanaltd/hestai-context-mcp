@@ -127,7 +127,7 @@ def is_decision_record(content: str) -> bool:
     as ``DOCUMENT_TYPE::DECISION_RECORD`` / ``CONTENT_TYPE::DECISION_RECORD``
     can never qualify (CRS P2 — same failure class as F1).
     """
-    if is_yaml_front_matter(content):
+    if is_yaml_front_matter(content) or content.startswith("\ufeff"):
         return has_yaml_decision_header(content)
     if _extract_sentinel(content) == _DECISION_RECORD_TYPE:
         return True
@@ -243,6 +243,21 @@ def _is_decision_record_for_token(path: Path, token: str) -> bool:
     return _extract_token(content) == token
 
 
+def _is_unextractable_yaml_candidate(path: Path) -> bool:
+    """True iff ``path`` is a YAML decision candidate whose ``token:`` scalar cannot be read.
+
+    Only consulted for a file whose NAME is ``<token>.md``: the filename supplies the
+    identity the unreadable token scalar cannot, so the malformed record is reported
+    (RECORD_PARSE_FAILED with path/line/construct) rather than hidden as not-found. A
+    record whose token IS readable but differs from the filename never matches here.
+    """
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return has_yaml_decision_header(content) and extract_yaml_token(content) is None
+
+
 def discover_record(working_dir: Path, token: str) -> Path | None:
     """Resolve a TOKEN to its on-disk DECISION_RECORD path, or ``None``.
 
@@ -283,6 +298,9 @@ def discover_record(working_dir: Path, token: str) -> Path | None:
         return direct_yaml
     for candidate in sorted(root.rglob(f"{token}.md")):
         if _is_decision_record_for_token(candidate, token):
+            return candidate
+    for candidate in [direct_yaml, *sorted(root.rglob(f"{token}.md"))]:
+        if candidate.is_file() and _is_unextractable_yaml_candidate(candidate):
             return candidate
 
     # Fallback: embedded-TOKEN scan (filename drifted from TOKEN), type-verified.
@@ -343,6 +361,8 @@ def derive_supersession(working_dir: Path) -> dict[str, list[str]]:
         deriver = parsed["token"]
         if raw is None or deriver is None or not record_is_parseable(parsed):
             continue
+        if not is_valid_token(deriver):
+            continue  # discover_record could never resolve such a successor
         if parsed["status"] not in _EDGE_SOURCE_STATUSES:
             continue
         for target in parse_supersedes_list(raw):
