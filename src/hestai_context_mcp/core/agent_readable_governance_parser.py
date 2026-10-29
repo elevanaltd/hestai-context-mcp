@@ -185,6 +185,11 @@ def collect_topic_blocks(text: str | None) -> TopicBlocks:
     result: TopicBlocks = {"current": [], "rulings": []}
     if not text or not text.strip():
         return result
+    # YAML topic blocks are out of scope until their slice lands: a YAML record
+    # carries no CURRENT/RULINGS (the adapter rejects those keys), and its
+    # markdown body must never be scanned for OCTAVE-shaped block headers.
+    if text.startswith(_YAML_FENCE):
+        return result
 
     entry: RulingEntry | None = None
     for block, line in iter_block_lines(text):
@@ -301,6 +306,14 @@ def _yaml_opening_lines(text: str) -> list[str] | None:
             break
         body.append(line)
     return body
+
+
+def is_yaml_front_matter(text: str | None) -> bool:
+    """True iff ``text`` opens with a ``---`` fence line (YAML-syntax record)."""
+    if not text:
+        return False
+    first = text.splitlines()[0] if text.strip() else ""
+    return first.rstrip() == _YAML_FENCE
 
 
 def has_yaml_decision_header(text: str | None) -> bool:

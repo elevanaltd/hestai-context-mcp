@@ -126,7 +126,7 @@ def lookup_decision(
             context={
                 "token": token,
                 "path": agr_read.rel_path(working_path, path),
-                "parse_error": "missing OCTAVE envelope or required §1.2 field(s)",
+                "parse_error": agr_read.PARSE_ERROR_WORDING,
             },
             contract_ref=_CONTRACT_REF,
         )

@@ -96,7 +96,7 @@ def list_decisions(
             skipped.append(
                 {
                     "path": agr_read.rel_path(working_path, path),
-                    "parse_error": "missing OCTAVE envelope or required §1.2 field(s)",
+                    "parse_error": agr_read.PARSE_ERROR_WORDING,
                 }
             )
             continue

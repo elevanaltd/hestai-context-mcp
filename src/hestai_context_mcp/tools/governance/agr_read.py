@@ -23,6 +23,9 @@ from typing import Any
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     DecisionRecord,
+    extract_yaml_token,
+    has_yaml_decision_header,
+    is_yaml_front_matter,
     parse_decision_record,
 )
 
@@ -69,8 +72,17 @@ _TYPE_IS_DECISION_RECORD_RE = re.compile(
 )
 
 
+# Shared §3.1.1 wording for a record that is in scope but failed to parse. Names
+# BOTH syntaxes (OCTAVE ``.oct.md`` and quoted-YAML front-matter ``.md``).
+PARSE_ERROR_WORDING = "missing OCTAVE envelope or YAML front matter, or required §1.2 field(s)"
+
+
 def is_decision_record(content: str) -> bool:
-    """True iff this OCTAVE document declares itself a DECISION_RECORD (AGR).
+    """True iff this OCTAVE or YAML document declares itself a DECISION_RECORD (AGR).
+
+    A document opening with a ``---`` fence is judged ONLY by its YAML header
+    (``type: "DECISION_RECORD"`` inside the fences); OCTAVE-shaped lines in its
+    markdown body can never qualify it.
 
     Type membership is a SCOPING signal, distinct from parse-completeness
     (``record_is_parseable``). ``.hestai/decisions/`` legitimately co-hosts
@@ -87,6 +99,8 @@ def is_decision_record(content: str) -> bool:
     as ``DOCUMENT_TYPE::DECISION_RECORD`` / ``CONTENT_TYPE::DECISION_RECORD``
     can never qualify (CRS P2 — same failure class as F1).
     """
+    if is_yaml_front_matter(content):
+        return has_yaml_decision_header(content)
     if _extract_sentinel(content) == _DECISION_RECORD_TYPE:
         return True
     return _TYPE_IS_DECISION_RECORD_RE.search(content) is not None
@@ -141,15 +155,29 @@ def decisions_root(working_dir: Path) -> Path:
     return working_dir / ".hestai" / "decisions"
 
 
-def iter_record_paths(working_dir: Path) -> list[Path]:
-    """Return every ``.oct.md`` under ``.hestai/decisions/**`` (sorted, stable).
+def _is_yaml_record_file(path: Path) -> bool:
+    """True iff ``path`` is a plain ``.md`` carrying the YAML decision header."""
+    if path.name.endswith(".oct.md") or not path.is_file():
+        return False
+    try:
+        return has_yaml_decision_header(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
 
-    Honours both the §1.1 flat layout and ``<group>/`` sub-grouping. Read-only.
+
+def iter_record_paths(working_dir: Path) -> list[Path]:
+    """Return every candidate record under ``.hestai/decisions/**`` (sorted, stable).
+
+    Every ``*.oct.md`` plus every other ``*.md`` that carries the YAML decision
+    header (so READMEs and other markdown are never misread as records). Honours
+    both the §1.1 flat layout and ``<group>/`` sub-grouping. Read-only.
     """
     root = decisions_root(working_dir)
     if not root.exists():
         return []
-    return sorted(root.rglob("*.oct.md"))
+    paths = set(root.rglob("*.oct.md"))
+    paths.update(p for p in root.rglob("*.md") if _is_yaml_record_file(p))
+    return sorted(paths)
 
 
 def is_valid_token(token: str) -> bool:
@@ -180,14 +208,19 @@ def _is_decision_record_for_token(path: Path, token: str) -> bool:
         content = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return is_decision_record(content) and _extract_token(content) == token
+    if not is_decision_record(content):
+        return False
+    if is_yaml_front_matter(content):
+        return extract_yaml_token(content) == token
+    return _extract_token(content) == token
 
 
 def discover_record(working_dir: Path, token: str) -> Path | None:
     """Resolve a TOKEN to its on-disk DECISION_RECORD path, or ``None``.
 
     Resolution is path-first (§1.1 filename↔TOKEN): the canonical filename is
-    ``<token>.oct.md`` under the flat root or any sub-group. Every candidate is
+    ``<token>.oct.md`` (else ``<token>.md`` for a YAML record) under the flat root
+    or any sub-group. Every candidate is
     verified to be a DECISION_RECORD whose embedded TOKEN equals ``token`` —
     a co-located non-AGR ``.oct.md`` can never resolve as a record (F1 guard).
     As a fallback (a record whose filename drifted from its TOKEN), the store is
@@ -215,6 +248,12 @@ def discover_record(working_dir: Path, token: str) -> Path | None:
     if direct.exists() and _is_decision_record_for_token(direct, token):
         return direct
     for candidate in sorted(root.rglob(f"{token}.oct.md")):
+        if _is_decision_record_for_token(candidate, token):
+            return candidate
+    direct_yaml = root / f"{token}.md"
+    if direct_yaml.exists() and _is_decision_record_for_token(direct_yaml, token):
+        return direct_yaml
+    for candidate in sorted(root.rglob(f"{token}.md")):
         if _is_decision_record_for_token(candidate, token):
             return candidate
 

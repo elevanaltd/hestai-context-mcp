@@ -2,6 +2,7 @@
 
 Builds a flat TOKEN/ID -> file_path index from:
   - .hestai/decisions/**/*.oct.md  (DECISION_RECORD, TOKEN field)
+  - .hestai/decisions/**/*.md      (quoted-YAML front-matter DECISION_RECORD, token field)
   - .hestai/context/concepts/**/*.oct.md  (facet cards, ID field)
 
 The MANIFEST is written to .hestai/MANIFEST.md after each successful
@@ -14,6 +15,12 @@ import os
 import re
 import tempfile
 from pathlib import Path
+
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    extract_yaml_token,
+    has_yaml_decision_header,
+    is_yaml_front_matter,
+)
 
 # Regex to extract TOKEN from DECISION_RECORD (quoted form).
 # Line-anchored (\s*$) so a trailing-garbage line  TOKEN::"<value>" junk  is not
@@ -38,9 +45,14 @@ _ID_BARE_RE = re.compile(r"(?m)^  ID::([A-Z][A-Z0-9_]{2,127})\s*$")
 def _extract_token_or_id(content: str) -> str | None:
     """Extract TOKEN or ID from raw oct.md content using regex.
 
-    Tries TOKEN field first (DECISION_RECORD), then ID field (facet cards).
+    A document opening with a ``---`` fence is read as a quoted-YAML record: only
+    its fenced ``token:`` line counts (the markdown body is ignored). Otherwise
+    tries TOKEN field first (DECISION_RECORD), then ID field (facet cards).
     Returns the extracted value or None if neither found.
     """
+    if is_yaml_front_matter(content):
+        return extract_yaml_token(content)
+
     m = _TOKEN_RE.search(content)
     if m:
         return m.group(1)
@@ -79,10 +91,17 @@ def build_manifest(working_dir: Path) -> str:
     for root in (decisions_root, concepts_root):
         if not root.exists():
             continue
-        for oct_file in sorted(root.rglob("*.oct.md")):
+        candidates = set(root.rglob("*.oct.md"))
+        if root == decisions_root:
+            candidates.update(p for p in root.rglob("*.md") if not p.name.endswith(".oct.md"))
+        for oct_file in sorted(candidates):
+            if not oct_file.is_file():
+                continue
             try:
                 content = oct_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
+                continue
+            if not oct_file.name.endswith(".oct.md") and not has_yaml_decision_header(content):
                 continue
             key = _extract_token_or_id(content)
             if key:
