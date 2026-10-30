@@ -185,7 +185,7 @@ def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
                 in_fence = True
                 yield None, line
                 continue
-            if in_fence and line.rstrip() == _YAML_FENCE:
+            if in_fence and _is_fence_line(line):
                 in_fence = False
                 block = None
             if not in_fence:
@@ -332,6 +332,11 @@ def parse_decision_record(text: str | None) -> DecisionRecord:
 
 
 _YAML_FENCE = "---"
+
+
+def _is_fence_line(line: str) -> bool:
+    """A fence line is exactly ``---`` (its line ending, LF/CR, aside): opening and closing."""
+    return line.rstrip("\r\n") == _YAML_FENCE
 
 
 class YamlReject(TypedDict):
@@ -549,7 +554,7 @@ def _yaml_opening_lines(text: str) -> list[str] | None:
     lines = _split_yaml_lines(text.removeprefix(_BOM))
     body: list[str] = []
     for line in lines[1:]:
-        if line.rstrip() == _YAML_FENCE:
+        if _is_fence_line(line):
             break
         body.append(line)
     return body
@@ -700,7 +705,7 @@ def _check_block_line(state: _BlockState, line: str) -> None:
 def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
     """Strictly parse a YAML front-matter record: ``(record, None)`` or ``(None, reject)``."""
     lines = _split_yaml_lines(text)
-    close = next((i for i in range(1, len(lines)) if lines[i].rstrip() == _YAML_FENCE), None)
+    close = next((i for i in range(1, len(lines)) if _is_fence_line(lines[i])), None)
     if close is None:
         last = max((i for i, line in enumerate(lines) if line.strip()), default=0)
         return None, {"line": last + 1, "construct": "missing_closing_fence"}
