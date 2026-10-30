@@ -97,6 +97,7 @@ def test_f2_malformed_record_with_a_quoted_mismatched_token_does_not_resolve_eit
 ) -> None:
     _write_text(tmp_path, f"{T}.md", yaml_record_text(token=OTHER, extra_lines=["extra: bare"]))
     assert lookup_decision(str(tmp_path), T)["error"]["code"] == "TOKEN_NOT_FOUND"
+    assert trace_supersedure(str(tmp_path), T)["error"]["code"] == "TOKEN_NOT_FOUND"
 
 
 def test_f2_non_candidate_markdown_with_the_filename_stays_not_found(tmp_path: Path) -> None:
