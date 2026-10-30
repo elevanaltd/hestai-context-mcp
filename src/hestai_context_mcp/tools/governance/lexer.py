@@ -250,9 +250,12 @@ def assemble_context(working_dir: Path) -> str:
             if total >= _CONTEXT_BUDGET_CHARS:
                 break
             try:
-                content = read_record(oct_file).text
+                record = read_record(oct_file)
             except OSError:
                 continue
+            if record.syntax == "yaml":
+                continue  # strict pairing: ``.oct.md`` is OCTAVE-only (and keeps surrogates out)
+            content = record.text
             remaining = _CONTEXT_BUDGET_CHARS - total
             chunk = content[:remaining]
             parts.append(chunk)
