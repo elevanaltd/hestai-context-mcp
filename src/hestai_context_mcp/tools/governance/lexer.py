@@ -98,6 +98,41 @@ def _search_manifest(manifest_path: Path, token: str) -> bool:
     return False
 
 
+def _manifest_rows(manifest_path: Path, token: str) -> list[str]:
+    """Path cells of every MANIFEST row whose first cell is exactly ``token`` (private)."""
+    try:
+        content = manifest_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rows: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        parts = stripped.split("|")
+        if len(parts) >= 2 and parts[1].strip() == token:
+            rows.append(parts[2].strip() if len(parts) >= 3 else "")
+    return rows
+
+
+def _manifest_hit_is_trusted(working_dir: Path, token: str, rel: str) -> bool:
+    """A manifest hit is trusted as-is, except a YAML ``.md`` row: that file must still
+    exist and parse (a stale row must not satisfy Gate A's target check)."""
+    if not rel.endswith(".md") or rel.endswith(".oct.md"):
+        return True  # OCTAVE (and unknown) rows keep their pre-existing behaviour
+    path = (working_dir / rel).resolve()
+    try:
+        path.relative_to(working_dir.resolve())
+        content = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
+    except (OSError, ValueError):
+        return False
+    return (
+        has_yaml_decision_header(content)
+        and extract_yaml_token(content) == token
+        and yaml_record_is_parseable(content)
+    )
+
+
 def _search_filesystem(working_dir: Path, token: str) -> bool:
     """Search governance oct.md files for a token/ID using exact field match.
 
@@ -175,12 +210,17 @@ def lookup_token_deterministic(working_dir: Path, token: str) -> bool:
     """
     manifest_path = working_dir / ".hestai" / "MANIFEST.md"
 
-    if manifest_path.exists():
-        found = _search_manifest(manifest_path, token)
-        if found:
-            return True
-        # If MANIFEST exists but token not found, still fall through to
-        # filesystem in case MANIFEST is stale (e.g. recent commit not reflected).
+    # A MANIFEST hit short-circuits, except a YAML row whose file no longer parses.
+    # No hit (or a stale one) falls through to the filesystem in case MANIFEST is stale.
+    if (
+        manifest_path.exists()
+        and _search_manifest(manifest_path, token)
+        and any(
+            _manifest_hit_is_trusted(working_dir, token, rel)
+            for rel in _manifest_rows(manifest_path, token)
+        )
+    ):
+        return True
 
     return _search_filesystem(working_dir, token)
 
