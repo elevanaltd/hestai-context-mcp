@@ -82,12 +82,12 @@ because: "<…>"
 - Keys are lowercase on disk (`[a-z][a-z0-9_]*`) and map to the uppercase §1.2 fields (`authored_at` is `AUTHORED_AT`). The §1.2 required set is unchanged.
 - Every scalar is one line and double-quoted. The only structure besides `key: "value"` is the §1.7 blocks.
 - The escape set is exactly `\\`, `\"`, `\n`, `\r`, `\t` and `\uXXXX`, in canonical form only: `\u` is used solely for a control character with no short escape (U+0000–U+001F, U+007F), with four lowercase hex digits. Surrogate escapes are invalid, and every other character, non-BMP included, is written literally. A literal control character (C0 or DEL, a TAB included) inside a quoted value is invalid; a TAB must be written `\t`. The reader accepts only the canonical escape spellings the scalar encoder emits.
-- The scoping signal is a `type:` line naming `DECISION_RECORD` inside the fences, the analogue of `META.TYPE`. Quoted, unquoted or single-quoted all make the file a candidate record, and only the double-quoted form then parses: an unquoted or single-quoted `type:` is loudly rejected (`unquoted_value`), never silently out of scope. A `.md` file without such a line stays invisible, so READMEs and other markdown are never misread.
+- The scoping signal is a `type:` line naming `DECISION_RECORD` inside the fences, the analogue of `META.TYPE`. Quoted, unquoted or single-quoted all make the file a candidate record, and only the double-quoted form then parses: an unquoted or single-quoted `type:` is loudly rejected (`unquoted_value`), never silently out of scope. The test also accepts text after the value (a comment or trailing garbage) and a leading UTF-8 BOM (rejected at line 1 as `invalid_key`), and a `<token>.md` whose `token:` scalar cannot be read is still found by its filename and reported. A `.md` file without such a line stays invisible, so READMEs and other markdown are never misread.
 - **Strict and loud rejection**: a record outside this subset is never half-read and never silently skipped. Rejected constructs include an unquoted value, a block or multi-line scalar, a flow collection, an anchor, alias or tag, a comment, a sequence item, indentation, a duplicate key, any other escape spelling, and a missing closing fence. `lookup_decision` returns `RECORD_PARSE_FAILED` (§3.2) with `context.path`, `context.parse_error`, `context.line` (1-based) and `context.construct` (a stable name such as `unquoted_value`, `bad_escape`, `noncanonical_escape`, `duplicate_key`, `missing_closing_fence`). `list_decisions` reports the same `line` and `construct` on the record's `skipped` entry (§3.3). A well-formed record that lacks a §1.2 required field is reported the same way, without `line` and `construct`.
 - A TOKEN resolves to `<token>.oct.md` first, then `<token>.md`, then by embedded TOKEN. The deterministic TOKEN lookup (§1.6) sees `<token>.md` as well as `<token>.oct.md`: a YAML record declares its TOKEN by its fenced `token:` line, whether or not the whole record parses. Block lines and the markdown body never declare a TOKEN.
 - The write path for YAML records (`submit_governance` content mode, Gate A YAML branch) is NOT shipped by v1.4; it arrives with EPIC4 PR-5. Gate A is unchanged and has no YAML branch.
 
-**Revision**: 2026-10-29: §1.1 widened from OCTAVE-only to dual syntax and the quoted-YAML form, escape set and strict rejection recorded (HO-TOPIC-RECORDS-YAML-SYNTAX-20261029; EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025).
+**Revision**: 2026-10-29: §1.1 widened from OCTAVE-only to dual syntax and the quoted-YAML form, escape set, strict rejection and candidate detection recorded (HO-TOPIC-RECORDS-YAML-SYNTAX-20261029; EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025).
 
 ### 1.2 Fields
 
@@ -260,9 +260,11 @@ AGR records live in the `committed_governance` category (PR-α §2 / PR-B §1.2)
 committed_governance::.hestai/decisions/**/*.{md,oct.md}
 ```
 
-Specifically, AGRs land at `.hestai/decisions/<token>.oct.md` or `.hestai/decisions/<group>/<token>.oct.md` per §1.1. They are L1 (Phase governance) in the convergent L0–L5 topology per PR-B §1.1.
+Specifically, AGRs land at `.hestai/decisions/<token>.oct.md`, `.hestai/decisions/<token>.md` (quoted-YAML, v1.4) or the same under `.hestai/decisions/<group>/` per §1.1. They are L1 (Phase governance) in the convergent L0–L5 topology per PR-B §1.1.
 
 AGRs MUST NOT live in `.hestai/state/sessions/` (L4 ephemeral per PR-α / PR-E), `.hestai/state/cache/` (L2 cache per PR-α), or anywhere outside `.hestai/decisions/`. This invariant is enforced by PR-B §3.3 (tool-boundary fail-fast on the `DECISION_RECORD` TYPE) and PR-B §2 (CI gate).
+
+**Revision**: 2026-10-30: `.hestai/decisions/<token>.md` named as a quoted-YAML AGR location (HO-TOPIC-RECORDS-YAML-SYNTAX-20261029; EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025).
 
 ### 2.2 ADR-0013 substrate ruling
 
@@ -347,7 +349,7 @@ Resolves a single AGR by `TOKEN`. Pure read.
     "decision": "<DECISION string>",
     "because": "<BECAUSE string>",
     "authored_at": "<ISO-8601>",
-    "path": "<repo-relative path to the .oct.md file>",
+    "path": "<repo-relative path to the .oct.md file, or to the <token>.md file for a YAML record>",
     "fields": { /* all other present fields, key→value */ },
     "current_state": [ { "id": "R2", "rule": "<one-line rule>" }, … ] | null   // additive (v1.3, §1.7)
   },
@@ -472,7 +474,7 @@ The chain starts at the requested token and follows `SUPERSEDED_BY` pointers to 
 - `CHAIN_BROKEN` (`schema_violation`) — a record in the chain points `SUPERSEDED_BY` at a TOKEN that does not exist; `context.broken_at_token` and `context.missing_successor_token` populated. Distinct from `TOKEN_NOT_FOUND` so consumers can distinguish missing-start from missing-middle.
 - `CHAIN_CYCLE_DETECTED` (`schema_violation`) — `SUPERSEDED_BY` traversal revisited a TOKEN already in the chain; `context.cycle_at_token` populated. This SHOULD be unreachable if the validator (§4.1 #8) has been run, but the tool MUST fail closed rather than infinite-loop.
 - `CHAIN_FORK_DETECTED` (`schema_violation`, v1.4) — a record in the chain has two different successors, from `SUPERSEDED_BY` and/or edges derived from YAML `supersedes:` (§1.6); `context.fork_at_token`, `context.successors` (sorted, both TOKENs) and `context.chain` (the entries gathered so far) populated. The walk stops at the fork and never picks one successor.
-- `RECORD_PARSE_FAILED` (`schema_violation`, v1.4) — the existing §3.2 code, reused for chains: a YAML record at the start of the chain or mid-chain was rejected or is incomplete. `context.token`, `context.path`, `context.parse_error` and the chain gathered so far (`context.chain`) are populated, plus `context.line` and `context.construct` for a record the strict YAML subset rejected (§1.1). The tool never returns a half-read entry for it.
+- `RECORD_PARSE_FAILED` (`schema_violation`, v1.4) — the existing §3.2 code, reused for chains: a YAML record at the start of the chain or mid-chain was rejected or is incomplete. `context.token`, `context.path`, `context.parse_error` and the chain gathered so far (`context.chain`) are populated, plus `context.line` and `context.construct`, both OPTIONAL as in `lookup_decision` (§3.2): present for a record the strict YAML subset rejected (§1.1), absent for a syntactically valid but incomplete record and for one that cannot be read. The tool never returns a half-read entry for it.
 - `WORKING_DIR_INVALID` (`io_failure`) — as in §3.2.
 
 When the requested token is found but has no `SUPERSEDED_BY` (it is itself terminal), the chain contains exactly one entry and `terminal_token == token`.
@@ -554,7 +556,7 @@ The validator is a CLI tool (name suggestion: `validate_agent_readable_governanc
 1. **OCTAVE envelope** — `===DECISION_RECORD===` / `===END===` present, `META.TYPE::DECISION_RECORD`, `META.VERSION` is a parseable `MAJOR.MINOR` string.
 2. **Required fields present** — TYPE, VERSION, TOKEN, STATUS, TIER, DECISION, BECAUSE, AUTHORED_AT.
 3. **TOKEN format and date consistency** — matches §1.3 regex AND the `YYYYMMDD` suffix equals the UTC date portion of `AUTHORED_AT` (per the §1.3 MUST). Mismatch is a hard error.
-4. **TOKEN uniqueness** — every TOKEN appears exactly once across `.hestai/decisions/**/*.oct.md`.
+4. **TOKEN uniqueness** — every TOKEN appears exactly once across `.hestai/decisions/**/*.oct.md`. The read tools also scan YAML `*.md` records (§1.1). Cross-syntax uniqueness (one TOKEN as both `.oct.md` and `.md`) is not enforced in v1.4; it arrives with the EPIC4 PR-5 Gate A YAML branch. Until then `lookup_decision` and `trace_supersedure` resolve a TOKEN to `<token>.oct.md` before `<token>.md`.
 5. **STATUS enum** — one of the four admissible values.
 6. **TIER enum** — one of the three admissible values.
 7. **Reserved names** — `DEPENDS_ON`, `CONFLICTS_WITH`, `ARCHIVED_AT` MUST NOT appear in v1.x records.
@@ -566,6 +568,8 @@ The validator is a CLI tool (name suggestion: `validate_agent_readable_governanc
 13. **Reasoning-field density (v1.1)** — `DECISION` and `BECAUSE` are each AT MOST 40 words and contain NO embedded newline (the v1.1 bytecode form, §1.2). A value-level check ONLY: the structural flat-regex parse is unchanged (no structural parser change), so write/read parity (the shared `type_checker` ↔ `agr_read` constants) is preserved. Per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 (#101). Severity: error.
 14. **Topic-block key collision (v1.3)** — inside a `CURRENT` or `RULINGS` block (§1.7) no line may use a top-level reserved key (`VERSION`, `TOKEN`, `ID`, `TYPE`, `STATUS`, `TIER`, `DECISION`, `BECAUSE`, `AUTHORED_AT`, `SUPERSEDED_BY`) as its key. All other invariants (#1–#13) are evaluated over the record with CURRENT/RULINGS lines excluded, matching the read parser. Every offending line is reported with the key and the block named. Regex-only; a no-op for records without these blocks. Severity: error. The lowercase YAML equivalents (§1.7) are rejected by the YAML reader in v1.4 (`reserved_key_in_block`); Gate A has no YAML branch yet.
 15. **Core key ahead of META (v1.3)** — none of the top-level core keys named in #14 may appear before the `META:` header (outside the blocks). The parser and Gate A keep the first match of each key over the whole record, so an earlier copy would override the value declared in META. Placement after the META block, and later nested repeats, remain admissible (some records declare `STATUS`/`TIER`/`DECISION` after META; a later copy cannot win first-match). A no-op when no `META:` header exists. Severity: error.
+
+**Revision**: 2026-10-30: YAML records noted in the uniqueness corpus; cross-syntax enforcement deferred to PR-5 (HO-TOPIC-RECORDS-YAML-SYNTAX-20261029; EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025).
 
 ### 4.2 Severities
 
