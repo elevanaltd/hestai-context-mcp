@@ -334,9 +334,13 @@ def parse_decision_record(text: str | None) -> DecisionRecord:
 _YAML_FENCE = "---"
 
 
-def _is_fence_line(line: str) -> bool:
-    """A fence line is exactly ``---`` (its line ending, LF/CR, aside): opening and closing."""
-    return line.rstrip("\r\n") == _YAML_FENCE
+def _is_fence_line(raw: str) -> bool:
+    """A fence line is exactly ``---`` plus at most ONE line ending (``\\n``, ``\\r\\n``).
+
+    Judged on the RAW line, before any CR is stripped, so ``---\\r\\r`` is not a fence.
+    The single definition for opening and closing fences.
+    """
+    return raw.removesuffix("\n").removesuffix("\r") == _YAML_FENCE
 
 
 class YamlReject(TypedDict):
@@ -369,6 +373,7 @@ _YAML_TYPE_LINE_RE = re.compile(
     r"^type:[ ]+(?:DECISION_RECORD|'DECISION_RECORD'|\"DECISION_RECORD\")(?:[ \t].*)?$"
 )
 _BOM = "\ufeff"
+_CRLF_RE = re.compile(r"(?<!\r)\r\n")
 _YAML_TOKEN_LINE_RE = re.compile(r'^token:[ ]+"([^"\\]+)"[ \t]*$')
 _YAML_BLOCK_KEYS = frozenset({"current", "rulings"})
 
@@ -497,14 +502,14 @@ def classify_record_text(raw: bytes | str) -> RecordText:
     * OCTAVE: decoded with ``errors="replace"`` exactly as before PR-4, text otherwise
       untouched (a BOM is kept, so OCTAVE behaviour is identical to main).
     * YAML: decoded strictly (invalid bytes stay lone surrogates and are reported as
-      ``invalid_utf8`` when inside the fences), CRLF folded to LF, and a leading BOM
+      ``invalid_utf8`` when inside the fences), a single CRLF folded to LF (a repeated CR is left alone, so it stays malformed), and a leading BOM
       is a loud ``invalid_key`` reject at line 1 (the BOM is kept in ``text`` so every
       downstream reader sees the same rejection). A YAML candidate is never parsed as
       OCTAVE: it is parsed as YAML or carries a ``diagnostic``.
     """
     if isinstance(raw, bytes):
         body = raw.removeprefix(_BOM.encode("utf-8"))
-        if body.partition(b"\n")[0].rstrip(b"\r") != _YAML_FENCE.encode("ascii"):
+        if not _is_fence_line(body.partition(b"\n")[0].decode("latin-1")):
             return RecordText("octave", raw.decode("utf-8", errors="replace"), None)
         text = raw.decode("utf-8", errors="surrogateescape")
     else:
@@ -513,13 +518,20 @@ def classify_record_text(raw: bytes | str) -> RecordText:
             with contextlib.suppress(UnicodeEncodeError):  # already-clean str passes through
                 text = text.encode("utf-8", errors="surrogateescape").decode("utf-8", "replace")
             return RecordText("octave", text, None)
-    text = text.replace("\r\n", "\n")
+    # Fold CRLF to LF, but never a repeated CR (``\r\r\n``): that would turn a malformed
+    # line into a well-formed one. Diagnostics are judged on the folded text.
+    text = _CRLF_RE.sub("\n", text)
     return RecordText("yaml", text, diagnose_yaml_record(text))
 
 
 def read_record(path: Path) -> RecordText:
     """Read ``path`` and classify it (the one I/O entry; raises ``OSError`` like ``read_text``)."""
-    return classify_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
+    record = classify_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
+    if record.syntax == "yaml":
+        # ``read_text`` folds every CR/CRLF to LF (universal newlines), which would turn a
+        # malformed ``---\\r\\r`` fence into a valid one: re-read the raw bytes for YAML only.
+        record = classify_record_text(path.read_bytes())
+    return record
 
 
 def decode_record_bytes(data: bytes) -> str:
@@ -543,8 +555,14 @@ def yaml_record_is_parseable(text: str | None) -> bool:
 
 
 def _split_yaml_lines(text: str) -> list[str]:
-    """Split on LF only (tolerating CRLF); exotic Unicode separators stay inside values."""
-    return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+    """Split on LF only; exotic Unicode separators stay inside values. CR is KEPT (raw
+    lines): fence judgement needs it, content consumers strip one with ``_content``."""
+    return text.split("\n")
+
+
+def _content(raw: str) -> str:
+    """A raw line without its (single) CR."""
+    return raw.removesuffix("\r")
 
 
 def _yaml_opening_lines(text: str) -> list[str] | None:
@@ -556,13 +574,13 @@ def _yaml_opening_lines(text: str) -> list[str] | None:
     for line in lines[1:]:
         if _is_fence_line(line):
             break
-        body.append(line)
+        body.append(_content(line))
     return body
 
 
 def is_yaml_front_matter(text: str | None) -> bool:
     """True iff the first line (after an optional BOM) is exactly ``---`` (+ optional CR)."""
-    return bool(text) and text.removeprefix(_BOM).partition("\n")[0].rstrip("\r") == _YAML_FENCE  # type: ignore[union-attr]
+    return bool(text) and _is_fence_line(text.removeprefix(_BOM).partition("\n")[0])  # type: ignore[union-attr]
 
 
 def has_yaml_decision_header(text: str | None) -> bool:
@@ -715,7 +733,7 @@ def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
     headers: set[str] = set()
     state = _BlockState()
     for index in range(1, close):
-        line = lines[index]
+        line = _content(lines[index])
         if not line.strip():
             continue
         try:
