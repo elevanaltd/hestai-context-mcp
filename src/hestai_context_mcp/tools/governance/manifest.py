@@ -110,7 +110,10 @@ def build_manifest(working_dir: Path) -> str:
                 content = oct_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if not oct_file.name.endswith(".oct.md") and not has_yaml_decision_header(content):
+            if oct_file.name.endswith(".oct.md"):
+                if is_yaml_front_matter(content):
+                    continue  # strict pairing: ``.oct.md`` is OCTAVE-only
+            elif not has_yaml_decision_header(content):
                 continue
             key = _extract_token_or_id(content)
             if key:

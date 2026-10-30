@@ -128,6 +128,8 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
                 content = oct_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            if is_yaml_front_matter(content):
+                continue  # strict pairing: ``.oct.md`` declares tokens only as OCTAVE
             if declares_token(content, token):
                 return True
         if root != decisions_root:

@@ -193,17 +193,25 @@ def _is_yaml_record_file(path: Path) -> bool:
         return False
 
 
+def _is_yaml_in_oct_md(path: Path) -> bool:
+    """True iff a ``.oct.md`` file holds YAML front matter (out of spec: never a record)."""
+    try:
+        return is_yaml_front_matter(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+
+
 def iter_record_paths(working_dir: Path) -> list[Path]:
     """Return every candidate record under ``.hestai/decisions/**`` (sorted, stable).
 
-    Every ``*.oct.md`` plus every other ``*.md`` that carries the YAML decision
+    Every OCTAVE ``*.oct.md`` (YAML front matter inside one is out of spec and ignored) plus every other ``*.md`` that carries the YAML decision
     header (so READMEs and other markdown are never misread as records). Honours
     both the §1.1 flat layout and ``<group>/`` sub-grouping. Read-only.
     """
     root = decisions_root(working_dir)
     if not root.exists():
         return []
-    paths = set(root.rglob("*.oct.md"))
+    paths = {p for p in root.rglob("*.oct.md") if not _is_yaml_in_oct_md(p)}
     paths.update(p for p in root.rglob("*.md") if _is_yaml_record_file(p))
     return sorted(paths)
 
@@ -242,7 +250,7 @@ def _is_decision_record_for_token(path: Path, token: str) -> bool:
         # Extension/syntax pairing: a plain ``.md`` resolves only YAML records.
         return is_yaml_front_matter(content) and extract_yaml_token(content) == token
     if is_yaml_front_matter(content):
-        return extract_yaml_token(content) == token
+        return False  # strict pairing: ``.oct.md`` is OCTAVE-only
     return _extract_token(content) == token
 
 
