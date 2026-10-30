@@ -18,9 +18,11 @@ from pathlib import Path
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     annotate_lines,
+    decode_record_text,
     extract_yaml_token,
     has_yaml_decision_header,
     is_yaml_front_matter,
+    yaml_record_is_parseable,
 )
 
 # Max characters assembled for the context budget (future Gate C backend).
@@ -138,10 +140,16 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
             if md_file.name.endswith(".oct.md"):
                 continue
             try:
-                content = md_file.read_text(encoding="utf-8", errors="replace")
+                content = decode_record_text(
+                    md_file.read_text(encoding="utf-8", errors="surrogateescape")
+                )
             except OSError:
                 continue
-            if has_yaml_decision_header(content) and declares_token(content, token):
+            if (
+                has_yaml_decision_header(content)
+                and declares_token(content, token)
+                and yaml_record_is_parseable(content)
+            ):
                 return True
 
     return False

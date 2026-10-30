@@ -23,6 +23,7 @@ from typing import Any
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     DecisionRecord,
+    decode_record_text,
     diagnose_yaml_record,
     extract_yaml_token,
     has_yaml_decision_header,
@@ -93,7 +94,9 @@ def parse_failure_detail(content: str) -> dict[str, Any] | None:
 def parse_failure_detail_for_path(path: Path) -> dict[str, Any] | None:
     """:func:`parse_failure_detail` for a file (``None`` if it cannot be read)."""
     try:
-        return parse_failure_detail(path.read_text(encoding="utf-8", errors="replace"))
+        return parse_failure_detail(
+            decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
+        )
     except OSError:
         return None
 
@@ -188,7 +191,9 @@ def _is_yaml_record_file(path: Path) -> bool:
     if path.name.endswith(".oct.md") or not path.is_file():
         return False
     try:
-        return has_yaml_decision_header(path.read_text(encoding="utf-8", errors="replace"))
+        return has_yaml_decision_header(
+            decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
+        )
     except OSError:
         return False
 
@@ -196,7 +201,9 @@ def _is_yaml_record_file(path: Path) -> bool:
 def _is_yaml_in_oct_md(path: Path) -> bool:
     """True iff a ``.oct.md`` file holds YAML front matter (out of spec: never a record)."""
     try:
-        return is_yaml_front_matter(path.read_text(encoding="utf-8", errors="replace"))
+        return is_yaml_front_matter(
+            decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
+        )
     except OSError:
         return False
 
@@ -241,7 +248,7 @@ def _is_decision_record_for_token(path: Path, token: str) -> bool:
     filename drifted from its TOKEN must still resolve by content. Read-only.
     """
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
     except OSError:
         return False
     if not is_decision_record(content):
@@ -263,7 +270,7 @@ def _is_unextractable_yaml_candidate(path: Path) -> bool:
     record whose token IS readable but differs from the filename never matches here.
     """
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
     except OSError:
         return False
     return has_yaml_decision_header(content) and extract_yaml_token(content) is None
@@ -323,7 +330,7 @@ def discover_record(working_dir: Path, token: str) -> Path | None:
 
 def load_parsed(path: Path) -> DecisionRecord:
     """Read + parse a record file into a structured dict (pure read)."""
-    content = path.read_text(encoding="utf-8", errors="replace")
+    content = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
     return parse_decision_record(content)
 
 
@@ -338,7 +345,7 @@ def classify_file(path: Path) -> tuple[bool, DecisionRecord]:
 
     Reads the file a single time so type-membership and field-parse share one IO.
     """
-    content = path.read_text(encoding="utf-8", errors="replace")
+    content = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
     return is_decision_record(content), parse_decision_record(content)
 
 
@@ -362,7 +369,7 @@ def derive_supersession(working_dir: Path) -> dict[str, list[str]]:
         if path.name.endswith(".oct.md") or not path.is_file():
             continue
         try:
-            content = path.read_text(encoding="utf-8", errors="replace")
+            content = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
         except OSError:
             continue
         if not is_yaml_front_matter(content):
@@ -376,6 +383,8 @@ def derive_supersession(working_dir: Path) -> dict[str, list[str]]:
             continue  # discover_record could never resolve such a successor
         if parsed["status"] not in _EDGE_SOURCE_STATUSES:
             continue
+        if discover_record(working_dir, deriver) != path:
+            continue  # the deriver's TOKEN resolves to a different file: no false edge
         for target in parse_supersedes_list(raw):
             edges.setdefault(target, set()).add(deriver)
     return {target: sorted(derivers) for target, derivers in sorted(edges.items())}
@@ -491,7 +500,7 @@ def walk_supersession_chain(
             }
 
         try:
-            content = path.read_text(encoding="utf-8", errors="replace")
+            content = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
         except OSError:
             # Unreadable mid-walk (permissions, deleted after discovery): stop with the
             # same structured outcome as a rejected record rather than raising.

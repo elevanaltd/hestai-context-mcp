@@ -18,9 +18,11 @@ from pathlib import Path
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     TOKEN_FORMAT_PATTERN,
+    decode_record_text,
     extract_yaml_token,
     has_yaml_decision_header,
     is_yaml_front_matter,
+    yaml_record_is_parseable,
 )
 
 # Regex to extract TOKEN from DECISION_RECORD (quoted form).
@@ -107,14 +109,15 @@ def build_manifest(working_dir: Path) -> str:
             if not oct_file.is_file():
                 continue
             try:
-                content = oct_file.read_text(encoding="utf-8", errors="replace")
+                raw = oct_file.read_text(encoding="utf-8", errors="surrogateescape")
             except OSError:
                 continue
+            content = decode_record_text(raw)
             if oct_file.name.endswith(".oct.md"):
                 if is_yaml_front_matter(content):
                     continue  # strict pairing: ``.oct.md`` is OCTAVE-only
-            elif not has_yaml_decision_header(content):
-                continue
+            elif not (has_yaml_decision_header(content) and yaml_record_is_parseable(content)):
+                continue  # YAML is indexed only if it parses (a rejected record is not "there")
             key = _extract_token_or_id(content)
             if key:
                 rel = oct_file.relative_to(working_dir)

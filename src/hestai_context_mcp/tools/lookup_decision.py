@@ -16,6 +16,7 @@ from typing import Any
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     collect_topic_blocks,
+    decode_record_text,
     parse_decision_record,
 )
 from hestai_context_mcp.tools.governance import agr_read
@@ -117,7 +118,7 @@ def lookup_decision(
     # from the same text (consistent snapshot). A read failure maps to the
     # §3.1.1 envelope rather than escaping as an exception.
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
     except OSError as exc:
         return agr_read.error_envelope(
             code="RECORD_PARSE_FAILED",

@@ -474,6 +474,40 @@ def _decode_escape(text: str, i: int, out: list[str]) -> int:
     return i + 6
 
 
+def decode_record_text(text: str) -> str:
+    """Normalise text read with ``errors="surrogateescape"`` for a record file.
+
+    OCTAVE keeps its historical ``errors="replace"`` semantics (invalid bytes become
+    U+FFFD). A file that opens with a ``---`` fence (optionally after a BOM) is YAML:
+    invalid UTF-8 bytes stay lone surrogates so the strict parser rejects them loudly as
+    ``invalid_utf8`` instead of silently substituting. The candidacy header is ASCII, so
+    a YAML candidate is still recognised. Pure.
+    """
+    if text.removeprefix(_BOM).startswith(_YAML_FENCE):
+        return text
+    return text.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+
+
+def decode_record_bytes(data: bytes) -> str:
+    """:func:`decode_record_text` for raw bytes."""
+    return decode_record_text(data.decode("utf-8", errors="surrogateescape"))
+
+
+def yaml_record_is_parseable(text: str | None) -> bool:
+    """True iff ``text`` is a YAML record the strict subset accepts AND §1.2-complete.
+
+    Mirrors ``agr_read.record_is_parseable`` (VERSION is not required, as for OCTAVE);
+    lives here so the lexer/manifest can gate on it without importing ``tools.agr_read``.
+    """
+    if not text or not is_yaml_front_matter(text):
+        return False
+    parsed = parse_decision_record(text)
+    if parsed["type"] != "DECISION_RECORD":
+        return False
+    required = ("token", "status", "tier", "decision", "because", "authored_at")
+    return all(parsed[k] is not None for k in required)  # type: ignore[literal-required]
+
+
 def _split_yaml_lines(text: str) -> list[str]:
     """Split on LF only (tolerating CRLF); exotic Unicode separators stay inside values."""
     return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
@@ -651,6 +685,8 @@ def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
         if not line.strip():
             continue
         try:
+            if any(0xD800 <= ord(ch) <= 0xDFFF for ch in line):
+                raise YamlSyntaxError("invalid_utf8")
             if state.name is not None and line[:1] in (" ", "\t"):
                 _check_block_line(state, line)
                 continue
