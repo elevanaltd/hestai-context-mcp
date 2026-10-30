@@ -18,10 +18,10 @@ from pathlib import Path
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     TOKEN_FORMAT_PATTERN,
-    decode_record_text,
     extract_yaml_token,
     has_yaml_decision_header,
     is_yaml_front_matter,
+    read_record,
     yaml_record_is_parseable,
 )
 
@@ -109,10 +109,10 @@ def build_manifest(working_dir: Path) -> str:
             if not oct_file.is_file():
                 continue
             try:
-                raw = oct_file.read_text(encoding="utf-8", errors="surrogateescape")
+                raw = read_record(oct_file)
             except OSError:
                 continue
-            content = decode_record_text(raw)
+            content = raw.text
             if oct_file.name.endswith(".oct.md"):
                 if is_yaml_front_matter(content):
                     continue  # strict pairing: ``.oct.md`` is OCTAVE-only

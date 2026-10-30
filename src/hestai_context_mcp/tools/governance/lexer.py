@@ -18,10 +18,10 @@ from pathlib import Path
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     annotate_lines,
-    decode_record_text,
     extract_yaml_token,
     has_yaml_decision_header,
     is_yaml_front_matter,
+    read_record,
     yaml_record_is_parseable,
 )
 
@@ -120,11 +120,11 @@ def _manifest_hit_is_trusted(working_dir: Path, token: str, rel: str) -> bool:
     exist and parse (a stale row must not satisfy Gate A's target check)."""
     if not rel.endswith(".md") or rel.endswith(".oct.md"):
         return True  # OCTAVE (and unknown) rows keep their pre-existing behaviour
-    path = (working_dir / rel).resolve()
     try:
+        path = (working_dir / rel).resolve()  # may raise on a symlink loop
         path.relative_to(working_dir.resolve())
-        content = decode_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
-    except (OSError, ValueError):
+        content = read_record(path).text
+    except (OSError, ValueError, RuntimeError):
         return False
     return (
         has_yaml_decision_header(content)
@@ -162,7 +162,7 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
             continue
         for oct_file in root.rglob("*.oct.md"):
             try:
-                content = oct_file.read_text(encoding="utf-8", errors="replace")
+                content = read_record(oct_file).text
             except OSError:
                 continue
             if is_yaml_front_matter(content):
@@ -175,9 +175,7 @@ def _search_filesystem(working_dir: Path, token: str) -> bool:
             if md_file.name.endswith(".oct.md"):
                 continue
             try:
-                content = decode_record_text(
-                    md_file.read_text(encoding="utf-8", errors="surrogateescape")
-                )
+                content = read_record(md_file).text
             except OSError:
                 continue
             if (
@@ -252,7 +250,7 @@ def assemble_context(working_dir: Path) -> str:
             if total >= _CONTEXT_BUDGET_CHARS:
                 break
             try:
-                content = oct_file.read_text(encoding="utf-8", errors="replace")
+                content = read_record(oct_file).text
             except OSError:
                 continue
             remaining = _CONTEXT_BUDGET_CHARS - total

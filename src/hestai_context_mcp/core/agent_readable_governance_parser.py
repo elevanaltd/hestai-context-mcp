@@ -60,10 +60,12 @@ in a block) yields the empty (unparseable) record, never a half-read one;
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from collections.abc import Iterator
-from typing import TypedDict
+from pathlib import Path
+from typing import NamedTuple, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -474,23 +476,50 @@ def _decode_escape(text: str, i: int, out: list[str]) -> int:
     return i + 6
 
 
-def decode_record_text(text: str) -> str:
-    """Normalise text read with ``errors="surrogateescape"`` for a record file.
+class RecordText(NamedTuple):
+    """Result of :func:`classify_record_text`: the one normalised view every reader uses."""
 
-    OCTAVE keeps its historical ``errors="replace"`` semantics (invalid bytes become
-    U+FFFD). A file that opens with a ``---`` fence (optionally after a BOM) is YAML:
-    invalid UTF-8 bytes stay lone surrogates so the strict parser rejects them loudly as
-    ``invalid_utf8`` instead of silently substituting. The candidacy header is ASCII, so
-    a YAML candidate is still recognised. Pure.
+    syntax: str  # "yaml" | "octave"
+    text: str
+    diagnostic: YamlReject | None
+
+
+def classify_record_text(raw: bytes | str) -> RecordText:
+    """The single canonical entry step for record input (pure, regex-only).
+
+    * Syntax by EXACT first line: ``---`` (optionally followed by ``\\r``, after an
+      optional BOM) is a YAML candidate; anything else is OCTAVE.
+    * OCTAVE: decoded with ``errors="replace"`` exactly as before PR-4, text otherwise
+      untouched (a BOM is kept, so OCTAVE behaviour is identical to main).
+    * YAML: decoded strictly (invalid bytes stay lone surrogates and are reported as
+      ``invalid_utf8`` when inside the fences), CRLF folded to LF, and a leading BOM
+      is a loud ``invalid_key`` reject at line 1 (the BOM is kept in ``text`` so every
+      downstream reader sees the same rejection). A YAML candidate is never parsed as
+      OCTAVE: it is parsed as YAML or carries a ``diagnostic``.
     """
-    if text.removeprefix(_BOM).startswith(_YAML_FENCE):
-        return text
-    return text.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    if isinstance(raw, bytes):
+        body = raw.removeprefix(_BOM.encode("utf-8"))
+        if body.partition(b"\n")[0].rstrip(b"\r") != _YAML_FENCE.encode("ascii"):
+            return RecordText("octave", raw.decode("utf-8", errors="replace"), None)
+        text = raw.decode("utf-8", errors="surrogateescape")
+    else:
+        text = raw
+        if not is_yaml_front_matter(text):
+            with contextlib.suppress(UnicodeEncodeError):  # already-clean str passes through
+                text = text.encode("utf-8", errors="surrogateescape").decode("utf-8", "replace")
+            return RecordText("octave", text, None)
+    text = text.replace("\r\n", "\n")
+    return RecordText("yaml", text, diagnose_yaml_record(text))
+
+
+def read_record(path: Path) -> RecordText:
+    """Read ``path`` and classify it (the one I/O entry; raises ``OSError`` like ``read_text``)."""
+    return classify_record_text(path.read_text(encoding="utf-8", errors="surrogateescape"))
 
 
 def decode_record_bytes(data: bytes) -> str:
-    """:func:`decode_record_text` for raw bytes."""
-    return decode_record_text(data.decode("utf-8", errors="surrogateescape"))
+    """The normalised text of raw record bytes (see :func:`classify_record_text`)."""
+    return classify_record_text(data).text
 
 
 def yaml_record_is_parseable(text: str | None) -> bool:
@@ -515,9 +544,9 @@ def _split_yaml_lines(text: str) -> list[str]:
 
 def _yaml_opening_lines(text: str) -> list[str] | None:
     """Lines after an opening ``---`` up to the closing fence (or EOF if unclosed)."""
-    lines = _split_yaml_lines(text)
-    if lines[0].rstrip() != _YAML_FENCE:
+    if not is_yaml_front_matter(text):
         return None
+    lines = _split_yaml_lines(text.removeprefix(_BOM))
     body: list[str] = []
     for line in lines[1:]:
         if line.rstrip() == _YAML_FENCE:
@@ -527,8 +556,8 @@ def _yaml_opening_lines(text: str) -> list[str] | None:
 
 
 def is_yaml_front_matter(text: str | None) -> bool:
-    """True iff ``text`` opens with a ``---`` fence line (YAML-syntax record)."""
-    return bool(text) and _split_yaml_lines(text or "")[0].rstrip() == _YAML_FENCE
+    """True iff the first line (after an optional BOM) is exactly ``---`` (+ optional CR)."""
+    return bool(text) and text.removeprefix(_BOM).partition("\n")[0].rstrip("\r") == _YAML_FENCE  # type: ignore[union-attr]
 
 
 def has_yaml_decision_header(text: str | None) -> bool:
@@ -543,7 +572,7 @@ def has_yaml_decision_header(text: str | None) -> bool:
         return False
     # A leading UTF-8 BOM still makes the file a candidate (it is then rejected loudly
     # by ``diagnose_yaml_record``, never silently treated as a non-record).
-    fenced = _yaml_opening_lines(text.removeprefix(_BOM))
+    fenced = _yaml_opening_lines(text)
     return fenced is not None and any(_YAML_TYPE_LINE_RE.match(line) for line in fenced)
 
 
@@ -736,22 +765,20 @@ def diagnose_yaml_record(text: str | None) -> YamlReject | None:
 
     ``None`` for OCTAVE text and for a YAML record the strict subset accepts
     (whether it is then COMPLETE is a separate §1.2 required-field question).
-    Pure; ``line`` is 1-based in ``text``. A candidate that starts with a UTF-8 BOM is
-    rejected at line 1 with the existing construct ``invalid_key`` (line 1 is not a fence).
+    Pure; ``line`` is 1-based. A leading BOM is rejected at line 1 as ``invalid_key``.
     """
-    if not text:
+    if not text or not is_yaml_front_matter(text):
         return None
     if text.startswith(_BOM):
-        return {"line": 1, "construct": "invalid_key"} if has_yaml_decision_header(text) else None
-    if not is_yaml_front_matter(text):
-        return None
+        return {"line": 1, "construct": "invalid_key"}
     return _parse_yaml(text)[1]
 
 
 def _parse_impl(text: str) -> DecisionRecord:
     """Internal regex-only extraction (raises only on truly unexpected input)."""
     if is_yaml_front_matter(text):
-        yaml_parsed = _parse_yaml(text)[0]
+        # A YAML candidate is parsed as YAML or rejected (BOM included); never as OCTAVE.
+        yaml_parsed = None if text.startswith(_BOM) else _parse_yaml(text)[0]
         return yaml_parsed if yaml_parsed is not None else _empty_record()
 
     core: dict[str, str] = {}
