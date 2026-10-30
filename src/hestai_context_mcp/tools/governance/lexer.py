@@ -58,7 +58,7 @@ def declares_token(content: str, token: str) -> bool:
     Pure; regex only.
     """
     if is_yaml_front_matter(content):
-        return extract_yaml_token(content) == token
+        return has_yaml_decision_header(content) and extract_yaml_token(content) == token
     top_level = "".join(line for block, line in annotate_lines(content) if block is None)
     pattern = re.compile(_FIELD_EXACT_RE_TEMPLATE.format(token=re.escape(token)))
     return pattern.search(top_level) is not None

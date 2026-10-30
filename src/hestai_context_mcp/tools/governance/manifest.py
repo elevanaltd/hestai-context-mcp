@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
+    TOKEN_FORMAT_PATTERN,
     extract_yaml_token,
     has_yaml_decision_header,
     is_yaml_front_matter,
@@ -42,6 +43,9 @@ _ID_RE = re.compile(r'(?m)^  ID::"([^"]+)"\s*$')
 _ID_BARE_RE = re.compile(r"(?m)^  ID::([A-Z][A-Z0-9_]{2,127})\s*$")
 
 
+_YAML_TOKEN_OK = re.compile(TOKEN_FORMAT_PATTERN)
+
+
 def _extract_token_or_id(content: str) -> str | None:
     """Extract TOKEN or ID from raw oct.md content using regex.
 
@@ -51,7 +55,12 @@ def _extract_token_or_id(content: str) -> str | None:
     Returns the extracted value or None if neither found.
     """
     if is_yaml_front_matter(content):
-        return extract_yaml_token(content) if has_yaml_decision_header(content) else None
+        if not has_yaml_decision_header(content):
+            return None
+        token = extract_yaml_token(content)
+        # Only a well-formed §1.3 TOKEN is indexed: a raw value is interpolated into a
+        # pipe-delimited table row, so a '|' (or any malformed token) must never get in.
+        return token if token is not None and _YAML_TOKEN_OK.fullmatch(token) else None
 
     m = _TOKEN_RE.search(content)
     if m:

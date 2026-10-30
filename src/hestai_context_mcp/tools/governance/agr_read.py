@@ -238,6 +238,9 @@ def _is_decision_record_for_token(path: Path, token: str) -> bool:
         return False
     if not is_decision_record(content):
         return False
+    if path.name.endswith(".md") and not path.name.endswith(".oct.md"):
+        # Extension/syntax pairing: a plain ``.md`` resolves only YAML records.
+        return is_yaml_front_matter(content) and extract_yaml_token(content) == token
     if is_yaml_front_matter(content):
         return extract_yaml_token(content) == token
     return _extract_token(content) == token
