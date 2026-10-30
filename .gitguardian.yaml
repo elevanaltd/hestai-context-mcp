@@ -26,6 +26,8 @@ secret:
       match: "HO-ESCAPES-20261029"
     - name: "Fake governance TOKEN fixture (YAML record parser tests)"
       match: "HO-BODY-20260101"
+    - name: "Fake governance TOKEN fixture (YAML cubic-fix tests)"
+      match: "HO-CUBIC-NOTYPE-20261029"
     - name: "Fake GitHub PAT fixture (token-shape validation test)"
       match: "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   # Defense-in-depth: the two governance test modules only ever hold
