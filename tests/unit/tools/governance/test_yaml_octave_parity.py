@@ -225,14 +225,13 @@ def test_supersedes_derived_chain_equals_the_explicit_octave_chain(
 
     derived = tmp_path_factory.mktemp("derived")
     write_record(derived, token=OLD, authored_at="2026-01-01T00:00:00Z")  # frozen: RATIFIED on disk
-    write_record(derived, token=MID, authored_at="2026-02-01T00:00:00Z")  # frozen: RATIFIED on disk
-    write_yaml_record(
-        derived, token=NEW, authored_at="2026-03-01T00:00:00Z", supersedes=f"{OLD},{MID}"
-    )
+    write_yaml_record(derived, token=MID, authored_at="2026-02-01T00:00:00Z", supersedes=OLD)
+    write_yaml_record(derived, token=NEW, authored_at="2026-03-01T00:00:00Z", supersedes=MID)
 
-    # Both corpora walk MID -> NEW; compare that hop entry by entry.
-    explicit_trace = trace_supersedure(str(explicit), MID)
-    derived_trace = trace_supersedure(str(derived), MID)
-    assert _scrub(derived_trace["chain"]) == _scrub(explicit_trace["chain"])
-    assert derived_trace["terminal_token"] == explicit_trace["terminal_token"]
-    assert derived_trace["terminal_status"] == explicit_trace["terminal_status"]
+    # OLD -> MID -> NEW in both corpora: every starting point traces identically.
+    for start in (OLD, MID, NEW):
+        explicit_trace = trace_supersedure(str(explicit), start)
+        derived_trace = trace_supersedure(str(derived), start)
+        assert _scrub(derived_trace["chain"]) == _scrub(explicit_trace["chain"]), start
+        assert derived_trace["terminal_token"] == explicit_trace["terminal_token"] == NEW
+        assert derived_trace["terminal_status"] == explicit_trace["terminal_status"]

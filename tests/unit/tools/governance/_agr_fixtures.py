@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hestai_context_mcp.core.agent_readable_governance_parser import encode_yaml_scalar
+
 # Non-secret governance identifiers used across the read-side suite.
 TOKEN_RATIFIED = "HO-CONTEXT-MCP-DOGFOOD-RATIFIED-20260601"
 TOKEN_OLD = "HO-CONTEXT-MCP-CHAIN-OLD-20260101"
@@ -215,8 +217,8 @@ def snapshot_tree(working_dir: Path) -> dict[str, tuple[float, int]]:
 
 
 def yaml_quote(value: str) -> str:
-    """Quote ``value`` for the one-line double-quoted YAML subset (``\\"`` and ``\\\\`` only)."""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """Quote ``value`` with the parser's canonical encoder (valid for control characters too)."""
+    return encode_yaml_scalar(value)
 
 
 def yaml_record_text(
@@ -276,7 +278,8 @@ def write_yaml_record(
         root = root / group
         root.mkdir(parents=True, exist_ok=True)
     path = root / (filename or f"{token}.md")
-    path.write_text(yaml_record_text(token=token, **kwargs), encoding="utf-8")
+    # newline="" so an explicit ``eol="\r\n"`` reaches the disk unchanged.
+    path.write_text(yaml_record_text(token=token, **kwargs), encoding="utf-8", newline="")
     return path
 
 
