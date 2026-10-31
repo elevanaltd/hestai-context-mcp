@@ -150,6 +150,31 @@ class TestVerdicts:
         assert result["verdict"] == "CONCERNS"
         assert result["fidelity_pairs"] == ["R4"]
 
+    async def test_approved_without_a_concerns_line_fails_closed(self, install) -> None:
+        install(_Stub("VERDICT::APPROVED\nASSESSMENT::looks fine\n"))
+        result = await review_ruling_fidelity(_PAIRS)
+        assert result["verdict"] == "CONCERNS"
+        assert result["fidelity_pairs"] == ["R4", "R5"]
+        assert any("CONCERNS::[]" in c for c in result["concerns"])
+
+    @pytest.mark.parametrize("block", ["[;]", "[ ; ]", "[\n;\n]"])
+    async def test_approved_with_a_separator_only_concerns_block_fails_closed(
+        self, install, block: str
+    ) -> None:
+        install(_Stub(f"VERDICT::APPROVED\nASSESSMENT::x\nCONCERNS::{block}\n"))
+        result = await review_ruling_fidelity(_PAIRS)
+        assert result["verdict"] == "CONCERNS"
+        assert result["fidelity_pairs"] == ["R4", "R5"]
+
+    @pytest.mark.parametrize("block", ["[]", "[   ]", "[\n]"])
+    async def test_approved_with_a_whitespace_only_concerns_block_is_approved(
+        self, install, block: str
+    ) -> None:
+        install(_Stub(f"VERDICT::APPROVED\nASSESSMENT::x\nCONCERNS::{block}\n"))
+        result = await review_ruling_fidelity(_PAIRS)
+        assert result["verdict"] == "APPROVED"
+        assert result["fidelity_pairs"] == []
+
     async def test_unparseable_response_is_concerns(self, install) -> None:
         install(_Stub("I think it is fine."))
         result = await review_ruling_fidelity(_PAIRS)
