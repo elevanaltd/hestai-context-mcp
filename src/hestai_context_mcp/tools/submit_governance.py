@@ -36,6 +36,7 @@ from hestai_context_mcp.core.governance_reviewer import review_governance
 from hestai_context_mcp.core.intake_pipeline import run_intake_to_pr
 from hestai_context_mcp.ports.octave_validator import (
     OctaveValidationResult,
+    UnavailableOctaveValidator,
     fail_closed_error_message,
     get_octave_validator,
 )
@@ -456,7 +457,12 @@ async def _submit_octave_content(
             return _empty_result(
                 dry_run, ["Internal error: Gate A produced no canonical bytes for a YAML record."]
             )
-        return await _link_and_report(wd, validation, yaml_text, dry_run, review, None, True, loop)
+        # The signal is the ACTUAL availability of the optional validator, computed as for
+        # OCTAVE (the port's ``available``), though the validator is not run on YAML.
+        real_available = not isinstance(get_octave_validator(), UnavailableOctaveValidator)
+        return await _link_and_report(
+            wd, validation, yaml_text, dry_run, review, None, real_available, loop
+        )
 
     # --- Gate B: REAL OCTAVE validation (in-process library behind the port) ---
     # octave-mcp's real validator runs here, ADDITIVE to the regex Gate A above.
