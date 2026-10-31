@@ -865,11 +865,11 @@ async def _submit_append_ruling(
         to_record_hash=record_hash(rendered.encode("utf-8")),
     )
 
-    # --- Gate A on the rendered bytes. existing_record=True is passed ONLY here: it
-    #     skips the "already exists" check (the TOKEN exists by definition) and
-    #     nothing else. Gate B is OCTAVE-only and is not applied to YAML. ---
+    # --- Gate A on the rendered bytes. existing_record is passed ONLY here: the path
+    #     being rewritten may be the TOKEN's one store match, and any other match
+    #     still fails. Gate B is OCTAVE-only and is not applied to YAML. ---
     validation = await loop.run_in_executor(
-        None, partial(validate_record_content, wd, rendered, existing_record=True)
+        None, partial(validate_record_content, wd, rendered, existing_record=wd / base.path)
     )
     errors = list(validation.errors)
     if validation.valid and validation.canonical_content != rendered:
