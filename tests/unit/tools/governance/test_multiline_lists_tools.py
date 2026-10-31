@@ -19,7 +19,7 @@ from hestai_context_mcp.tools.list_decisions import list_decisions
 from hestai_context_mcp.tools.lookup_decision import lookup_decision
 from hestai_context_mcp.tools.trace_supersedure import trace_supersedure
 
-from ._agr_fixtures import TOKEN_NEW, TOKEN_OLD, write_record
+from ._agr_fixtures import TOKEN_NEW, TOKEN_OLD, write_record, write_yaml_record
 
 _WRAPPED_SUCCESSOR = [f"  SUPERSEDED_BY::[\n    {TOKEN_NEW}\n  ]"]
 _UNTERMINATED = ["  AFFECTS::[", "    A,", "    B", "  SCOPE::PROD"]
@@ -293,3 +293,121 @@ def test_gate_a_reports_only_the_list_error_for_an_unterminated_superseded_by(
     assert not result.valid
     assert any("unterminated_list" in e for e in result.errors), result.errors
     assert not any("target '['" in e for e in result.errors), result.errors
+
+
+# --- #229 rework round 1 (cubic) -------------------------------------------------------------
+
+_ABSENT = "HO-ESCAPES-20261029"
+_OTHER = "HO-CUBIC-T-20260301"
+
+
+def _superseded_record(body: str) -> str:
+    head = _GATE_A_HEAD.replace("STATUS::PROPOSED", "STATUS::SUPERSEDED")
+    return head + body + "===END===\n"
+
+
+def test_empty_superseded_by_list_plus_a_derived_edge_still_navigates(tmp_path: Path) -> None:
+    """K1: ``[]`` names no successor; the derived YAML edge is the only one and is followed."""
+    write_record(
+        tmp_path,
+        token=TOKEN_OLD,
+        status="SUPERSEDED",
+        authored_at="2026-01-01T00:00:00Z",
+        extra_lines=["  SUPERSEDED_BY::[]"],
+    )
+    write_yaml_record(tmp_path, token=TOKEN_NEW, supersedes=TOKEN_OLD)
+    traced = trace_supersedure(str(tmp_path), TOKEN_OLD)
+    assert traced["ok"] is True, traced
+    assert [e["token"] for e in traced["chain"]] == [TOKEN_OLD, TOKEN_NEW]
+
+
+def test_duplicate_single_line_items_plus_the_same_derived_edge_navigate(tmp_path: Path) -> None:
+    write_record(
+        tmp_path,
+        token=TOKEN_OLD,
+        status="SUPERSEDED",
+        authored_at="2026-01-01T00:00:00Z",
+        extra_lines=[f"  SUPERSEDED_BY::[{TOKEN_NEW},{TOKEN_NEW}]"],
+    )
+    write_yaml_record(tmp_path, token=TOKEN_NEW, supersedes=TOKEN_OLD)
+    traced = trace_supersedure(str(tmp_path), TOKEN_OLD)
+    assert traced["ok"] is True, traced
+    assert [e["token"] for e in traced["chain"]] == [TOKEN_OLD, TOKEN_NEW]
+
+
+def test_gate_a_rejects_a_wrapped_superseded_by_naming_an_absent_successor(
+    tmp_path: Path,
+) -> None:
+    """K3."""
+    result = validate_octave_content(
+        tmp_path, _superseded_record(f"  SUPERSEDED_BY::[\n    {_ABSENT}\n  ]\n")
+    )
+    assert result.valid is False
+    assert any(f"target '{_ABSENT}' not found" in e for e in result.errors), result.errors
+
+
+def test_gate_a_checks_every_target_of_a_spaced_single_line_list(tmp_path: Path) -> None:
+    """K4: ``[A, B]`` with a space is a list; its absent member is reported."""
+    write_record(tmp_path, token=_OTHER, authored_at="2026-03-01T00:00:00Z")
+    result = validate_octave_content(
+        tmp_path, _superseded_record(f"  SUPERSEDED_BY::[{_OTHER}, {_ABSENT}]\n")
+    )
+    assert result.valid is False
+    assert any(f"target '{_ABSENT}' not found" in e for e in result.errors), result.errors
+    assert not any("SUPERSEDED_BY is absent" in e for e in result.errors), result.errors
+
+
+def test_gate_a_still_checks_superseded_by_when_an_unrelated_list_is_unterminated(
+    tmp_path: Path,
+) -> None:
+    """K6: only SUPERSEDED_BY's OWN unterminated list suppresses the target check."""
+    body = f"  SUPERSEDED_BY::[\n    {_ABSENT}\n  ]\n  AFFECTS::[\n    A,\n"
+    result = validate_octave_content(tmp_path, _superseded_record(body))
+    assert result.valid is False
+    assert any("unterminated_list" in e for e in result.errors), result.errors
+    assert any(f"target '{_ABSENT}' not found" in e for e in result.errors), result.errors
+
+
+# --- K2 (HC ruling): a SUPERSEDED_BY list with more than one DISTINCT item is rejected on write
+
+
+def _seed_two_successors(root: Path) -> None:
+    write_record(root, token=TOKEN_NEW, authored_at="2026-03-01T00:00:00Z")
+    write_record(root, token=_OTHER, authored_at="2026-03-01T00:00:00Z")
+
+
+def test_gate_a_rejects_two_distinct_superseded_by_items(tmp_path: Path) -> None:
+    _seed_two_successors(tmp_path)
+    for body in (
+        f"  SUPERSEDED_BY::[{TOKEN_NEW},{_OTHER}]\n",
+        f"  SUPERSEDED_BY::[\n    {TOKEN_NEW},\n    {_OTHER}\n  ]\n",
+    ):
+        result = validate_octave_content(tmp_path, _superseded_record(body))
+        assert result.valid is False, body
+        assert any("SUPERSEDED_BY" in e and "§4.1 #8" in e for e in result.errors), result.errors
+
+
+def test_gate_a_accepts_a_one_item_superseded_by_list_like_a_bare_token(tmp_path: Path) -> None:
+    _seed_two_successors(tmp_path)
+    for body in (
+        f"  SUPERSEDED_BY::[{TOKEN_NEW}]\n",
+        f"  SUPERSEDED_BY::[\n    {TOKEN_NEW}\n  ]\n",
+        f"  SUPERSEDED_BY::{TOKEN_NEW}\n",
+    ):
+        result = validate_octave_content(tmp_path, _superseded_record(body))
+        assert result.valid, (body, result.errors)
+
+
+def test_gate_a_accepts_duplicate_superseded_by_items_as_one(tmp_path: Path) -> None:
+    _seed_two_successors(tmp_path)
+    for body in (
+        f"  SUPERSEDED_BY::[{TOKEN_NEW}, {TOKEN_NEW}]\n",
+        f"  SUPERSEDED_BY::[\n    {TOKEN_NEW},\n    {TOKEN_NEW}\n  ]\n",
+    ):
+        result = validate_octave_content(tmp_path, _superseded_record(body))
+        assert result.valid, (body, result.errors)
+
+
+# The reader still reports a fork on read for a record that arrived other than through
+# Gate A: see test_two_wrapped_successors_are_a_fork_not_a_pick and
+# test_single_line_two_item_superseded_by_is_a_fork above.
