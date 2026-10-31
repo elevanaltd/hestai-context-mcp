@@ -1067,7 +1067,9 @@ def _validate_impl(
 # ---------------------------------------------------------------------------
 
 
-def validate_record_content(working_dir: Path, content: str) -> ValidationResult:
+def validate_record_content(
+    working_dir: Path, content: str, *, existing_record: bool = False
+) -> ValidationResult:
     """The syntax seam: classify ``content`` once, then run the matching Gate A branch.
 
     A quoted-YAML record (first line ``---``, ADR-RFC-ARCH-004 §1.1) is judged by
@@ -1080,6 +1082,11 @@ def validate_record_content(working_dir: Path, content: str) -> ValidationResult
     prose-mode-emits-YAML change can reuse :func:`decision_record_path` and
     ``ValidationResult.syntax``.
 
+    ``existing_record`` (#203 S2) is for the append_ruling path ONLY, which rewrites a
+    record that is already in the store: it skips the YAML branch's "already exists"
+    check and its file-exists sibling, nothing else. The OCTAVE branch ignores it.
+    Content mode never passes it, so a new record still needs an unused TOKEN.
+
     Never raises on bad input. Always returns a ValidationResult.
     """
     record = classify_record_text(content)
@@ -1088,7 +1095,9 @@ def validate_record_content(working_dir: Path, content: str) -> ValidationResult
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        return _validate_yaml_impl(working_dir, record, content, errors, warnings)
+        return _validate_yaml_impl(
+            working_dir, record, content, errors, warnings, existing_record=existing_record
+        )
     except Exception as exc:  # noqa: BLE001
         errors.append(f"Unexpected validation error: {exc}")
         return ValidationResult(valid=False, errors=errors, warnings=warnings, syntax="yaml")
@@ -1113,6 +1122,8 @@ def _validate_yaml_impl(
     raw_content: str,
     errors: list[str],
     warnings: list[str],
+    *,
+    existing_record: bool = False,
 ) -> ValidationResult:
     """Gate A for a quoted-YAML DECISION_RECORD (reader errors + the shared invariants)."""
     if record.diagnostic is not None:
@@ -1193,7 +1204,10 @@ def _validate_yaml_impl(
         _check_issue_ref_shape(fields["ISSUE_REF"], errors)
 
     # --- TOKEN uniqueness ACROSS .oct.md and .md (§4.1 #4) ---
-    if lookup_token_deterministic(working_dir, token):
+    # Skipped ONLY for an append_ruling rewrite of a record already in the store.
+    if existing_record:
+        pass
+    elif lookup_token_deterministic(working_dir, token):
         errors.append(
             f"TOKEN/ID '{token}' already exists in the governance store. "
             "Duplicate tokens are not allowed for new records."
