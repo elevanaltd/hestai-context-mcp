@@ -110,6 +110,34 @@ def test_a_wrapped_edge_field_reads_like_any_other_list() -> None:
     assert fields["AMENDS"] == "[HO-CUBIC-T-20260301,HO-ESCAPES-20261029]"
 
 
+def test_an_empty_wrapped_list_reads_as_the_empty_list() -> None:
+    assert _fields("  AFFECTS::[\n  ]\n")["AFFECTS"] == "[]"
+
+
+def test_nested_brackets_are_kept_inside_their_item() -> None:
+    assert _fields("  AFFECTS::[\n    A,\n    [B, C],\n    D\n  ]\n")["AFFECTS"] == "[A,[B, C],D]"
+
+
+def test_comment_lines_inside_a_wrapped_list_are_ignored() -> None:
+    fields = _fields("  AFFECTS::[\n    A,\n    // a note\n    B\n  ]\n")
+    assert fields["AFFECTS"] == "[A,B]"
+
+
+def test_crlf_line_endings_read_the_same() -> None:
+    text = _record("  AFFECTS::[\n    A,\n    B\n  ]\n").replace("\n", "\r\n")
+    assert parse_decision_record(text)["fields"]["AFFECTS"] == "[A,B]"
+
+
+def test_first_occurrence_of_a_key_wins_for_wrapped_lists_too() -> None:
+    middle = "  AFFECTS::[\n    A\n  ]\n  AFFECTS::[\n    B\n  ]\n"
+    assert _fields(middle)["AFFECTS"] == "[A]"
+
+
+def test_a_second_wrapped_list_is_still_checked_for_termination() -> None:
+    text = _record("  AFFECTS::[\n    A\n  ]\n  RELATED::[\n    B,\n")
+    assert parse_decision_record(text)["token"] is None
+
+
 # --- byte parity: records whose lists are single-line read as before ------------------
 
 

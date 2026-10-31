@@ -39,10 +39,42 @@ _LEGACY_FIELD_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]*)::(.*?)\s*$")
 _OPEN_LIST_LINE_RE = re.compile(r"^\s*[A-Z][A-Z0-9_]*::\[\s*$")
 
 
+_LEGACY_CORE_FIELDS = (
+    "TYPE",
+    "VERSION",
+    "TOKEN",
+    "STATUS",
+    "TIER",
+    "DECISION",
+    "BECAUSE",
+    "AUTHORED_AT",
+)
+
+
+def _legacy_strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+def _empty() -> DecisionRecord:
+    return {
+        "token": None,
+        "type": None,
+        "version": None,
+        "status": None,
+        "tier": None,
+        "decision": None,
+        "because": None,
+        "authored_at": None,
+        "fields": {},
+    }
+
+
 def _legacy_parse(text: str | None) -> DecisionRecord:
     """The reader as it was before #224: one ``KEY::value`` per line, other lines skipped."""
     if not text or not text.strip():
-        return parser._empty_record()  # noqa: SLF001
+        return _empty()
     if parser.is_yaml_front_matter(text):
         return parser.parse_decision_record(text)
     core: dict[str, str] = {}
@@ -53,8 +85,8 @@ def _legacy_parse(text: str | None) -> DecisionRecord:
         match = _LEGACY_FIELD_RE.match(raw_line)
         if not match:
             continue
-        key, value = match.group(1), parser._strip_quotes(match.group(2))  # noqa: SLF001
-        if key in parser._CORE_FIELDS:  # noqa: SLF001
+        key, value = match.group(1), _legacy_strip_quotes(match.group(2))
+        if key in _LEGACY_CORE_FIELDS:
             core.setdefault(key, value)
         else:
             extra.setdefault(key, value)
@@ -100,51 +132,102 @@ def test_corpus_split_is_non_trivial() -> None:
 
 # --- 5. the affected records read their lists in full ----------------------------------
 
-_EXPECTED_LISTS = {
-    "EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025": (
-        "RELATED_DECISIONS",
-        "[HO-GOVERNANCE-AMEND-IN-PLACE-20260926]",
-    ),
-    "HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724": (
-        "AFFECTS",
-        "[submit_governance,semantic_review,HESTAI_REVIEW_MAX_OUTPUT_TOKENS]",
-    ),
-    "HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921": (
-        "AFFECTS",
-        '[submit_governance,"tools/governance/linker.py","tools/governance/lexer.py",'
-        '"tools/governance/type_checker.py"]',
-    ),
-    "HO-RCCAFP-RECORDING-IN-CONTEXT-MCP-20260927": (
-        "AFFECTS",
-        '["submit_rccafp_record","hestai-context-mcp tool surface","HestAI-MCP#445",'
-        '"debate-hall-mcp#192","hestai-context-mcp#18"]',
-    ),
-    "HO-REVIEW-GATE-PIN-RELEASE-20261025": (
-        "AFFECTS",
-        '[".github/workflows/review-gate.yml","org ruleset 12626210",'
-        '"hestai-context-mcp#170","hestai-workbench","elevana-studio","HestAI-MCP"]',
-    ),
-    "HO-SR-APPROVED-WORDING-FIXES-PENDING-20261015": (
-        "AFFECTS",
-        "[submit_review,review_formats.format_review_comment,"
-        '"submit_governance Stage-5 verdict map","core/governance_reviewer.py",'
-        '"hestai-context-mcp#201",HO-AGR-SEMANTIC-REVIEWER-ANALYSIS-TIER-20260611]',
-    ),
-    "HO-TOPIC-RECORDS-YAML-SYNTAX-20261029": (
-        "AFFECTS",
-        '["submit_governance append_ruling","lookup_decision current_state",'
-        '"list_decisions topic filter","ADR-RFC-ARCH-004 topic-record section",'
-        '"hestai-context-mcp#203","EPIC4 PR-4 ∧ PR-5"]',
-    ),
+_EXPECTED_LISTS: dict[str, dict[str, str]] = {
+    "EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025": {
+        "RELATED_DECISIONS": "[HO-GOVERNANCE-AMEND-IN-PLACE-20260926]",
+    },
+    "HO-AGR-SEMANTIC-REVIEWER-ABSTAIN-ON-FAILURE-20260724": {
+        "AFFECTS": "[submit_governance,semantic_review,HESTAI_REVIEW_MAX_OUTPUT_TOKENS]",
+    },
+    "HO-GOVERNANCE-IN-FLIGHT-TOKEN-AMENDMENT-20260921": {
+        "AFFECTS": (
+            '[submit_governance,"tools/governance/linker.py","tools/governance/lexer.py",'
+            '"tools/governance/type_checker.py"]'
+        ),
+    },
+    "HO-RCCAFP-RECORDING-IN-CONTEXT-MCP-20260927": {
+        "AFFECTS": (
+            '["submit_rccafp_record","hestai-context-mcp tool surface","HestAI-MCP#445",'
+            '"debate-hall-mcp#192","hestai-context-mcp#18"]'
+        ),
+    },
+    "HO-REVIEW-GATE-PIN-RELEASE-20261025": {
+        "AFFECTS": (
+            '[".github/workflows/review-gate.yml","org ruleset 12626210",'
+            '"hestai-context-mcp#170","hestai-workbench","elevana-studio","HestAI-MCP"]'
+        ),
+    },
+    "HO-SR-APPROVED-WORDING-FIXES-PENDING-20261015": {
+        "AFFECTS": (
+            "[submit_review,review_formats.format_review_comment,"
+            '"submit_governance Stage-5 verdict map","core/governance_reviewer.py",'
+            '"hestai-context-mcp#201",HO-AGR-SEMANTIC-REVIEWER-ANALYSIS-TIER-20260611]'
+        ),
+    },
+    "HO-TOPIC-RECORDS-YAML-SYNTAX-20261029": {
+        "AFFECTS": (
+            '["submit_governance append_ruling","lookup_decision current_state",'
+            '"list_decisions topic filter","ADR-RFC-ARCH-004 topic-record section",'
+            '"hestai-context-mcp#203","EPIC4 PR-4 ∧ PR-5"]'
+        ),
+    },
+    # Wrapped records added by later amendments (beyond the seven the issue enumerated).
+    "HO-AGR-ADR-004-V1-4-DUAL-SYNTAX-READERS-20261029": {
+        "RELATED_DECISIONS": (
+            "[HO-TOPIC-RECORDS-YAML-SYNTAX-20261029,"
+            "EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025,"
+            "HO-GOVERNANCE-AMEND-IN-PLACE-20260926]"
+        ),
+        "AFFECTS": (
+            "[lookup_decision,list_decisions,trace_supersedure,"
+            '"ADR-RFC-ARCH-004 sections 1.1, 1.6, 1.7, 3.2, 3.4, 4.1",'
+            '"hestai-context-mcp#218","EPIC4 PR-5"]'
+        ),
+    },
+    "HO-AGR-ADR-004-V1-5-YAML-WRITE-PATH-20261031": {
+        "RELATED_DECISIONS": (
+            "[EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025,HO-RECORDS-YAML-DEFAULT-20261031,"
+            "HO-HC-WEEKEND-DELEGATION-20261031,HO-AGR-PLAIN-WORDS-REASONING-20261031,"
+            "HO-AGR-ADR-004-V1-4-DUAL-SYNTAX-READERS-20261029]"
+        ),
+        "AFFECTS": (
+            '["submit_governance content mode","Gate A YAML branch",'
+            '"ADR-RFC-ARCH-004 sections 1.1, 1.2, 1.5, 1.7, 4.1","hestai-context-mcp#226",'
+            '"EPIC4 PR-5"]'
+        ),
+    },
+    "HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620": {
+        "AFFECTS": "[agr_format,intake_compiler,submit_governance,type_checker,agr_read]",
+    },
+    "HO-AGR-PLAIN-WORDS-REASONING-20261031": {
+        "RELATED_DECISIONS": (
+            "[HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620,HO-GOVERNANCE-AMEND-IN-PLACE-20260926,"
+            "HO-RECORDS-YAML-DEFAULT-20261031,HO-HC-WEEKEND-DELEGATION-20261031]"
+        ),
+        "AFFECTS": (
+            '["DECISION and BECAUSE authoring","intake_context _COMPRESSION_CONTRACT",'
+            '"Gate A guidance text","ADR-RFC-ARCH-004 sec 1.2 and sec 1.5"]'
+        ),
+    },
+    "HO-RECORDS-YAML-DEFAULT-20261031": {
+        "RELATED_DECISIONS": (
+            "[EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025,HO-TOPIC-RECORDS-YAML-SYNTAX-20261029,"
+            "HO-GOVERNANCE-AMEND-IN-PLACE-20260926,HO-HC-WEEKEND-DELEGATION-20261031]"
+        ),
+        "AFFECTS": (
+            '["submit_governance content mode","submit_governance prose mode","intake compiler",'
+            '"Gate A YAML branch","EPIC4 PR-5 and its follow-up"]'
+        ),
+    },
 }
 
 
 @pytest.mark.parametrize("token", sorted(_EXPECTED_LISTS))
 def test_affected_record_reads_its_list_in_full_through_lookup_decision(token: str) -> None:
-    key, expected = _EXPECTED_LISTS[token]
     result = lookup_decision(str(REPO_ROOT), token)
     assert result["ok"] is True, result
-    assert result["record"]["fields"][key] == expected
+    for key, expected in _EXPECTED_LISTS[token].items():
+        assert result["record"]["fields"][key] == expected, key
 
 
 def test_no_committed_record_reads_a_bare_open_bracket() -> None:

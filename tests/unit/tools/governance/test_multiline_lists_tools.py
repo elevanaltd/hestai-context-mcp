@@ -171,3 +171,16 @@ def test_gate_a_rejects_an_unterminated_list(tmp_path: Path) -> None:
     result = _gate_a(tmp_path, "  AFFECTS::[\n    A,\n  SCOPE::PROD\n")
     assert not result.valid
     assert any("unterminated_list" in e and "line 11" in e for e in result.errors), result.errors
+
+
+def test_gate_a_warns_on_a_multi_line_superseded_by_and_stays_valid(tmp_path: Path) -> None:
+    write_record(tmp_path, token=TOKEN_NEW, authored_at="2026-03-01T00:00:00Z")
+    content = (
+        _GATE_A_HEAD.replace("STATUS::PROPOSED", "STATUS::SUPERSEDED")
+        + f"  SUPERSEDED_BY::[\n    {TOKEN_NEW}\n  ]\n===END===\n"
+    )
+    result = validate_octave_content(tmp_path, content)
+    assert any("SUPERSEDED_BY" in w and "multi-line" in w for w in result.warnings), (
+        result.errors,
+        result.warnings,
+    )
