@@ -130,6 +130,16 @@ def test_a_same_name_file_elsewhere_still_raises(tmp_path: Path) -> None:
     assert _has(result.errors, "already exists", stray.name)
 
 
+def test_a_same_name_concept_file_still_raises(tmp_path: Path) -> None:
+    path = _store(tmp_path)
+    concept = tmp_path / ".hestai" / "context" / "concepts" / f"{TOKEN}.oct.md"
+    concept.parent.mkdir(parents=True)
+    concept.write_text("concept card text\n", encoding="utf-8")
+    result = validate_record_content(tmp_path, _yaml(), existing_record=path)
+    assert not result.valid
+    assert _has(result.errors, "already exists", concept.name, "concepts")
+
+
 def test_existing_record_must_name_a_yaml_md_path(tmp_path: Path) -> None:
     twin = _store(tmp_path, rel=f"{TOKEN}.oct.md", text=OCTAVE_TWIN)
     result = validate_record_content(tmp_path, _yaml(), existing_record=twin)

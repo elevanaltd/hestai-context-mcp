@@ -201,7 +201,15 @@ class TestRefReadsAreCounted:
         assert recorder.by("rev-parse") == [["rev-parse", "--verify", "origin/main^{commit}"]]
         # ls-tree names the OID, never a ref.
         assert recorder.by("ls-tree") == [
-            ["ls-tree", "-r", "-z", base.main_oid, "--", ".hestai/decisions"]
+            [
+                "ls-tree",
+                "-r",
+                "-z",
+                base.main_oid,
+                "--",
+                ".hestai/decisions",
+                ".hestai/context/concepts",
+            ]
         ]
         # cat-file reads blobs by blob OID only: no ref name, no <rev>:<path> through stdin.
         assert recorder.by("cat-file") == [["cat-file", "--batch"]]

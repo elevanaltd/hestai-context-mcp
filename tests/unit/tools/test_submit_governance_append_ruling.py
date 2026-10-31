@@ -418,6 +418,133 @@ class TestRefusals:
 
 
 # ---------------------------------------------------------------------------
+# TOKEN uniqueness at the pinned main OID (CE 6538573589)
+# ---------------------------------------------------------------------------
+
+_TWIN_NAMED = f".hestai/decisions/legacy/{TOPIC_TOKEN}.oct.md"
+_CONCEPT_NAMED = f".hestai/context/concepts/{TOPIC_TOKEN}.oct.md"
+_OCTAVE_TWIN = (
+    "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n"
+    f'  VERSION::"1.0"\n  TOKEN::{TOPIC_TOKEN}\n  STATUS::RATIFIED\n  TIER::OPERATIONAL\n'
+    '  AUTHORED_AT::"2026-10-15T00:00:00Z"\n  DECISION::"d"\n  BECAUSE::"b"\n===END===\n'
+)
+_CITER_OCTAVE = (
+    "===DECISION_RECORD===\nMETA:\n  TYPE::DECISION_RECORD\n"
+    '  VERSION::"1.0"\n  TOKEN::HO-CITES-THE-TOPIC-20261015\n  STATUS::RATIFIED\n'
+    '  TIER::OPERATIONAL\n  AUTHORED_AT::"2026-10-15T00:00:00Z"\n'
+    f'  DECISION::"Follows {TOPIC_TOKEN}."\n  BECAUSE::"b"\n'
+    f"  AMENDS::[{TOPIC_TOKEN}]\n  RELATED_DECISIONS::[{TOPIC_TOKEN},HO-OTHER-20261015]\n"
+    f'  AUTHORITY::"{TOPIC_TOKEN} (RATIFIED)"\n===END===\n'
+)
+_CITER_YAML = PLAIN_RECORD.replace(
+    'ratified_by: "human:operator<fixture>"\n',
+    f'ratified_by: "human:operator<fixture>"\nrelated_decisions: "{TOPIC_TOKEN}"\n',
+).replace(PLAIN_TOKEN, "HO-CITES-IN-YAML-20261015") + (
+    f'\nBody quoting the topic: token: "{TOPIC_TOKEN}"\nTOKEN::{TOPIC_TOKEN}\n'
+)
+
+
+def _stale_checkout(repo: Path) -> None:
+    """Drop every record from the local checkout (an unpushed local commit): main keeps them."""
+    git(["rm", "-r", "-q", ".hestai/decisions"], repo)
+    if (repo / ".hestai" / "context").exists():
+        git(["rm", "-r", "-q", ".hestai/context"], repo)
+    git(["commit", "-q", "-m", "stale local checkout"], repo)
+
+
+class TestUniquenessAtMain:
+    async def _refused(self, repo: Path, stubs, *paths: str) -> None:
+        result = await submit_governance(str(repo), append_ruling=_request())
+        assert result["success"] is False, result
+        assert result["error_code"] == "TOKEN_AMBIGUOUS_AT_MAIN"
+        message = " ".join(result["validation_errors"])
+        for path in (TOPIC_PATH, *paths):
+            assert path in message, message
+        assert stubs["pr"].calls == []
+        assert git(["ls-remote", "--heads", "origin"], repo).count("refs/heads/") == 1
+
+    async def test_a_stale_checkout_with_a_same_name_twin_at_main_is_refused(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # (a) the twin is named for the TOKEN but is not a record (does not declare it).
+        repo, _ = init_topic_repo(
+            tmp_path, {TOPIC_PATH: TOPIC_RECORD, _TWIN_NAMED: "not a record at all\n"}
+        )
+        _stale_checkout(repo)
+        await self._refused(repo, stubs, _TWIN_NAMED)
+
+    async def test_a_stale_checkout_with_an_unpaired_declaring_twin_at_main_is_refused(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # (a) an .oct.md holding YAML front matter that declares the TOKEN: not a record
+        # under the readers' pairing, but its raw text declares the TOKEN.
+        twin = ".hestai/decisions/legacy/odd-twin.oct.md"
+        repo, _ = init_topic_repo(tmp_path, {TOPIC_PATH: TOPIC_RECORD, twin: TOPIC_RECORD})
+        _stale_checkout(repo)
+        await self._refused(repo, stubs, twin)
+
+    async def test_a_same_name_file_under_concepts_at_main_is_refused(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # (b)
+        repo, _ = init_topic_repo(
+            tmp_path, {TOPIC_PATH: TOPIC_RECORD, _CONCEPT_NAMED: "concept card text\n"}
+        )
+        await self._refused(repo, stubs, _CONCEPT_NAMED)
+
+    async def test_a_concept_declaring_the_token_at_main_is_refused(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # (b) by declaration rather than by name.
+        concept = ".hestai/context/concepts/card.oct.md"
+        repo, _ = init_topic_repo(
+            tmp_path,
+            {
+                TOPIC_PATH: TOPIC_RECORD,
+                concept: f"===CONCEPT_CARD===\nMETA:\n  ID::{TOPIC_TOKEN}\n",
+            },
+        )
+        _stale_checkout(repo)
+        await self._refused(repo, stubs, concept)
+
+    async def test_a_well_formed_octave_twin_at_main_is_refused(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # (c) pinned: the record locator already sees this twin.
+        twin = f".hestai/decisions/{TOPIC_TOKEN}.oct.md"
+        repo, _ = init_topic_repo(tmp_path, {TOPIC_PATH: TOPIC_RECORD, twin: _OCTAVE_TWIN})
+        await self._refused(repo, stubs, twin)
+
+    async def test_a_clean_append_from_a_stale_checkout_succeeds(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # (d) zero local matches are accepted because main itself was checked.
+        repo, _ = init_topic_repo(tmp_path)
+        _stale_checkout(repo)
+        result = await submit_governance(str(repo), append_ruling=_request(), review=False)
+        assert result["success"] is True, result["validation_errors"]
+        assert len(stubs["pr"].calls) == 1
+
+    async def test_records_that_only_cite_the_token_do_not_block(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # Positive control: citations (AMENDS, RELATED_DECISIONS, AUTHORITY, a YAML
+        # related_decisions field, markdown body lines) are not declarations.
+        repo, _ = init_topic_repo(
+            tmp_path,
+            {
+                TOPIC_PATH: TOPIC_RECORD,
+                ".hestai/decisions/HO-CITES-THE-TOPIC-20261015.oct.md": _CITER_OCTAVE,
+                ".hestai/decisions/HO-CITES-IN-YAML-20261015.md": _CITER_YAML,
+            },
+        )
+        _stale_checkout(repo)  # the citations exist only at main: the main-side matcher decides
+        result = await submit_governance(str(repo), append_ruling=_request(), review=False)
+        assert result["success"] is True, result["validation_errors"]
+        assert len(stubs["pr"].calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # CAS, dry_run, live path
 # ---------------------------------------------------------------------------
 
