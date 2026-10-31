@@ -73,6 +73,19 @@ class WorkflowParseError(ValueError):
         self.construct = construct
         super().__init__(f"Workflow document {file} is malformed: {construct} at line {line}")
 
+    def to_error(self, root: Path) -> dict[str, Any]:
+        """Structured tool-response form; ``file`` is relative to ``root``, never absolute."""
+        try:
+            relative = self.file.relative_to(root)
+        except ValueError:
+            relative = Path(self.file.name)  # outside the repo: name only, no host path
+        return {
+            "code": "WORKFLOW_PARSE_FAILED",
+            "file": relative.as_posix(),
+            "line": self.line,
+            "construct": self.construct,
+        }
+
 
 def phase_of_marker(key: str, value: str) -> str | None:
     """Return the phase id (e.g. ``"B1"``) if ``key``/``value`` form a phase marker, else None."""

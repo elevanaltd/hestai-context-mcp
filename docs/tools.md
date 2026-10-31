@@ -34,7 +34,7 @@ immediately without further queries.
   "context": {
     "product_north_star": "...",
     "project_context": "...",
-    "phase_constraints": "...",
+    "phase_constraints": "... (null with phase_constraints_error on a malformed workflow list)",
     "git_state": { "branch": "...", "modified_files": [], "ahead": 0, "behind": 0 },
     "active_sessions": [],
     "conflicts": []
@@ -47,6 +47,24 @@ immediately without further queries.
 ```
 
 **Notes:**
+- When the workflow document has a malformed list (`unterminated_list` / `text_after_list`),
+  `context.phase_constraints` is `null` and `context` gains an OPTIONAL
+  `phase_constraints_error` (present only on that failure); every other position is still
+  returned:
+  ```json
+  "phase_constraints_error": {
+    "code": "WORKFLOW_PARSE_FAILED",
+    "file": ".hestai/workflow/OPERATIONAL-WORKFLOW.oct.md",
+    "line": 42,
+    "construct": "unterminated_list"
+  }
+  ```
+  `file` is relative to `working_dir` (never an absolute host path). A phase that is not in the
+  document, or a missing workflow file, still gives `phase_constraints: null` with no error key.
+- `phase_constraints` list fields (`deliverables`, `entry_criteria`, `exit_criteria`) are
+  read with the repo's OCTAVE list grammar: wrapped and inline lists read the same, a comma
+  inside a quoted item stays one item, and items carry no surrounding quotes
+  (`"B1-BUILD-PLAN.md"` is returned as `B1-BUILD-PLAN.md`).
 - Detects focus conflicts when multiple sessions are active on the same working directory.
 - Restores portable session state from prior sessions via the `LocalFilesystemAdapter`.
 - Does not fail if North Star or project context files are absent — returns what is available.
@@ -114,7 +132,7 @@ Pure read — no session created, no files written. Returns the same context str
   "context": {
     "product_north_star": "...",
     "project_context": "...",
-    "phase_constraints": "...",
+    "phase_constraints": "... (null with phase_constraints_error on a malformed workflow list)",
     "git_state": { "branch": "...", "modified_files": [], "ahead": 0, "behind": 0 },
     "active_sessions": []
   }
@@ -122,6 +140,24 @@ Pure read — no session created, no files written. Returns the same context str
 ```
 
 **Notes:**
+- When the workflow document has a malformed list (`unterminated_list` / `text_after_list`),
+  `context.phase_constraints` is `null` and `context` gains an OPTIONAL
+  `phase_constraints_error` (present only on that failure); every other position is still
+  returned:
+  ```json
+  "phase_constraints_error": {
+    "code": "WORKFLOW_PARSE_FAILED",
+    "file": ".hestai/workflow/OPERATIONAL-WORKFLOW.oct.md",
+    "line": 42,
+    "construct": "unterminated_list"
+  }
+  ```
+  `file` is relative to `working_dir` (never an absolute host path). A phase that is not in the
+  document, or a missing workflow file, still gives `phase_constraints: null` with no error key.
+- `phase_constraints` list fields (`deliverables`, `entry_criteria`, `exit_criteria`) are
+  read with the repo's OCTAVE list grammar: wrapped and inline lists read the same, a comma
+  inside a quoted item stays one item, and items carry no surrounding quotes
+  (`"B1-BUILD-PLAN.md"` is returned as `B1-BUILD-PLAN.md`).
 - Intended for the Payload Compiler (Position 3) which may call it repeatedly or in parallel.
 - Enforced at source level: `get_context.py` has zero imports from the `storage/` subsystem
   (`PURITY_GUARD::G3`). This is verified by a static test.
