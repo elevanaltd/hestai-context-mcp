@@ -153,6 +153,27 @@ class TestModeGuard:
         assert result["success"] is False
         assert any("append_ruling" in e for e in result["validation_errors"])
 
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"octave_content": "x"},
+            {"prose_input": "x"},
+            {"write_adr": True},
+        ],
+    )
+    async def test_early_refusals_use_the_append_result_shape(
+        self, tmp_path: Path, extra: dict[str, Any]
+    ) -> None:
+        reference = await submit_governance(
+            str(tmp_path), append_ruling=_request(topic_token="not-a-token")
+        )
+        assert reference["error_code"] == "APPEND_INPUT_INVALID"
+        result = await submit_governance(str(tmp_path), append_ruling=_request(), **extra)
+        assert set(result) == set(reference)
+        assert result["success"] is False
+        assert result["error_code"] == "APPEND_MODE_CONFLICT"
+        assert result["token"] is None and result["appended_ids"] == []
+
     async def test_neither_mode_keeps_the_existing_message(self, tmp_path: Path) -> None:
         result = await submit_governance(str(tmp_path))
         assert result["validation_errors"] == [
