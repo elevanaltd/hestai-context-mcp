@@ -1086,9 +1086,10 @@ def validate_record_content(
 
     ``existing_record`` (#203 S2) is for the append_ruling path ONLY: the path of the
     YAML ``.md`` record being rewritten. The YAML branch's §4.1 #4 uniqueness check then
-    accepts that one file as the TOKEN's match, and nothing else: any other file that
-    declares the TOKEN or is named for it (an ``.oct.md`` twin, a second ``.md``) still
-    raises the duplicate error. The OCTAVE branch ignores it. Content mode never passes
+    accepts that one file as the TOKEN's match, and nothing else: any other record file
+    (``.md`` or ``.oct.md``) under ``.hestai/decisions`` or ``.hestai/context/concepts``
+    that declares the TOKEN or is named for it (an ``.oct.md`` twin, a second ``.md``)
+    still raises the duplicate error. Non-record files (e.g. ``.txt``) never count. The OCTAVE branch ignores it. Content mode never passes
     it, so a new record still needs an unused TOKEN.
 
     Never raises on bad input. Always returns a ValidationResult.
@@ -1121,7 +1122,8 @@ def _existing_record_files(working_dir: Path, token: str) -> list[Path]:
 
 
 def _token_record_paths(working_dir: Path, token: str) -> set[Path]:
-    """Every store file that declares ``token`` or is named for it (resolved paths).
+    """Every record file (``.md`` / ``.oct.md``) under ``.hestai/decisions`` or
+    ``.hestai/context/concepts`` that declares ``token`` or is named for it (resolved).
 
     The readers' pairing applies: an ``.oct.md`` declares only as OCTAVE, a plain
     ``.md`` under ``.hestai/decisions`` only as a YAML record with the DECISION_RECORD

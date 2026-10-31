@@ -1674,8 +1674,9 @@ def _declares_at_main(path: str, data: bytes, token: str) -> bool:
 
 
 def _matches_token_at_main(path: str, data: bytes, token: str) -> bool:
-    """True iff the blob at ``path`` could collide with ``token``: it declares it, or is
-    named for it.
+    """True iff the record file at ``path`` could collide with ``token``: it declares it,
+    or is named for it. Only ``.md`` / ``.oct.md`` blobs reach here
+    (``_list_decision_blobs``): the governance store is record files only (HC ruling B).
 
     "Declares" is exactly ``lexer.declares_token`` (a top-level ``TOKEN::`` / ``ID::``
     line, or the fenced YAML ``token:`` line) on the blob's text, with NO extension
@@ -1698,8 +1699,9 @@ def read_append_base(working_dir: Path, token: str) -> AppendBase:
     hashed for the ADR-RFC-ARCH-004 §1.1/§3.5 CAS.
 
     TOKEN uniqueness is judged HERE, at the same OID the branch is cut from
-    (CE 6538573589): any other blob under decisions or concepts that declares the
-    TOKEN or is named for it (``_matches_token_at_main``) refuses the append as
+    (CE 6538573589): any other record file (``.md`` / ``.oct.md``) under decisions
+    or concepts that declares the TOKEN or is named for it
+    (``_matches_token_at_main``) refuses the append as
     ``TOKEN_AMBIGUOUS_AT_MAIN``, naming every match. The caller's checkout cannot
     hide a twin that main holds.
     """

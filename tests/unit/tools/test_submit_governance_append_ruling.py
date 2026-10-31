@@ -525,6 +525,25 @@ class TestUniquenessAtMain:
         assert result["success"] is True, result["validation_errors"]
         assert len(stubs["pr"].calls) == 1
 
+    async def test_a_non_record_file_declaring_the_token_does_not_block(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # HC ruling B: the store is record files only (.md / .oct.md), as content mode's
+        # lookup_token_deterministic scans. A .txt that declares the TOKEN, even one named
+        # for it, is not a record and does not refuse the append.
+        repo, _ = init_topic_repo(
+            tmp_path,
+            {
+                TOPIC_PATH: TOPIC_RECORD,
+                f".hestai/decisions/{TOPIC_TOKEN}.txt": f"TOKEN::{TOPIC_TOKEN}\n",
+                ".hestai/context/concepts/notes.txt": f"ID::{TOPIC_TOKEN}\n",
+            },
+        )
+        _stale_checkout(repo)
+        result = await submit_governance(str(repo), append_ruling=_request(), review=False)
+        assert result["success"] is True, result["validation_errors"]
+        assert len(stubs["pr"].calls) == 1
+
     async def test_records_that_only_cite_the_token_do_not_block(
         self, tmp_path: Path, stubs
     ) -> None:
