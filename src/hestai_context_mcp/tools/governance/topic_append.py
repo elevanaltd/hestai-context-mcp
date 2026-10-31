@@ -61,6 +61,8 @@ RECORD_UNREADABLE = "RECORD_UNREADABLE"
 TOPIC_BLOCKS_MALFORMED = "TOPIC_BLOCKS_MALFORMED"
 REPLACES_UNKNOWN_ID = "REPLACES_UNKNOWN_ID"
 RENDER_REJECTED = "RENDER_REJECTED"
+# Refusals about WHAT the record is (reported before CAS and the in-flight check).
+RECORD_KIND_CODES = frozenset({NOT_YAML_TOPIC_RECORD, NOT_A_TOPIC_RECORD, RECORD_UNREADABLE})
 
 _REQUEST_KEYS = frozenset({"topic_token", "rulings", "expected_record_hash"})
 _RULING_KEYS = frozenset({"rule", "verbatim", "ruled", "replaces"})

@@ -8,7 +8,15 @@ Two mutually-exclusive entry modes converge on ONE validate->link tail:
     Stage 2 (prose->OCTAVE backend) author the OCTAVE, then the call REJOINS the
     same Stage-3 gate + Stage-4 linker tail (Gate C). Adds a ``metrics`` field.
 
-EXACTLY ONE of ``octave_content`` / ``prose_input`` must be supplied.
+EXACTLY ONE of ``octave_content`` / ``prose_input`` must be supplied -- or, alone,
+the third mode:
+
+  * ``append_ruling`` (issue #203 S2) -- append or replace rulings in a MERGED
+    quoted-YAML topic record. The record is read at the ``origin/main`` OID
+    (fetched and resolved once), CAS-checked against ``expected_record_hash``,
+    re-emitted through the canonical YAML emitter (no LLM, no compiler; VERBATIM
+    reads back byte-exact), judged by Gate A, and delivered as ONE PR. Stage 5
+    checks only each RULE against its VERBATIM.
 
 North Star invariants enforced:
   PROD I4: Structured return shape (always a dict with defined fields).
@@ -26,13 +34,17 @@ structured "real-validation unavailable" signal and the regex Gate A still runs.
 import asyncio
 import logging
 import re
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
 from hestai_context_mcp.core.agent_readable_governance_parser import is_yaml_front_matter
-from hestai_context_mcp.core.governance_reviewer import review_governance
+from hestai_context_mcp.core.governance_reviewer import (
+    review_governance,
+    review_ruling_fidelity,
+)
 from hestai_context_mcp.core.intake_pipeline import run_intake_to_pr
 from hestai_context_mcp.ports.octave_validator import (
     OctaveValidationResult,
@@ -41,8 +53,23 @@ from hestai_context_mcp.ports.octave_validator import (
     get_octave_validator,
 )
 from hestai_context_mcp.tools.clock_in import validate_working_dir
+from hestai_context_mcp.tools.governance import linker as _linker
 from hestai_context_mcp.tools.governance.intake_context import assemble_intake_context
-from hestai_context_mcp.tools.governance.linker import run_linker
+from hestai_context_mcp.tools.governance.linker import (
+    build_append_pr_body,
+    check_in_flight_at_oid,
+    compute_append_branch_name,
+    read_append_base,
+    run_append_linker,
+    run_linker,
+)
+from hestai_context_mcp.tools.governance.topic_append import (
+    APPEND_INPUT_INVALID,
+    RECORD_KIND_CODES,
+    parse_append_request,
+    record_hash,
+    render_append,
+)
 from hestai_context_mcp.tools.governance.type_checker import (
     ValidationResult,
     validate_octave_content,
@@ -236,6 +263,25 @@ async def _run_semantic_review(
     submit_kwargs: dict[str, Any] = {}
     if wording_fixes and review_verdict == "WORDING":
         submit_kwargs["wording_fixes"] = wording_fixes
+    return await _post_sr_verdict(
+        base, repo, pr_number, gate_verdict, assessment, reviewer_model, submit_kwargs
+    )
+
+
+async def _post_sr_verdict(
+    base: dict[str, Any],
+    repo: str,
+    pr_number: int,
+    gate_verdict: str,
+    assessment: str,
+    reviewer_model: str,
+    submit_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Post an ``SR`` verdict via the existing ``submit_review`` path (fail-soft).
+
+    Shared by the whole-record review and the append fidelity review (#203 S2). Never
+    raises: a posting failure is recorded under ``error`` and the PR is left as it is.
+    """
     # Blocking gh subprocesses (up to _GH_API_TIMEOUT_SECONDS each): keep off the
     # event loop, and inside the fail-soft boundary (Stage-5 never raises).
     loop = asyncio.get_running_loop()
@@ -244,7 +290,7 @@ async def _run_semantic_review(
     except Exception:  # noqa: BLE001 -- fail-soft: an unresolvable SHA degrades to no commit_sha.
         head_sha = None
     if head_sha:
-        submit_kwargs["commit_sha"] = head_sha
+        submit_kwargs = {**submit_kwargs, "commit_sha": head_sha}
 
     try:
         post = await loop.run_in_executor(
@@ -270,6 +316,69 @@ async def _run_semantic_review(
     return {**base, "posted": True, "comment_url": post.get("comment_url")}
 
 
+async def _run_fidelity_review(
+    pairs: list[dict[str, str]], pr_url: str, working_dir: str | None = None
+) -> dict[str, Any]:
+    """Stage 5 for appends (#203 S2): RULE-vs-VERBATIM fidelity, posted as ``SR``.
+
+    The reviewer sees ONLY the new ``{id, rule, verbatim}`` pairs, never style or
+    schema. APPROVED clears the gate; CONCERNS routes the PR to the human as BLOCKED,
+    naming the flagged pairs. Same fail-soft contract as ``_run_semantic_review``: an
+    unavailable reviewer abstains (posts nothing), any error is recorded, the PR is
+    never undone, nothing is merged.
+    """
+    try:
+        review = await review_ruling_fidelity(pairs, tier="analysis", working_dir=working_dir)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft: any reviewer error is recorded.
+        return {
+            "review_kind": "ruling_fidelity",
+            "posted": False,
+            "error": f"fidelity review failed: {exc}",
+        }
+
+    review_verdict = review.get("verdict", "")
+    gate_verdict = "APPROVED" if review_verdict == "APPROVED" else "BLOCKED"
+    concerns = review.get("concerns", []) or []
+    flagged = list(review.get("fidelity_pairs", []) or [])
+    reviewer_model = review.get("metrics", {}).get("model", "")
+    base: dict[str, Any] = {
+        "review_kind": "ruling_fidelity",
+        "review_verdict": review_verdict,
+        "gate_verdict": gate_verdict,
+        "reviewer_model": reviewer_model,
+        "tier": "analysis",
+        "concerns": concerns,
+        "fidelity_pairs": flagged,
+    }
+
+    if not review.get("reviewer_available", True):
+        reason = review.get("assessment", "") or "reviewer unavailable"
+        logger.warning(
+            "Stage-5 fidelity review ABSTAINED on %s (no verdict posted; "
+            "gate still requires the SR verdict): %s",
+            pr_url,
+            reason,
+        )
+        return {**base, "posted": False, "skipped": True, "reason": reason}
+
+    match = _PR_URL_RE.search(pr_url or "")
+    if match is None:
+        return {**base, "posted": False, "error": f"could not parse PR URL: {pr_url!r}"}
+
+    assessment = _compose_sr_assessment(review.get("assessment", ""), concerns)
+    if flagged:
+        assessment = f"{assessment}\n\nPairs needing a human check: {', '.join(flagged)}"
+    return await _post_sr_verdict(
+        base,
+        f"{match.group('owner')}/{match.group('name')}",
+        int(match.group("number")),
+        gate_verdict,
+        assessment,
+        reviewer_model,
+        {},
+    )
+
+
 async def submit_governance(
     working_dir: str,
     octave_content: str | None = None,
@@ -277,10 +386,22 @@ async def submit_governance(
     dry_run: bool = False,
     review: bool = True,
     write_adr: bool = False,
+    append_ruling: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Submit a governance artifact via OCTAVE content OR prose intent.
+    """Submit a governance artifact via OCTAVE content OR prose intent OR an append.
 
-    EXACTLY ONE of ``octave_content`` / ``prose_input`` must be non-None.
+    EXACTLY ONE of ``octave_content`` / ``prose_input`` / ``append_ruling`` must be
+    non-None.
+
+    ``append_ruling`` (issue #203 S2) appends or replaces rulings in a MERGED
+    quoted-YAML topic record: ``{topic_token, rulings: [{rule, verbatim, ruled,
+    replaces?}], expected_record_hash?}``. Several rulings produce ONE PR. The record
+    is read at the ``origin/main`` OID; a stale ``expected_record_hash`` is refused
+    with ``EXPECTED_HASH_MISMATCH``; an in-flight record is refused (in-flight append
+    is slice S3). The return carries ``from_record_hash`` / ``to_record_hash`` (hashes
+    of the whole file bytes, ADR-RFC-ARCH-004 §1.1) / ``appended_ids`` /
+    ``replaced_ids`` / ``error_code``; ``dry_run`` returns ``rendered_record`` and both
+    hashes with no branch or PR. Stage 5 reviews only each RULE against its VERBATIM.
 
     ``write_adr`` (two-birds, #112) is PROSE-ONLY. When True (with
     ``prose_input``) the natural-language prose IS the ADR source: the linker
@@ -326,6 +447,22 @@ async def submit_governance(
         Stage 5 is skipped (no ``semantic_review`` key) on dry_run / review=False
         / no-PR paths.
     """
+    # --- append_ruling mode (#203 S2): exclusive with both other modes ---
+    if append_ruling is not None:
+        if octave_content is not None or prose_input is not None:
+            return _empty_result(
+                dry_run,
+                [
+                    "append_ruling is mutually exclusive with octave_content and "
+                    "prose_input; supply exactly one mode."
+                ],
+            )
+        if write_adr:
+            return _empty_result(
+                dry_run, ["write_adr is prose-only; append_ruling writes no ADR document."]
+            )
+        return await _submit_append_ruling(working_dir, append_ruling, dry_run, review)
+
     # --- EXACTLY-ONE-OF guard (Gate C contract ruling) ---
     if (octave_content is None) == (prose_input is None):
         return _empty_result(
@@ -579,3 +716,212 @@ async def _link_and_report(
         "dry_run": dry_run,
     }
     return await _maybe_review(result, content, dry_run, review, working_dir=str(wd))
+
+
+# ---------------------------------------------------------------------------
+# append_ruling mode (issue #203 S2)
+# ---------------------------------------------------------------------------
+
+
+def _append_result(dry_run: bool, **fields: Any) -> dict[str, Any]:
+    """The I4 append_ruling return shape: every key always present."""
+    result: dict[str, Any] = {
+        "success": False,
+        "token": None,
+        "card_type": None,
+        "target_path": None,
+        "adr_target_path": None,
+        "branch": None,
+        "pr_url": None,
+        "head_sha": None,
+        "base_oid": None,
+        "from_record_hash": None,
+        "to_record_hash": None,
+        "expected_record_hash": None,
+        "appended_ids": [],
+        "replaced_ids": [],
+        "rendered_record": None,
+        "in_flight": None,
+        "in_flight_branches": [],
+        "in_flight_pr_urls": {},
+        "in_flight_pr_lookup_error": None,
+        "validation_errors": [],
+        "error_code": None,
+        "octave_validation": None,
+        "real_validation_available": True,
+        "dry_run": dry_run,
+    }
+    result.update(fields)
+    return result
+
+
+async def _submit_append_ruling(
+    working_dir: str,
+    append_ruling: Any,
+    dry_run: bool,
+    review: bool,
+) -> dict[str, Any]:
+    """Append rulings to a merged YAML topic record: read at the OID, CAS, render, gate, one PR.
+
+    Every refusal is a structured result with an ``error_code``; nothing here raises.
+    Blocking git/gh work runs in the default executor. The OID resolved by
+    ``read_append_base`` is the ONLY read of ``origin/main`` by name: the in-flight
+    check and the branch both use it. Refusal order: input, base, record kind, CAS,
+    in flight, rendering (unknown ``replaces``), Gate A.
+    """
+    loop = asyncio.get_running_loop()
+
+    request, input_errors = parse_append_request(append_ruling)
+    if request is None:
+        return _append_result(
+            dry_run, validation_errors=input_errors, error_code=APPEND_INPUT_INVALID
+        )
+    token = request.topic_token
+    fields: dict[str, Any] = {"token": token, "expected_record_hash": request.expected_record_hash}
+
+    try:
+        wd = await loop.run_in_executor(None, validate_working_dir, working_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        return _append_result(
+            dry_run, **fields, validation_errors=[str(exc)], error_code="WORKING_DIR_INVALID"
+        )
+
+    # --- Base: fetch once, resolve origin/main once, read the blob at the OID ---
+    base = await loop.run_in_executor(None, read_append_base, wd, token)
+    fields["base_oid"] = base.main_oid
+    if base.error_code is not None or base.data is None:
+        return _append_result(
+            dry_run,
+            **fields,
+            validation_errors=[base.error or "the record could not be read at main"],
+            error_code=base.error_code or "BASE_UNDETERMINED",
+        )
+    assert base.path is not None and base.main_oid is not None
+    fields.update(target_path=base.path, from_record_hash=base.from_record_hash)
+
+    # --- Render (pure); a record-kind refusal is reported before anything else ---
+    outcome = render_append(base.data, request.rulings, datetime.now(UTC).date())
+    if not outcome.ok and outcome.error_code in RECORD_KIND_CODES:
+        return _append_result(
+            dry_run, **fields, validation_errors=outcome.errors, error_code=outcome.error_code
+        )
+    fields["card_type"] = "DECISION_RECORD"
+
+    # --- CAS against the bytes at the OID (ADR-RFC-ARCH-004 §1.1 / §3.5) ---
+    if (
+        request.expected_record_hash is not None
+        and request.expected_record_hash != base.from_record_hash
+    ):
+        return _append_result(
+            dry_run,
+            **fields,
+            validation_errors=[
+                f"expected_record_hash {request.expected_record_hash} does not match the "
+                f"record at origin/main ({base.main_oid}), whose from_record_hash is "
+                f"{base.from_record_hash}; re-read the record and retry."
+            ],
+            error_code="EXPECTED_HASH_MISMATCH",
+        )
+
+    # --- In flight? Evaluated at the SAME OID; never re-reads origin/main. ---
+    gh_token = await loop.run_in_executor(None, _linker._resolve_github_token)
+    status = await loop.run_in_executor(
+        None, partial(check_in_flight_at_oid, wd, token, base.path, base.main_oid, gh_token)
+    )
+    if status["error"]:
+        return _append_result(
+            dry_run,
+            **fields,
+            validation_errors=[status["error"]],
+            error_code="IN_FLIGHT_UNDETERMINED",
+        )
+    if status["in_flight"]:
+        branches, urls = status["branches"], status["pr_urls"]
+        named = ", ".join(f"{b} ({urls[b]})" if b in urls else b for b in branches)
+        return _append_result(
+            dry_run,
+            **fields,
+            in_flight=True,
+            in_flight_branches=branches,
+            in_flight_pr_urls=urls,
+            in_flight_pr_lookup_error=status["pr_lookup_error"],
+            validation_errors=[
+                f"Topic record {token} is already in flight on origin (unmerged "
+                f"governance branch(es): {named}); no branch or PR was opened. Appending "
+                "to an in-flight record is slice S3 of #203 and is not supported yet."
+            ],
+            error_code="TOPIC_RECORD_IN_FLIGHT",
+        )
+    fields["in_flight"] = False
+
+    if not outcome.ok or outcome.text is None:
+        return _append_result(
+            dry_run, **fields, validation_errors=outcome.errors, error_code=outcome.error_code
+        )
+    rendered = outcome.text
+    fields.update(
+        appended_ids=outcome.appended_ids,
+        replaced_ids=outcome.replaced_ids,
+        to_record_hash=record_hash(rendered.encode("utf-8")),
+    )
+
+    # --- Gate A on the rendered bytes. existing_record=True is passed ONLY here: it
+    #     skips the "already exists" check (the TOKEN exists by definition) and
+    #     nothing else. Gate B is OCTAVE-only and is not applied to YAML. ---
+    validation = await loop.run_in_executor(
+        None, partial(validate_record_content, wd, rendered, existing_record=True)
+    )
+    errors = list(validation.errors)
+    if validation.valid and validation.canonical_content != rendered:
+        errors.append("Internal error: the appended record is not in canonical form.")
+    if errors:
+        return _append_result(
+            dry_run, **fields, validation_errors=errors, error_code="VALIDATION_FAILED"
+        )
+    fields["real_validation_available"] = not isinstance(
+        get_octave_validator(), UnavailableOctaveValidator
+    )
+
+    if dry_run:
+        return _append_result(True, **fields, success=True, rendered_record=rendered)
+
+    # --- One branch, one commit, one PR ---
+    pr_body = build_append_pr_body(
+        token=token,
+        pairs=outcome.pairs,
+        replaced_ids=outcome.replaced_ids,
+        from_record_hash=fields["from_record_hash"],
+        to_record_hash=fields["to_record_hash"],
+        base_oid=base.main_oid,
+    )
+    link = await loop.run_in_executor(
+        None,
+        partial(
+            run_append_linker,
+            wd,
+            token=token,
+            target_path=base.path,
+            main_oid=base.main_oid,
+            record_text=rendered,
+            branch_name=compute_append_branch_name(token, int(outcome.appended_ids[0][1:])),
+            appended_ids=outcome.appended_ids,
+            pr_body=pr_body,
+            gh_token=gh_token,
+        ),
+    )
+    error = link["error"]
+    result = _append_result(
+        False,
+        **fields,
+        success=error is None,
+        branch=link["branch"],
+        pr_url=link["pr_url"],
+        head_sha=link["head_sha"],
+        validation_errors=[error] if error else [],
+        error_code="LINKER_FAILED" if error else None,
+    )
+    if review and result["success"] and result["pr_url"]:
+        result["semantic_review"] = await _run_fidelity_review(
+            outcome.pairs, result["pr_url"], working_dir=str(wd)
+        )
+    return result
