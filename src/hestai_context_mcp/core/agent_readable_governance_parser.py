@@ -63,7 +63,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import NamedTuple, TypedDict
 
@@ -835,3 +835,185 @@ def _parse_impl(text: str) -> DecisionRecord:
         "authored_at": core.get("AUTHORED_AT"),
         "fields": extra,
     }
+
+
+# ---------------------------------------------------------------------------
+# Canonical emitter (EPIC4 PR-5): the write-side inverse of ``_parse_yaml``.
+# ---------------------------------------------------------------------------
+
+# Fixed key order: the ADR-RFC-ARCH-004 §1.1 example order for the core fields, then
+# the §1.2 optional fields in table order, then ``supersedes`` (§1.6); any other key
+# follows, sorted. One order means one byte sequence per record (record_hash/CAS).
+_EMIT_KEY_ORDER = (
+    "type",
+    "version",
+    "token",
+    "status",
+    "tier",
+    "authored_at",
+    "decision",
+    "because",
+    "issue_ref",
+    "human_adr_ref",
+    "superseded_by",
+    "extends",
+    "amends",
+    "revision",
+    "topic",
+    "scope",
+    "effective_from",
+    "effective_until",
+    "origin_session",
+    "origin_ledger_rd",
+    "ratified_by",
+    "ratified_at",
+    "supersedes",
+    "supersedes_note",
+)
+_EMIT_REQUIRED = (
+    "type",
+    "version",
+    "token",
+    "status",
+    "tier",
+    "authored_at",
+    "decision",
+    "because",
+)
+_EMIT_KEY_FIRST = "abcdefghijklmnopqrstuvwxyz"
+_EMIT_KEY_REST = _EMIT_KEY_FIRST + "0123456789_"
+_EMIT_RULING_KEYS = ("rule", "verbatim", "ruled", "replaces")
+_EMIT_ENTRY_KEYS = frozenset({"id", *_EMIT_RULING_KEYS})
+
+
+def _emit_key(raw: str) -> str:
+    """The lowercase on-disk spelling of a field key, or raise ``invalid_key``."""
+    key = raw.lower() if isinstance(raw, str) else ""
+    ok = bool(key) and key[0] in _EMIT_KEY_FIRST and all(ch in _EMIT_KEY_REST for ch in key)
+    if not ok:
+        raise YamlSyntaxError("invalid_key", repr(raw))
+    return key
+
+
+def _emit_scalar(value: object) -> str:
+    """Canonically encode one value, refusing anything that is not an encodable ``str``."""
+    if not isinstance(value, str):
+        raise YamlSyntaxError("unquoted_value", f"not a string: {type(value).__name__}")
+    try:
+        return encode_yaml_scalar(value)
+    except ValueError as exc:
+        raise YamlSyntaxError("invalid_utf8", str(exc)) from exc
+
+
+def _emit_supersedes(supersedes: list[str], own_token: str) -> str:
+    """The ``supersedes:`` literal for a TOKEN list, with the reader's own rules."""
+    if any(
+        not isinstance(entry, str) or not _TOKEN_FORMAT_RE.fullmatch(entry) for entry in supersedes
+    ):
+        raise YamlSyntaxError("invalid_supersedes", "every entry must be a TOKEN")
+    if len(set(supersedes)) != len(supersedes):
+        raise YamlSyntaxError("invalid_supersedes", "duplicate TOKEN")
+    if own_token in supersedes:
+        raise YamlSyntaxError("invalid_supersedes", "a record cannot supersede itself")
+    return _emit_scalar(", ".join(supersedes))
+
+
+def _emit_ids(entries: list, block: str, allowed: frozenset[str]) -> list[dict]:
+    """Validate block entries (id shape, uniqueness, field names); return them as dicts."""
+    seen: set[str] = set()
+    checked: list[dict] = []
+    for entry in entries:
+        for key in entry:
+            if key == "id":
+                continue  # the entry's own id slot, not an on-disk key
+            if key in _YAML_RESERVED_BLOCK_KEYS:
+                raise YamlSyntaxError("reserved_key_in_block", key)
+            if key not in allowed:
+                raise YamlSyntaxError("unknown_block_key", key)
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str) or not _YAML_ENTRY_ID_RE.match(entry_id):
+            raise YamlSyntaxError("invalid_block_entry", f"{block} entry id {entry_id!r}")
+        if entry_id in seen:
+            raise YamlSyntaxError("duplicate_key", entry_id)
+        seen.add(entry_id)
+        checked.append(entry)
+    return checked
+
+
+def _emit_blocks(blocks: TopicBlocks) -> list[str]:
+    """The ``current:`` / ``rulings:`` lines (canonical two/four-space indent)."""
+    lines: list[str] = []
+    current = _emit_ids(list(blocks.get("current", [])), "current", frozenset({"id", "rule"}))
+    if current:
+        lines.append("current:")
+        for entry in current:
+            if not isinstance(entry.get("rule"), str):
+                raise YamlSyntaxError("invalid_block_entry", f"current {entry['id']} needs a rule")
+            lines.append(f"  {entry['id']}: {_emit_scalar(entry['rule'])}")
+    rulings = _emit_ids(list(blocks.get("rulings", [])), "rulings", _EMIT_ENTRY_KEYS)
+    if rulings:
+        lines.append("rulings:")
+        for entry in rulings:
+            lines.append(f"  {entry['id']}:")
+            for key in _EMIT_RULING_KEYS:
+                if entry.get(key) is not None:
+                    lines.append(f"    {key}: {_emit_scalar(entry[key])}")
+    return lines
+
+
+def emit_yaml_record(
+    fields: Mapping[str, str],
+    blocks: TopicBlocks | None = None,
+    supersedes: list[str] | None = None,
+) -> str:
+    """Emit one canonical quoted-YAML record (front matter only), or raise.
+
+    Pure and deterministic: the same logical input gives byte-identical output
+    whatever the mapping order (fixed key order, LF endings, exact ``---`` fences,
+    canonical block indentation, scalars via :func:`encode_yaml_scalar`). The text
+    is exactly what :func:`parse_decision_record` / :func:`diagnose_yaml_record`
+    accept, and ``emit(read(emit(x))) == emit(x)``.
+
+    ``fields`` maps field names (either case) to ``str`` values and must carry the
+    eight §1.2 core fields with ``type`` == ``DECISION_RECORD`` and a §1.3 ``token``.
+    ``supersedes`` is the TOKEN list (§1.6) and may not also appear in ``fields``.
+    Anything the reader would reject raises :class:`YamlSyntaxError` with the reader's
+    own ``construct`` name, so this can never write a record the reader refuses.
+    Value rules that belong to Gate A (STATUS/TIER enums, density, dates) are NOT
+    checked here.
+    """
+    pairs: dict[str, str] = {}
+    for raw_key, value in fields.items():
+        key = _emit_key(raw_key)
+        if key in pairs:
+            raise YamlSyntaxError("duplicate_key", key)
+        if key in _YAML_BLOCK_KEYS:
+            raise YamlSyntaxError("block_header_with_value", key)
+        if key == "supersedes" and supersedes is not None:
+            raise YamlSyntaxError("duplicate_key", key)
+        pairs[key] = value
+
+    for required in _EMIT_REQUIRED:
+        if required not in pairs:
+            raise YamlSyntaxError("missing_required_field", required)
+    if pairs["type"] != "DECISION_RECORD":
+        raise YamlSyntaxError("invalid_type", repr(pairs["type"]))
+    if not isinstance(pairs["token"], str) or not _TOKEN_FORMAT_RE.fullmatch(pairs["token"]):
+        raise YamlSyntaxError("invalid_token", repr(pairs["token"]))
+
+    literals = {key: _emit_scalar(value) for key, value in pairs.items()}
+    if supersedes:
+        literals["supersedes"] = _emit_supersedes(supersedes, pairs["token"])
+    if "supersedes" in pairs:
+        # A ``supersedes`` given through ``fields`` must still satisfy the reader's list rules.
+        literals["supersedes"] = _emit_supersedes(
+            parse_supersedes_list(pairs["supersedes"]), pairs["token"]
+        )
+
+    rank = {key: index for index, key in enumerate(_EMIT_KEY_ORDER)}
+    ordered = sorted(literals, key=lambda key: (rank.get(key, len(rank)), key))
+    lines = [_YAML_FENCE, *(f"{key}: {literals[key]}" for key in ordered)]
+    if blocks:
+        lines.extend(_emit_blocks(blocks))
+    lines.append(_YAML_FENCE)
+    return "\n".join(lines) + "\n"
