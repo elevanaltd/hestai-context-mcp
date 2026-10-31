@@ -7,9 +7,9 @@ META:
   TIER::STRATEGIC
   COMPRESSION_TIER::CONSERVATIVE
   LOSS_PROFILE::"[preserve:operator_quotes,scope,amended_clause,sequencing,non_effects,IDs;drop:discussion]"
-  AUTHORED_AT::"2026-10-31T01:40:00Z"
+  AUTHORED_AT::"2026-10-31T00:00:00Z"
   RATIFIED_BY::"human:operator<shaunbuswell>"
-  RATIFIED_AT::"2026-10-31T01:40:00Z"
+  RATIFIED_AT::"2026-10-31T00:00:00Z"
   CEREMONY_REF::"625fb59c-a1a2-466b-bb95-608cb4285017"
   AUTHORING_SESSION::"holistic-orchestrator:hc-control-room-20260929"
   EXTENDS::[HO-TOPIC-RECORDS-YAML-SYNTAX-20261029]
@@ -19,8 +19,20 @@ META:
   SEQUENCING::"EPIC4 PR-5 ships the content-mode YAML write path at its brief scope. Prose mode emitting YAML is a follow-up PR after PR-5, sequenced by HW-PROGRAMME, and must keep the hestai-context-mcp #195 prose-mode corruption guard. Until each path lands, records filed through it stay OCTAVE"
   NON_EFFECTS::"No migration, reformat or deletion of existing .oct.md records; OCTAVE records stay valid and readable; readers are unchanged (dual-syntax since PR #218)"
   RE_REVIEW_TRIGGER::"Re-open if PR-5 is parked or reverted, or if prose-mode YAML cannot pass the #195 corruption guard"
-  RELATED_DECISIONS::[EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025,HO-TOPIC-RECORDS-YAML-SYNTAX-20261029,HO-GOVERNANCE-AMEND-IN-PLACE-20260926,HO-HC-WEEKEND-DELEGATION-20261031]
-  AFFECTS::["submit_governance content mode","submit_governance prose mode","intake compiler","Gate A YAML branch","EPIC4 PR-5 and its follow-up"]
+  RELATED_DECISIONS::[
+    EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025,
+    HO-TOPIC-RECORDS-YAML-SYNTAX-20261029,
+    HO-GOVERNANCE-AMEND-IN-PLACE-20260926,
+    HO-HC-WEEKEND-DELEGATION-20261031
+  ]
+  AFFECTS::[
+    "submit_governance content mode",
+    "submit_governance prose mode",
+    "intake compiler",
+    "Gate A YAML branch",
+    "EPIC4 PR-5 and its follow-up"
+  ]
   DECISION::"Every new decision record is written as quoted YAML, from content mode and prose mode alike, once each write path lands; until then records filed through that path stay OCTAVE, and existing OCTAVE records are never migrated."
   BECAUSE::"The operator ruled YAML for every new record and confirmed prose mode is included; one write format avoids two authoring paths, and readers already handle both syntaxes since PR 218 merged."
+  REVISION::"2026-10-31: AUTHORED_AT and RATIFIED_AT set to date precision; the earlier 01:40Z value was an estimate later than the measured filing time"
 ===END===
