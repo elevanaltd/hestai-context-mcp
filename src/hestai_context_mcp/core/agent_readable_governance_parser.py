@@ -931,7 +931,7 @@ def _emit_ids(entries: list, block: str, allowed: frozenset[str]) -> list[dict]:
             if key not in allowed:
                 raise YamlSyntaxError("unknown_block_key", key)
         entry_id = entry.get("id")
-        if not isinstance(entry_id, str) or not _YAML_ENTRY_ID_RE.match(entry_id):
+        if not isinstance(entry_id, str) or not _YAML_ENTRY_ID_RE.fullmatch(entry_id):
             raise YamlSyntaxError("invalid_block_entry", f"{block} entry id {entry_id!r}")
         if entry_id in seen:
             raise YamlSyntaxError("duplicate_key", entry_id)
