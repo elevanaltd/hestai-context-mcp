@@ -49,9 +49,24 @@ CORE = {
 }
 
 
+_SCRUB = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_COUNT",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+)
+
+
 def _spy(monkeypatch: pytest.MonkeyPatch, module: Any) -> MagicMock:
     spy = MagicMock(side_effect=read_record)
-    monkeypatch.setattr(module, "read_record", spy)
+    monkeypatch.setattr(module, "read_record", spy, raising=False)
     return spy
 
 
@@ -108,7 +123,7 @@ def _hermetic_repo(repo: Path) -> None:
 
 @pytest.fixture()
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    for var in ("GITHUB_TOKEN", "GH_TOKEN"):
+    for var in _SCRUB:
         monkeypatch.delenv(var, raising=False)
     root = tmp_path / "repo"
     root.mkdir()
@@ -156,3 +171,20 @@ def test_linker_refuses_to_commit_a_record_the_reader_rejects(
     assert out["error"] is not None and "read-back" in out["error"]
     assert out["branch"] is None
     open_pr.assert_not_called()
+    # nothing reached origin and the base commit is untouched
+    heads = subprocess.run(
+        ["git", "ls-remote", "--heads", "origin"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert [line.split("\t")[1] for line in heads.splitlines()] == ["refs/heads/main"]
+    count = subprocess.run(
+        ["git", "rev-list", "--all", "--count"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert count == "1"

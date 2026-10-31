@@ -17,13 +17,22 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from hestai_context_mcp.core.agent_readable_governance_parser import emit_yaml_record
+from hestai_context_mcp.core import agent_readable_governance_parser as _parser
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    emit_yaml_record,
+)
 from hestai_context_mcp.tools import submit_governance as sg
 from hestai_context_mcp.tools.governance import type_checker
 
 from .governance._agr_fixtures import snapshot_tree, write_record, yaml_record_text
 
 pytestmark = pytest.mark.unit
+
+
+def canonicalize_yaml_record(raw: str | bytes) -> str:
+    """Late-bound so a missing implementation fails the test, not collection of the suite."""
+    return _parser.canonicalize_yaml_record(raw)  # type: ignore[attr-defined,no-any-return]
+
 
 TOKEN = "HO-ESCAPES-20261029"
 OCTAVE_TOKEN = "HO-CONTEXT-MCP-NEWREC-20260601"
@@ -94,7 +103,11 @@ def test_yaml_result_has_the_same_i4_keys_as_an_octave_result(tmp_path: Path) ->
     yaml_result = _submit(tmp_path, emit_yaml_record(CORE, None, None))
     octave_result = _submit(tmp_path, OCTAVE_RECORD)
     assert octave_result["success"] is True
+    assert yaml_result["success"] is True
     assert set(yaml_result) == set(octave_result)
+    # Gate B is skipped for YAML but its fields stay in the result shape.
+    assert "octave_validation" in yaml_result
+    assert "real_validation_available" in yaml_result
 
 
 def test_octave_content_still_targets_dot_oct_md(tmp_path: Path) -> None:
@@ -140,14 +153,25 @@ def test_a_rejected_yaml_record_never_reaches_the_linker(
 ) -> None:
     linker = MagicMock(side_effect=AssertionError("linker ran"))
     monkeypatch.setattr(sg, "run_linker", linker)
-    _submit(tmp_path, yaml_record_text(token=TOKEN, decision_literal="unquoted words"))
+    result = _submit(
+        tmp_path, yaml_record_text(token=TOKEN, decision_literal="unquoted words"), dry_run=False
+    )
+    assert result["success"] is False
+    assert any("line 8" in e and "unquoted_value" in e for e in result["validation_errors"])
     linker.assert_not_called()
 
 
-def test_yaml_validation_is_handed_to_the_linker_with_the_yaml_target(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    content = emit_yaml_record(CORE, None, None)
+def _noncanonical() -> str:
+    return yaml_record_text(
+        token=TOKEN,
+        authored_at="2026-10-29T00:00:00Z",
+        scope="repo",
+        body="# Body\r\nverbatim\r\n",
+        eol="\r\n",
+    )
+
+
+def _stub_linker(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     linker = MagicMock(
         return_value={
             "token": TOKEN,
@@ -159,12 +183,51 @@ def test_yaml_validation_is_handed_to_the_linker_with_the_yaml_target(
         }
     )
     monkeypatch.setattr(sg, "run_linker", linker)
-    result = _submit(tmp_path, content, dry_run=False)
+    return linker
+
+
+def test_the_linker_is_handed_the_canonical_bytes_not_the_submitted_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling (C): parse, then write the canonical front matter + the verbatim body."""
+    submitted = _noncanonical()
+    linker = _stub_linker(monkeypatch)
+    result = _submit(tmp_path, submitted, dry_run=False)
     assert result["success"] is True
     kwargs = linker.call_args.kwargs
-    assert kwargs["octave_content"] == content  # written byte-exact
+    canonical = canonicalize_yaml_record(submitted)
+    assert canonical != submitted
+    assert kwargs["octave_content"] == canonical
+    assert kwargs["octave_content"].endswith("---\n# Body\r\nverbatim\r\n")
     assert kwargs["validation"].syntax == "yaml"
+    assert kwargs["validation"].canonical_content == canonical
     assert kwargs["validation"].target_path == tmp_path / ".hestai" / "decisions" / f"{TOKEN}.md"
+
+
+def test_octave_content_is_handed_to_the_linker_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    linker = _stub_linker(monkeypatch)
+    _submit(tmp_path, OCTAVE_RECORD, dry_run=False)
+    assert linker.call_args.kwargs["octave_content"] == OCTAVE_RECORD
+
+
+def test_stage5_review_runs_unchanged_on_the_yaml_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decided: Stage-5 is not skipped for YAML; it reviews the text that was written."""
+    _stub_linker(monkeypatch)
+    review = AsyncMock(return_value={"posted": False})
+    monkeypatch.setattr(sg, "_run_semantic_review", review)
+    submitted = _noncanonical()
+    result = asyncio.run(
+        sg.submit_governance(
+            working_dir=str(tmp_path), octave_content=submitted, dry_run=False, review=True
+        )
+    )
+    assert result["success"] is True
+    review.assert_awaited_once()
+    assert review.await_args.args[0] == canonicalize_yaml_record(submitted)
 
 
 # --- PIN (passes today): prose mode is unchanged and still OCTAVE -----------------

@@ -304,3 +304,62 @@ def test_token_with_trailing_whitespace_is_not_a_token(tmp_path: Path, suffix: s
     assert not result.valid
     assert result.target_path is None
     assert _has(result.errors, "TOKEN", "format")
+
+
+# --- write-mode ruling (C): Gate A hands the linker the CANONICAL bytes -------------
+
+
+def _submitted_noncanonical() -> str:
+    return yaml_record_text(
+        token=TOKEN,
+        authored_at="2026-10-29T00:00:00Z",
+        scope="repo",
+        body="# Body\r\nkept verbatim\r\n",
+        eol="\r\n",
+    )
+
+
+def test_a_valid_yaml_record_carries_its_canonical_bytes(tmp_path: Path) -> None:
+    from hestai_context_mcp.core.agent_readable_governance_parser import (
+        canonicalize_yaml_record,
+    )
+
+    submitted = _submitted_noncanonical()
+    result = validate_record_content(tmp_path, submitted)
+    assert result.valid, result.errors
+    assert result.canonical_content == canonicalize_yaml_record(submitted)
+    assert result.canonical_content != submitted
+    assert result.canonical_content.endswith("---\n# Body\r\nkept verbatim\r\n")  # type: ignore[union-attr]
+    # canonical bytes are themselves accepted and map to themselves
+    again = validate_record_content(tmp_path, result.canonical_content or "")
+    assert again.valid and again.canonical_content == result.canonical_content
+
+
+def test_octave_validation_has_no_canonical_content(tmp_path: Path) -> None:
+    result = validate_record_content(tmp_path, _octave())
+    assert result.valid
+    assert result.canonical_content is None
+
+
+def test_a_rejected_yaml_record_has_no_canonical_content(tmp_path: Path) -> None:
+    result = validate_record_content(tmp_path, _yaml(STATUS="DONE"))
+    assert not result.valid
+    assert result.canonical_content is None
+
+
+def test_a_round_trip_mismatch_is_a_gate_a_error_naming_field_and_construct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hestai_context_mcp.core import agent_readable_governance_parser as parser
+
+    real = parser.emit_yaml_record
+    monkeypatch.setattr(
+        parser,
+        "emit_yaml_record",
+        lambda *a, **k: real(*a, **k).replace("rationale", "rationalX"),
+    )
+    result = validate_record_content(tmp_path, _yaml())
+    assert not result.valid
+    assert result.target_path is None
+    assert result.canonical_content is None
+    assert _has(result.errors, "round_trip_mismatch", "because")
