@@ -104,13 +104,13 @@ def test_a_column_zero_opener_and_closing_bracket_close_the_list() -> None:
     "middle",
     [
         # a SIBLING at the opener's indent breaks the list
-        "  AFFECTS::[\n    A,\n    B\n  SCOPE::PROD\n",
+        "  AFFECTS::[\n    A,\n    B\n  SCOPE::PROD\n  ]\n",
         # ... even after nested key items
-        "  AFFECTS::[\n    A::x,\n    B::[\n      C\n    ]\n  SCOPE::PROD\n",
+        "  AFFECTS::[\n    A::x,\n    B::[\n      C\n    ]\n  SCOPE::PROD\n  ]\n",
         # a field SHALLOWER than the opener breaks it
-        "    AFFECTS::[\n      A,\n  SCOPE::PROD\n",
+        "    AFFECTS::[\n      A,\n  SCOPE::PROD\n    ]\n",
         # a column-zero block header breaks it
-        "  AFFECTS::[\n    A::x,\nCURRENT:\n",
+        "  AFFECTS::[\n    A::x,\nCURRENT:\n  ]\n",
     ],
 )
 def test_an_unterminated_list_followed_by_a_sibling_still_fails_loudly(middle: str) -> None:
@@ -159,5 +159,5 @@ def test_a_tab_plus_spaces_item_is_deeper_than_a_four_space_opener() -> None:
 
 def test_a_four_space_sibling_is_the_same_depth_as_a_tab_opener() -> None:
     """A tab opener is 4 columns; a four-space ``KEY::`` line is NOT deeper, so it breaks the list."""
-    text = _record("\tAFFECTS::[\n\t\tA,\n    SCOPE::PROD\n")
+    text = _record("\tAFFECTS::[\n\t\tA,\n    SCOPE::PROD\n\t]\n")
     assert diagnose_octave_record(text) == {"line": _OPENS_AT, "construct": "unterminated_list"}
