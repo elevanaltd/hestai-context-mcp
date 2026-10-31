@@ -294,3 +294,13 @@ def test_the_same_token_under_a_subgroup_still_collides(tmp_path: Path) -> None:
     group.mkdir()
     (group / f"{TOKEN}.oct.md").write_text("junk", encoding="utf-8")
     assert _has(_errors(tmp_path, _yaml()), "already exists")
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\t", " "])
+def test_token_with_trailing_whitespace_is_not_a_token(tmp_path: Path, suffix: str) -> None:
+    """``$`` matches before a trailing LF, so the format check must be a full match."""
+    text = yaml_record_text(token=f"{TOKEN}{suffix}")
+    result = validate_record_content(tmp_path, text)
+    assert not result.valid
+    assert result.target_path is None
+    assert _has(result.errors, "TOKEN", "format")
