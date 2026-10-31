@@ -653,9 +653,7 @@ def _parse_fidelity(
         "cost_is_estimate": cost_is_estimate,
     }
     verdict = verdict_match.group(1) if verdict_match else None
-    named = [
-        rid for rid in ids if any(re.search(rf"\b{re.escape(rid)}\b", c) for c in concerns)
-    ]
+    named = [rid for rid in ids if any(re.search(rf"\b{re.escape(rid)}\b", c) for c in concerns)]
 
     if verdict == "APPROVED" and not concerns:
         return {
@@ -718,9 +716,7 @@ async def review_ruling_fidelity(
     def parse(
         raw: str, model: str, tokens: int, cost: float, *, cost_is_estimate: bool
     ) -> ReviewResult:
-        return _parse_fidelity(
-            raw, model, tokens, cost, cost_is_estimate=cost_is_estimate, ids=ids
-        )
+        return _parse_fidelity(raw, model, tokens, cost, cost_is_estimate=cost_is_estimate, ids=ids)
 
     return await _execute_review(
         system_prompt=_FIDELITY_SYSTEM_PROMPT,
