@@ -18,7 +18,6 @@ Contract:
 
 from __future__ import annotations
 
-import hashlib
 from datetime import date
 
 import pytest
@@ -119,7 +118,10 @@ def test_base_fixture_is_canonical() -> None:
 
 class TestRecordHash:
     def test_sha256_prefix_and_hex_of_the_bytes(self) -> None:
-        assert record_hash(b"abc") == "sha256:" + hashlib.sha256(b"abc").hexdigest()
+        # FIPS 180-2 published SHA-256 test vector for "abc" (independent of the code).
+        assert record_hash(b"abc") == (
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
 
 
 class TestSingleAppend:
@@ -296,11 +298,13 @@ class TestContractInvariants:
         front = emit_yaml_record(fields, collect_topic_blocks(text))
         assert front + _BODY == text
 
-    def test_hash_of_rendered_bytes(self) -> None:
+    def test_hash_of_rendered_bytes_is_a_known_literal(self) -> None:
+        # Pinned literal: sha256 of the bytes this fixture renders to on _TODAY, computed
+        # once outside record_hash. It changes only if the rendered bytes change.
         outcome = _render()
         assert outcome.text is not None
         assert record_hash(outcome.text.encode("utf-8")) == (
-            "sha256:" + hashlib.sha256(outcome.text.encode("utf-8")).hexdigest()
+            "sha256:656c4b9b14d3d4ed4583ac238778148abb536562a5bed4ffae0bbf86b1d1f6f7"
         )
 
 
