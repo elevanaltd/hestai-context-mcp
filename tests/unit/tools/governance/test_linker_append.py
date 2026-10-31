@@ -160,13 +160,27 @@ class TestReadAppendBase:
         base = read_append_base(repo, TOPIC_TOKEN)
         assert base.error_code == "TOKEN_NOT_FOUND_AT_MAIN"
 
-    def test_md_without_the_yaml_header_is_ignored(self, tmp_path: Path) -> None:
-        readme = f'# Notes\n\ntoken: "{TOPIC_TOKEN}"\nTOKEN::{TOPIC_TOKEN}\n'
+    def test_md_that_only_mentions_the_token_is_ignored(self, tmp_path: Path) -> None:
+        # No fences, so the token: line is not a YAML declaration; prose cites the TOKEN.
+        readme = f'# Notes\n\ntoken: "{TOPIC_TOKEN}"\nSee {TOPIC_TOKEN} for the rules.\n'
         repo, _ = init_topic_repo(
             tmp_path, {TOPIC_PATH: TOPIC_RECORD, ".hestai/decisions/README.md": readme}
         )
         base = read_append_base(repo, TOPIC_TOKEN)
         assert base.error_code is None and base.path == TOPIC_PATH
+
+    def test_md_with_a_top_level_token_line_is_a_collision_not_a_target(
+        self, tmp_path: Path
+    ) -> None:
+        # lexer.declares_token on raw text: a bare TOKEN:: line declares, whatever the file.
+        readme = f"# Notes\n\nTOKEN::{TOPIC_TOKEN}\n"
+        repo, _ = init_topic_repo(
+            tmp_path, {TOPIC_PATH: TOPIC_RECORD, ".hestai/decisions/README.md": readme}
+        )
+        base = read_append_base(repo, TOPIC_TOKEN)
+        assert base.error_code == "TOKEN_AMBIGUOUS_AT_MAIN"
+        assert ".hestai/decisions/README.md" in (base.error or "")
+        assert TOPIC_PATH in (base.error or "")
 
     def test_token_declared_twice_is_ambiguous(self, tmp_path: Path) -> None:
         repo, _ = init_topic_repo(

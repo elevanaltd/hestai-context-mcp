@@ -1126,7 +1126,8 @@ def _token_record_paths(working_dir: Path, token: str) -> set[Path]:
     The readers' pairing applies: an ``.oct.md`` declares only as OCTAVE, a plain
     ``.md`` under ``.hestai/decisions`` only as a YAML record with the DECISION_RECORD
     header. Unlike the lexer's boolean lookup, a YAML file that declares the TOKEN but
-    does not parse still counts, and same-name files count whatever they hold.
+    does not parse still counts, and same-name files (decisions or concepts) count
+    whatever they hold.
     """
     found = set(_existing_record_files(working_dir, token))
     hestai = working_dir / ".hestai"
@@ -1140,7 +1141,9 @@ def _token_record_paths(working_dir: Path, token: str) -> set[Path]:
                 record = read_record(path)
             except OSError:
                 continue
-            if path.name.endswith(".oct.md"):
+            if path.name in (f"{token}.md", f"{token}.oct.md"):
+                hit = True
+            elif path.name.endswith(".oct.md"):
                 hit = record.syntax == "octave" and declares_token(record.text, token)
             else:
                 hit = (
@@ -1164,7 +1167,13 @@ def _display_path(working_dir: Path, path: Path) -> str:
 def _check_rewrite_is_sole_match(
     working_dir: Path, token: str, rewritten: Path, errors: list[str]
 ) -> None:
-    """§4.1 #4 for an append_ruling rewrite: ``rewritten`` may be the TOKEN's only match."""
+    """§4.1 #4 for an append_ruling rewrite: ``rewritten`` may be the TOKEN's only match.
+
+    This judges the caller's checkout. Zero local matches (a checkout behind main) are
+    accepted ONLY because the append path has already enforced the same sole-match rule
+    at the pinned main OID the branch is cut from (``linker.read_append_base``, CE
+    6538573589); this local check is the second line, not the authority.
+    """
     target = rewritten if rewritten.is_absolute() else working_dir / rewritten
     if not target.name.endswith(".md") or target.name.endswith(".oct.md"):
         errors.append(

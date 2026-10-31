@@ -1572,6 +1572,7 @@ def run_linker(
 
 _BASE_UNDETERMINED_PREFIX = "BASE_UNDETERMINED: "
 _DECISIONS_DIR = ".hestai/decisions"
+_CONCEPTS_DIR = ".hestai/context/concepts"
 
 
 @dataclass(frozen=True)
@@ -1603,12 +1604,16 @@ def _undetermined(message: str, main_oid: str | None = None) -> AppendBase:
 
 def _list_decision_blobs(working_dir: Path, oid: str) -> tuple[list[tuple[str, str]], str | None]:
     """``(blob_oid, path)`` for every ``*.md`` (``.oct.md`` included) under the
-    decisions dir at ``oid``; which of them are records is decided on content."""
+    decisions and concepts dirs at ``oid`` (one ``ls-tree``); which of them are
+    records, or TOKEN matches, is decided on content."""
     code, out, stderr = _run_git_bytes(
-        ["ls-tree", "-r", "-z", oid, "--", _DECISIONS_DIR], working_dir
+        ["ls-tree", "-r", "-z", oid, "--", _DECISIONS_DIR, _CONCEPTS_DIR], working_dir
     )
     if code != 0:
-        return [], f"git ls-tree -r -z {oid} -- {_DECISIONS_DIR} failed (exit {code}): {stderr}"
+        return [], (
+            f"git ls-tree -r -z {oid} -- {_DECISIONS_DIR} {_CONCEPTS_DIR} "
+            f"failed (exit {code}): {stderr}"
+        )
     blobs: list[tuple[str, str]] = []
     for raw in out.split(b"\0"):
         if not raw:
@@ -1668,6 +1673,22 @@ def _declares_at_main(path: str, data: bytes, token: str) -> bool:
     )
 
 
+def _matches_token_at_main(path: str, data: bytes, token: str) -> bool:
+    """True iff the blob at ``path`` could collide with ``token``: it declares it, or is
+    named for it.
+
+    "Declares" is exactly ``lexer.declares_token`` (a top-level ``TOKEN::`` / ``ID::``
+    line, or the fenced YAML ``token:`` line) on the blob's text, with NO extension
+    pairing and NO parse requirement, so a malformed twin still counts. It is never a
+    substring test: a record that only cites the TOKEN (``AMENDS``,
+    ``RELATED_DECISIONS``, prose) does not match.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if name in (f"{token}.md", f"{token}.oct.md"):
+        return True
+    return declares_token(classify_record_text(data).text, token)
+
+
 def read_append_base(working_dir: Path, token: str) -> AppendBase:
     """Fetch, resolve ``origin/main`` ONCE, and read ``token``'s record at that OID.
 
@@ -1675,6 +1696,12 @@ def read_append_base(working_dir: Path, token: str) -> AppendBase:
     blobs in the main tree -- never the caller's local tree -- with the readers'
     strict extension pairing (``_declares_at_main``), and its blob bytes are
     hashed for the ADR-RFC-ARCH-004 §1.1/§3.5 CAS.
+
+    TOKEN uniqueness is judged HERE, at the same OID the branch is cut from
+    (CE 6538573589): any other blob under decisions or concepts that declares the
+    TOKEN or is named for it (``_matches_token_at_main``) refuses the append as
+    ``TOKEN_AMBIGUOUS_AT_MAIN``, naming every match. The caller's checkout cannot
+    hide a twin that main holds.
     """
     fetch_err = _fetch_origin(working_dir)
     if fetch_err:
@@ -1690,11 +1717,14 @@ def read_append_base(working_dir: Path, token: str) -> AppendBase:
     if read_err:
         return _undetermined(read_err, main_oid)
 
+    listed = list(zip((path for _, path in blobs), contents, strict=True))
     matches = [
         (path, data)
-        for (_, path), data in zip(blobs, contents, strict=True)
-        if _declares_at_main(path, data, token)
+        for path, data in listed
+        if path.startswith(f"{_DECISIONS_DIR}/") and _declares_at_main(path, data, token)
     ]
+    # Critical-Engineer: consulted for governance record uniqueness and pinned-main validation
+    colliding = sorted(path for path, data in listed if _matches_token_at_main(path, data, token))
     if not matches:
         return AppendBase(
             main_oid=main_oid,
@@ -1704,13 +1734,14 @@ def read_append_base(working_dir: Path, token: str) -> AppendBase:
                 f"at origin/main ({main_oid}); append_ruling amends merged records only."
             ),
         )
-    if len(matches) > 1:
+    if len(matches) > 1 or len(colliding) > 1:
         return AppendBase(
             main_oid=main_oid,
             error_code="TOKEN_AMBIGUOUS_AT_MAIN",
             error=(
-                f"TOKEN '{token}' is declared by {len(matches)} records at origin/main "
-                f"({', '.join(path for path, _ in matches)}); refusing to guess which to amend."
+                f"TOKEN '{token}' matches {len(colliding)} files at origin/main "
+                f"({', '.join(colliding)}): each declares the TOKEN or is named for it. "
+                "append_ruling rewrites a TOKEN's only file; resolve the duplicate first."
             ),
         )
     path, data = matches[0]
