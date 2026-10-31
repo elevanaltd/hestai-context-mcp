@@ -29,13 +29,15 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     annotate_lines,
     canonicalize_yaml_record,
     classify_record_text,
+    has_yaml_decision_header,
     iter_block_lines,
     list_items,
     parse_decision_record,
     parse_supersedes_list,
     read_octave_fields,
+    read_record,
 )
-from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
+from hestai_context_mcp.tools.governance.lexer import declares_token, lookup_token_deterministic
 
 # ---------------------------------------------------------------------------
 # Regex patterns (compiled once at module load)
@@ -1067,7 +1069,9 @@ def _validate_impl(
 # ---------------------------------------------------------------------------
 
 
-def validate_record_content(working_dir: Path, content: str) -> ValidationResult:
+def validate_record_content(
+    working_dir: Path, content: str, *, existing_record: Path | None = None
+) -> ValidationResult:
     """The syntax seam: classify ``content`` once, then run the matching Gate A branch.
 
     A quoted-YAML record (first line ``---``, ADR-RFC-ARCH-004 §1.1) is judged by
@@ -1080,6 +1084,14 @@ def validate_record_content(working_dir: Path, content: str) -> ValidationResult
     prose-mode-emits-YAML change can reuse :func:`decision_record_path` and
     ``ValidationResult.syntax``.
 
+    ``existing_record`` (#203 S2) is for the append_ruling path ONLY: the path of the
+    YAML ``.md`` record being rewritten. The YAML branch's §4.1 #4 uniqueness check then
+    accepts that one file as the TOKEN's match, and nothing else: any other record file
+    (``.md`` or ``.oct.md``) under ``.hestai/decisions`` or ``.hestai/context/concepts``
+    that declares the TOKEN or is named for it (an ``.oct.md`` twin, a second ``.md``)
+    still raises the duplicate error. Non-record files (e.g. ``.txt``) never count. The OCTAVE branch ignores it. Content mode never passes
+    it, so a new record still needs an unused TOKEN.
+
     Never raises on bad input. Always returns a ValidationResult.
     """
     record = classify_record_text(content)
@@ -1088,7 +1100,9 @@ def validate_record_content(working_dir: Path, content: str) -> ValidationResult
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        return _validate_yaml_impl(working_dir, record, content, errors, warnings)
+        return _validate_yaml_impl(
+            working_dir, record, content, errors, warnings, existing_record=existing_record
+        )
     except Exception as exc:  # noqa: BLE001
         errors.append(f"Unexpected validation error: {exc}")
         return ValidationResult(valid=False, errors=errors, warnings=warnings, syntax="yaml")
@@ -1107,12 +1121,87 @@ def _existing_record_files(working_dir: Path, token: str) -> list[Path]:
     return sorted(path for path in found if path.is_file())
 
 
+def _token_record_paths(working_dir: Path, token: str) -> set[Path]:
+    """Every record file (``.md`` / ``.oct.md``) under ``.hestai/decisions`` or
+    ``.hestai/context/concepts`` that declares ``token`` or is named for it (resolved).
+
+    The readers' pairing applies: an ``.oct.md`` declares only as OCTAVE, a plain
+    ``.md`` under ``.hestai/decisions`` only as a YAML record with the DECISION_RECORD
+    header. Unlike the lexer's boolean lookup, a YAML file that declares the TOKEN but
+    does not parse still counts, and same-name files (decisions or concepts) count
+    whatever they hold. Non-record files and MANIFEST rows are not consulted. This is
+    the LOCAL second line; the authority is the broader main-OID check in
+    ``linker.read_append_base``.
+    """
+    found = set(_existing_record_files(working_dir, token))
+    hestai = working_dir / ".hestai"
+    for root in (hestai / "decisions", hestai / "context" / "concepts"):
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.md"):
+            if not path.is_file():
+                continue
+            try:
+                record = read_record(path)
+            except OSError:
+                continue
+            if path.name in (f"{token}.md", f"{token}.oct.md"):
+                hit = True
+            elif path.name.endswith(".oct.md"):
+                hit = record.syntax == "octave" and declares_token(record.text, token)
+            else:
+                hit = (
+                    root.name == "decisions"
+                    and record.syntax == "yaml"
+                    and has_yaml_decision_header(record.text)
+                    and declares_token(record.text, token)
+                )
+            if hit:
+                found.add(path)
+    return {path.resolve() for path in found}
+
+
+def _display_path(working_dir: Path, path: Path) -> str:
+    try:
+        return path.relative_to(working_dir.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _check_rewrite_is_sole_match(
+    working_dir: Path, token: str, rewritten: Path, errors: list[str]
+) -> None:
+    """§4.1 #4 for an append_ruling rewrite: ``rewritten`` may be the TOKEN's only match.
+
+    This judges the caller's checkout. Zero local matches (a checkout behind main) are
+    accepted ONLY because the append path has already enforced the same sole-match rule
+    at the pinned main OID the branch is cut from (``linker.read_append_base``, CE
+    6538573589); this local check is the second line, not the authority.
+    """
+    target = rewritten if rewritten.is_absolute() else working_dir / rewritten
+    if not target.name.endswith(".md") or target.name.endswith(".oct.md"):
+        errors.append(
+            f"existing_record must name the YAML .md record being rewritten "
+            f"(got {target.name!r})."
+        )
+        return
+    target = target.resolve()
+    for other in sorted(_token_record_paths(working_dir, token) - {target}):
+        errors.append(
+            f"TOKEN/ID '{token}' already exists in the governance store: '{other.name}' "
+            f"at {_display_path(working_dir, other)} also declares or is named for it, so "
+            f"rewriting {_display_path(working_dir, target)} would leave a duplicate."
+        )
+
+
 def _validate_yaml_impl(
     working_dir: Path,
     record: RecordText,
     raw_content: str,
     errors: list[str],
     warnings: list[str],
+    *,
+    existing_record: Path | None = None,
 ) -> ValidationResult:
     """Gate A for a quoted-YAML DECISION_RECORD (reader errors + the shared invariants)."""
     if record.diagnostic is not None:
@@ -1193,7 +1282,10 @@ def _validate_yaml_impl(
         _check_issue_ref_shape(fields["ISSUE_REF"], errors)
 
     # --- TOKEN uniqueness ACROSS .oct.md and .md (§4.1 #4) ---
-    if lookup_token_deterministic(working_dir, token):
+    # An append_ruling rewrite may match its OWN file and nothing else.
+    if existing_record is not None:
+        _check_rewrite_is_sole_match(working_dir, token, existing_record, errors)
+    elif lookup_token_deterministic(working_dir, token):
         errors.append(
             f"TOKEN/ID '{token}' already exists in the governance store. "
             "Duplicate tokens are not allowed for new records."
