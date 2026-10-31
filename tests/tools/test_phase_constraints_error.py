@@ -37,7 +37,7 @@ DELIVERABLES::[
   tests
 RACI::"IL[R]"
 ===END==="""
-UNTERMINATED_LINE = 5
+UNTERMINATED_LINE = 4  # the `DELIVERABLES::[` opener
 
 TEXT_AFTER_LIST = """===WORKFLOW===
 B1_BUILD_PLAN::BUILD_PLAN_EXECUTION
@@ -92,7 +92,7 @@ def test_unterminated_list_is_contained_and_reported(tmp_path, call):
     assert ctx["phase_constraints_error"] == {
         "code": "WORKFLOW_PARSE_FAILED",
         "file": WORKFLOW_REL,
-        "line": UNTERMINATED_LINE - 2,
+        "line": UNTERMINATED_LINE,
         "construct": "unterminated_list",
     }
     # every other position is still returned
