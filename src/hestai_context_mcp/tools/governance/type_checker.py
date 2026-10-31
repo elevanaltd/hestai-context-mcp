@@ -705,7 +705,8 @@ def _check_reasoning_density(content: str, errors: list[str]) -> None:
 
     DECISION and BECAUSE MUST each be a well-formed double-quoted flat string of
     AT MOST ``MAX_REASONING_WORDS`` words with NO embedded newline (the ratified
-    ``FORMAT_RULE::DECISION∧BECAUSE=flat_strings`` of #101). The check is purely
+    ``FORMAT_RULE`` flat strings of #101, relations in plain words per
+    HO-AGR-PLAIN-WORDS-REASONING-20261031). The check is purely
     value-level (no structural OCTAVE re-parse) and validates the SAME value the
     read layer surfaces, so the guard and ``agr_read`` cannot diverge (#88 parity
     strengthened):
@@ -749,7 +750,7 @@ def _check_reasoning_density(content: str, errors: list[str]) -> None:
                 f'({key}::"…") with no leading or trailing content; an unquoted, '
                 "multi-line, or garbage-padded value is rejected — "
                 "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13 "
-                "(FORMAT_RULE: DECISION∧BECAUSE = flat_strings)."
+                "(DECISION and BECAUSE are flat strings; write relations in plain words)."
             )
             continue
 
@@ -765,17 +766,17 @@ def _check_density_value(key: str, value: str, errors: list[str]) -> None:
         errors.append(
             f"{key} value contains an embedded newline; reasoning fields MUST "
             "be a single flat line (no newline) — ADR-RFC-ARCH-004 v1.1 §1.2 / "
-            "§4.1 #13. Compress to one telegraphic line using OCTAVE operators "
-            "(→ ⇌ ∴ ⊕) for the connectives."
+            "§4.1 #13. Write one flat line, with relations in plain words "
+            "(because, so, and, or), never arrows or symbols."
         )
 
     word_count = len(value.split())
     if word_count > MAX_REASONING_WORDS:
         errors.append(
             f"{key} value is {word_count} words (max {MAX_REASONING_WORDS}); "
-            "reasoning fields MUST be compressed bytecode, not prose — "
-            "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13. Drop stopwords and let "
-            "OCTAVE operators (→ ⇌ ∴ ⊕) carry the connectives."
+            "reasoning fields MUST be short flat strings, not prose — "
+            "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13. Drop filler words and write "
+            "relations in plain words, never arrows or symbols."
         )
 
 

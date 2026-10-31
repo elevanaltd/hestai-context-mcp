@@ -176,33 +176,34 @@ _COMPRESSION_CONTRACT = (
     "COMPRESSION CONTRACT (octave-compression CONSERVATIVE tier):\n"
     "- PRESERVE causal chains, BECAUSE reasoning, IDs/TOKENs, thresholds, named entities.\n"
     "- DROP stopwords, repetition, narrative connectives.\n"
-    "- Reasoning fields (DECISION, BECAUSE, RATIONALE, WHY) MUST be telegraphic phrases, "
-    "NOT multi-sentence prose paragraphs. Let operators carry the connectives: "
-    "→ (causality/flow), ⇌ (tension), ∴ (therefore), ⊕ (synthesis), ∧ (and), ∨ (or).\n"
+    "- Reasoning fields (DECISION, BECAUSE, RATIONALE, WHY) MUST be short flat phrases, "
+    "NOT multi-sentence prose paragraphs. Write relations in plain words (because, so, "
+    "and, or, but, while), never arrows or symbols. Each DECISION and BECAUSE stays one "
+    "flat double-quoted string of at most 40 words with no newline.\n"
     "- NEVER emit an enumerated mega-string ('(1)... (2)... (3)...') inside one value; "
     "split enumerated points into BLOCK-structured keyed children.\n"
     "- Declare loss accounting in META: COMPRESSION_TIER::CONSERVATIVE and a "
     'LOSS_PROFILE::"[preserve:...,drop:...]" — loss is explicit, never hidden.\n'
-    # Worked few-shot: verbose operator prose -> flat bytecode. The BEFORE pole is
+    # Worked few-shot: verbose prose -> flat plain-word string. The BEFORE pole is
     # genuinely guard-FAILING (>40-word multi-sentence prose value) so "REJECTED"
-    # is literally true under the Gate-A ≤40-word guard; the AFTER lines are
-    # themselves guard-passing (single quoted flat string, no newline, ≤40 words,
-    # operators carrying the connectives, no nested keys). The example is a SHAPE
-    # demonstration only — never copy its content into the output.
-    "EXAMPLE (verbose prose → flat bytecode) — transform the value form, do NOT "
+    # is literally true under the Gate-A <=40-word guard; the AFTER lines are
+    # themselves guard-passing (single quoted flat string, no newline, <=40 words,
+    # relations in plain words, no nested keys). The example is a SHAPE
+    # demonstration only - never copy its content into the output.
+    "EXAMPLE (verbose prose to flat string) - transform the value form, do NOT "
     "copy this content:\n"
-    "  BEFORE (verbose, REJECTED — >40-word multi-sentence prose value, fails the "
-    "Gate-A ≤40-word guard):\n"
+    "  BEFORE (verbose, REJECTED - >40-word multi-sentence prose value, fails the "
+    "Gate-A 40-word guard):\n"
     '    DECISION::"We have decided that the archive write path should always redact '
     "credentials in a strictly fail-closed manner, which means that whenever the "
     "redaction regex does not match the expected pattern we will drop the entire "
     "record rather than take any risk of persisting a secret, because we believe that "
     'losing data is far more acceptable than ever exposing a credential."\n'
-    "  AFTER (flat bytecode, ACCEPTED — telegraphic, operators carry connectives):\n"
-    '    DECISION::"Adopt fail-closed redaction on archive write → drop record on '
-    'regex miss ∴ data-loss preferred over credential exposure ⊕ zero secrets persist"\n'
-    '    BECAUSE::"Single leaked credential ⇌ security incident → unacceptable blast '
-    'radius ∴ fail closed ⊕ redaction runs before persistence not after"\n'
+    "  AFTER (flat string, ACCEPTED - plain words, one line, at most 40 words):\n"
+    '    DECISION::"Redact credentials on archive write and fail closed: drop the record '
+    'when the regex misses, so data loss is preferred over credential exposure."\n'
+    '    BECAUSE::"A single leaked credential is a security incident with unacceptable '
+    'reach, so redaction runs before persistence, not after."\n'
     "METADATA FIDELITY — never fabricate governance provenance:\n"
     "- STATUS reflects the ACTUAL lifecycle. A newly authored record defaults to "
     "STATUS::PROPOSED. NEVER assert STATUS::RATIFIED — ratification is the human PR "
