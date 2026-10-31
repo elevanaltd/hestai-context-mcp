@@ -474,6 +474,30 @@ class TestRunAppendLinker:
         assert out["branch"] is None
         assert git(["branch", "--list", f"governance/20261017-{_SLUG}-r4"], repo) == ""
 
+    def test_failed_head_resolve_after_commit_refuses_before_push(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, _ = init_topic_repo(tmp_path)
+        oid = git(["rev-parse", "origin/main"], repo)
+        real = linker._run_git
+
+        def runner(args: list[str], cwd: Path) -> tuple[int, str, str]:
+            if args == ["rev-parse", "--verify", "HEAD^{commit}"]:
+                return 128, "", ""
+            return real(args, cwd)
+
+        monkeypatch.setattr(linker, "_run_git", runner)
+        pushed: list[str] = []
+        monkeypatch.setattr(linker, "_push_branch", lambda wd, b: pushed.append(b))
+        stub = _PrStub()
+        out = _run(repo, oid, monkeypatch, stub)
+        assert out["error"] is not None
+        assert out["error"].startswith("LINKER_FAILED: ")
+        assert "rev-parse HEAD" in out["error"]
+        assert pushed == [] and stub.calls == []
+        assert out["branch"] is None and out["pr_url"] is None and out["head_sha"] is None
+        assert git(["branch", "--list", f"governance/20261017-{_SLUG}-r4"], repo) == ""
+
     def test_push_failure_rolls_back_the_local_branch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

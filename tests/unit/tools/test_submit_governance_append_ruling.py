@@ -458,6 +458,26 @@ class TestLivePath:
         )
         assert "semantic_review" not in result
 
+    async def test_failed_head_resolve_after_commit_is_linker_failed(
+        self, tmp_path: Path, stubs, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, _ = init_topic_repo(tmp_path)
+        real = linker._run_git
+
+        def runner(args: list[str], cwd: Path) -> tuple[int, str, str]:
+            if args == ["rev-parse", "--verify", "HEAD^{commit}"]:
+                return 1, "", ""
+            return real(args, cwd)
+
+        monkeypatch.setattr(linker, "_run_git", runner)
+        result = await submit_governance(str(repo), append_ruling=_request())
+        assert result["success"] is False
+        assert result["error_code"] == "LINKER_FAILED"
+        assert any("rev-parse HEAD" in e for e in result["validation_errors"])
+        assert result["branch"] is None and result["pr_url"] is None
+        assert stubs["pr"].calls == [] and stubs["reviews"] == []
+        assert git(["ls-remote", "--heads", "origin"], repo).count("refs/heads/") == 1
+
     async def test_origin_main_is_read_by_name_once_across_the_whole_call(
         self, tmp_path: Path, stubs, monkeypatch: pytest.MonkeyPatch
     ) -> None:
