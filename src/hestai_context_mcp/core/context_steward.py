@@ -1,9 +1,44 @@
 """Context steward: Phase constraint synthesis from OCTAVE workflow documents.
 
 Reads OCTAVE workflow documents and extracts phase-specific constraints
-for agent context injection. Uses regex-based parsing (no octave_mcp dependency).
+for agent context injection. Parsing goes through the repo's single OCTAVE
+list grammar (``read_octave_fields`` / ``list_items`` in
+``agent_readable_governance_parser``), so a workflow written by hand (inline
+``KEY::[a,b]`` lists) and the same workflow rewritten by ``octave_write``
+(wrapped ``KEY::[`` lists) read identically. No octave-mcp import (PROD::I6).
 
 Harvested from legacy hestai-mcp core/governance/state/context_steward.py.
+
+Phase marker rule
+-----------------
+A *phase marker* is a field that meets BOTH conditions:
+
+* its key is ``<PHASE>_<WORD>[_<WORD>...]`` where ``<PHASE>`` is one of
+  ``D0 D1 D2 D3 B0 B1 B2 B3 B4 B5`` and every ``<WORD>`` is capital letters only
+  (``B1_HERMES_COORDINATION``, ``D0_MNEMOSYNE_GENESIS``); and
+* its value is a bare SCREAMING_SNAKE identifier (no quotes, no brackets), e.g.
+  ``BUILD_EXECUTION_ROADMAP``.
+
+A phase's fields are every field after its marker up to the first *end stop*: the
+next phase marker, a column-0 block header (``^[A-Z][A-Z0-9_]*:\\s*$``, e.g.
+``ERROR_HANDLING_TAXONOMY:``), or the ``===END===`` envelope. The first marker for
+a phase wins. Membership is decided by marker and line order, never by indentation
+(only D0 is indented, under ``WORKFLOW_PHASES:``).
+
+Known exclusions (fields that LOOK like markers but are not; each has a negative
+test):
+
+* list values: ``B5_CRITERIA::[...]`` is an ordinary field, not a B5 marker;
+* digit segments: ``B2_00_REQUIREMENTS::...`` is an ordinary field (letters only);
+* keys inside list values: ``B2_USAGE`` inside ``CONTEXT7_LIBRARY_RESEARCH::[...]``
+  is part of the list value, never a field key (inline or wrapped).
+
+The tests fail loudly if a workflow edit introduces a marker that breaks this rule
+(see ``test_context_steward_octave_grammar.py``: exactly one marker per phase in the
+bundled workflow, and every other ``<PHASE>_...`` key is an accounted exclusion).
+
+A malformed list (``unterminated_list`` / ``text_after_list``) raises
+:class:`WorkflowParseError` rather than yielding a partial phase.
 """
 
 import re
@@ -11,8 +46,39 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    list_items,
+    read_octave_fields,
+)
+
 # Phase identifiers used in workflow documents
 PHASE_IDS = ["D0", "D1", "D2", "D3", "B0", "B1", "B2", "B3", "B4", "B5"]
+
+_PHASE_MARKER_KEY_RE = re.compile(r"^(?:D[0-3]|B[0-5])_[A-Z]+(?:_[A-Z]+)*$")
+_BARE_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_BLOCK_HEADER_LINE_RE = re.compile(r"^[A-Z][A-Z0-9_]*:\s*$")
+_ENVELOPE_END = "===END==="
+
+
+class WorkflowParseError(ValueError):
+    """The workflow document has a malformed list, so no phase can be trusted.
+
+    Carries ``file`` (the document), ``line`` (1-based line where the offending list
+    opens) and ``construct`` (``unterminated_list`` / ``text_after_list``).
+    """
+
+    def __init__(self, file: Path, line: int, construct: str) -> None:
+        self.file = file
+        self.line = line
+        self.construct = construct
+        super().__init__(f"Workflow document {file} is malformed: {construct} at line {line}")
+
+
+def phase_of_marker(key: str, value: str) -> str | None:
+    """Return the phase id (e.g. ``"B1"``) if ``key``/``value`` form a phase marker, else None."""
+    if _PHASE_MARKER_KEY_RE.match(key) and _BARE_IDENTIFIER_RE.match(value.strip()):
+        return key.split("_", 1)[0]
+    return None
 
 
 @dataclass
@@ -36,8 +102,8 @@ class PhaseConstraints:
 class ContextSteward:
     """Synthesizes phase-specific constraints from workflow documents.
 
-    Uses regex-based OCTAVE parsing to extract phase sections without
-    requiring the octave_mcp library dependency.
+    Reads fields through the repo's OCTAVE list grammar; see the module docstring
+    for the phase-marker rule.
     """
 
     def __init__(self, workflow_path: Path) -> None:
@@ -59,6 +125,7 @@ class ContextSteward:
 
         Raises:
             FileNotFoundError: If workflow file doesn't exist.
+            WorkflowParseError: If the document has a malformed list.
             ValueError: If phase not found in document.
         """
         if not self.workflow_path.exists():
@@ -73,10 +140,10 @@ class ContextSteward:
         return self._build_constraints(phase, phase_data)
 
     def _extract_phase_section(self, content: str, phase: str) -> dict[str, str] | None:
-        """Extract phase-specific data from OCTAVE content using regex.
+        """Extract phase-specific fields from OCTAVE content.
 
-        Looks for phase markers like 'B1_BUILD_PLAN::value' and collects
-        subsequent key::value pairs until the next phase marker.
+        Finds the phase marker (see module docstring) and collects every field up
+        to the next phase marker, column-0 block header or ``===END===``.
 
         Args:
             content: Full OCTAVE workflow content.
@@ -84,36 +151,31 @@ class ContextSteward:
 
         Returns:
             Dict of key-value pairs for the phase, or None if not found.
+
+        Raises:
+            WorkflowParseError: If the document has a malformed list.
         """
-        lines = content.split("\n")
-        phase_prefix = f"{phase}_"
+        fields, reject = read_octave_fields(content)
+        if reject is not None:
+            raise WorkflowParseError(self.workflow_path, reject["line"], reject["construct"])
+
+        stop_lines = [
+            number
+            for number, line in enumerate(content.splitlines(), start=1)
+            if _BLOCK_HEADER_LINE_RE.match(line) or line.strip() == _ENVELOPE_END
+        ]
         phase_data: dict[str, str] = {}
-        collecting = False
-
-        for line in lines:
-            stripped = line.strip()
-
-            # Check for phase marker (e.g., "B1_BUILD_PLAN::value" or "  B1_BUILD_PLAN::value")
-            if "::" in stripped:
-                key_part = stripped.split("::")[0].strip()
-
-                # Is this a phase marker?
-                is_phase_marker = any(key_part.startswith(f"{p}_") for p in PHASE_IDS)
-
-                if is_phase_marker:
-                    if key_part.startswith(phase_prefix):
-                        # Found our target phase
-                        collecting = True
-                        value = stripped.split("::", 1)[1].strip() if "::" in stripped else ""
-                        phase_data[key_part] = value
-                    elif collecting:
-                        # Hit the next phase, stop collecting
-                        break
-                elif collecting:
-                    # Regular key::value pair belonging to current phase
-                    key = key_part
-                    value = stripped.split("::", 1)[1].strip() if "::" in stripped else ""
-                    phase_data[key] = value
+        start: int | None = None
+        for field in fields:
+            marker = phase_of_marker(field.key, field.value)
+            if start is None:
+                if marker == phase:
+                    start = field.line
+                    phase_data[field.key] = field.value
+                continue
+            if marker is not None or any(start < s <= field.line for s in stop_lines):
+                break
+            phase_data[field.key] = field.value
 
         return phase_data if phase_data else None
 
@@ -167,18 +229,10 @@ class ContextSteward:
     def _extract_list_field(self, data: dict[str, str], keys: list[str]) -> list[str]:
         """Extract a list field value from phase data.
 
-        Handles OCTAVE list syntax: [item1, item2, item3].
+        Splits with the repo's quote-aware list grammar: ``[a,b]`` (inline or wrapped)
+        gives its items, a bare value is a list of one, an empty value is ``[]``.
         """
         for key in keys:
             if key in data:
-                value = data[key]
-                if not value:
-                    return []
-                # Parse OCTAVE list: [item1, item2]
-                list_match = re.match(r"^\[(.+)\]$", value)
-                if list_match:
-                    items = [item.strip() for item in list_match.group(1).split(",")]
-                    return [item for item in items if item]
-                # Single value
-                return [value]
+                return list_items(data[key])
         return []
