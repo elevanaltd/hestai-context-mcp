@@ -1341,15 +1341,19 @@ def run_linker(
             and target_in_wt.suffix == ".md"
             and not target_in_wt.name.endswith(".oct.md")
         ):
-            written = read_record(target_in_wt)
-            if written.syntax != "yaml" or written.diagnostic is not None:
-                reject = written.diagnostic
-                detail = (
-                    f"line {reject['line']}: {reject['construct']}"
-                    if reject
-                    else "not a YAML front-matter record"
-                )
-                errors.append(f"read-back of {rels[0]} rejected by the reader ({detail})")
+            try:
+                written = read_record(target_in_wt)
+            except OSError as exc:
+                errors.append(f"read-back of {rels[0]} failed: {exc}")
+            else:
+                if written.syntax != "yaml" or written.diagnostic is not None:
+                    reject = written.diagnostic
+                    detail = (
+                        f"line {reject['line']}: {reject['construct']}"
+                        if reject
+                        else "not a YAML front-matter record"
+                    )
+                    errors.append(f"read-back of {rels[0]} rejected by the reader ({detail})")
 
         # 2b. Two-birds (#112): dumb-write the VERBATIM ADR prose alongside the
         #     AGR. No AI, no OCTAVE, no provenance marker. Written only when the
