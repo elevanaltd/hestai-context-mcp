@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
+    EDGE_FIELDS,
     RecordText,
     YamlReject,
     YamlSyntaxError,
@@ -29,8 +30,10 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     canonicalize_yaml_record,
     classify_record_text,
     iter_block_lines,
+    list_items,
     parse_decision_record,
     parse_supersedes_list,
+    read_octave_fields,
 )
 from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 
@@ -302,6 +305,24 @@ def _extract_superseded_by(content: str) -> str | None:
     return None
 
 
+def _superseded_by_value(content: str) -> str | None:
+    """The raw SUPERSEDED_BY value: a list (any spacing, one or several lines) or a TOKEN.
+
+    A closed bracket list is read through ``_extract_meta_fields`` (which overlays a
+    wrapped list's full compact form); anything else keeps the legacy single-token regex.
+    """
+    listed = _extract_meta_fields(content).get("SUPERSEDED_BY")
+    # A LIST only when it is a closed one-line ``[...]`` or a wrapped list opened by an
+    # exact ``KEY::[`` (read as the compact ``[...]``, or a bare ``[`` if never closed).
+    # Any other value starting ``[`` keeps its pre-#229 behaviour (the regex below).
+    # Whitespace-tolerant exactly as the reader is (``:: [X]``, a tab, a space before ``]``).
+    if listed is not None and listed.strip().startswith("[") and listed.strip().endswith("]"):
+        return listed
+    if listed is not None and listed.strip() == "[":
+        return listed
+    return _extract_superseded_by(content)
+
+
 def _extract_issue_ref(content: str) -> str | None:
     """Extract and normalise the ISSUE_REF value if exactly one line is present.
 
@@ -341,6 +362,16 @@ def _extract_meta_fields(content: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for key, value in _META_FIELD_LINE_RE.findall(content):
         fields.setdefault(key, value)
+    # Issue #224: a list wrapped over several lines matched above as its opener only
+    # (``[``); overlay the reader's full compact value so Gate A and the read parser
+    # see the same field. Every other value is exactly what the line regex gave.
+    seen: set[str] = set()
+    for entry in read_octave_fields(content)[0]:
+        if entry.key in seen:
+            continue
+        seen.add(entry.key)
+        if entry.wrapped and entry.key in fields:
+            fields[entry.key] = entry.value
     return fields
 
 
@@ -434,7 +465,7 @@ def _check_agr_invariants(
         status=_strip_quotes(meta["STATUS"]) if "STATUS" in meta else None,
         tier=_strip_quotes(meta["TIER"]) if "TIER" in meta else None,
         authored_at=_strip_quotes(meta["AUTHORED_AT"]) if "AUTHORED_AT" in meta else None,
-        has_superseded_by=_extract_superseded_by(content) is not None,
+        has_superseded_by=_superseded_by_value(content) is not None,
         human_adr_ref=human_adr_ref,
         has_ratified_by=_RATIFIED_BY_RE.search(content) is not None,
     )
@@ -620,6 +651,31 @@ def _check_core_key_placement(content: str, errors: list[str]) -> None:
                 f"Core key '{m.group(1)}' appears before the META block "
                 "(ADR-RFC-ARCH-004 v1.3 §4.1 #15); first-match parsing would let "
                 "this misplaced copy override the value declared in META."
+            )
+
+
+def _check_list_fields(raw_content: str, errors: list[str], warnings: list[str]) -> None:
+    """Issue #224: a list that never closes is an ERROR; a multi-line EDGE list is a WARNING.
+
+    The reader reads a wrapped list in full (one grammar for every list field), so a
+    record ``octave_write`` wrapped stays valid and amendable. An unterminated list
+    would make the record unreadable (``RECORD_PARSE_FAILED``), so it is rejected here
+    with the line where the list opens. Reads the raw text so the line numbers match
+    the file; regex-only.
+    """
+    fields, reject = read_octave_fields(raw_content)
+    if reject is not None:
+        errors.append(
+            f"List field is malformed at line {reject['line']}: {reject['construct']}. "
+            "A multi-line list must close with ] before the next field, with nothing "
+            "after the ] (ADR-RFC-ARCH-004 §1.1)."
+        )
+    for entry in fields:
+        if entry.wrapped and entry.key in EDGE_FIELDS:
+            warnings.append(
+                f"{entry.key} is a multi-line list (line {entry.line}). The reader reads it in "
+                "full, but a lineage edge is easier to audit on one line "
+                "(ADR-RFC-ARCH-004 §1.1)."
             )
 
 
@@ -888,6 +944,7 @@ def _validate_impl(
         # #14/#15 need the block lines, so they read the raw (unstripped) text.
         _check_topic_block_keys(raw_content, errors)
         _check_core_key_placement(raw_content, errors)
+        _check_list_fields(raw_content, errors, warnings)
 
     elif card_type in _FACET_CARD_TYPES:
         token = _extract_id(content)
@@ -921,12 +978,35 @@ def _validate_impl(
             return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
 
     # --- Check 5: SUPERSEDED_BY target existence ---
-    superseded_by = _extract_superseded_by(content)
-    if superseded_by is not None and not lookup_token_deterministic(working_dir, superseded_by):
-        errors.append(
-            f"SUPERSEDED_BY target '{superseded_by}' not found in governance store. "
-            "The referenced TOKEN must exist before it can be superseded."
+    superseded_by = _superseded_by_value(content)
+    if superseded_by is not None:
+        listed = superseded_by.strip() == "[" or (
+            superseded_by.strip().startswith("[") and superseded_by.strip().endswith("]")
         )
+        # A bare ``[`` is a list the reader could not close: ``_check_list_fields`` has
+        # already reported it, so there is no target to look up.
+        targets: list[str] | None = None
+        if not listed:
+            targets = [superseded_by]
+        elif superseded_by.strip() != "[":
+            targets = list_items(superseded_by)
+        if targets is not None and not targets:
+            errors.append(
+                "SUPERSEDED_BY is an empty list; it must name the superseding TOKEN "
+                "(ADR-RFC-ARCH-004 §4.1 #9)."
+            )
+        if targets and len(set(targets)) > 1:
+            errors.append(
+                f"SUPERSEDED_BY names {len(set(targets))} distinct TOKENs "
+                f"({', '.join(sorted(set(targets)))}); a record has exactly one successor "
+                "(ADR-RFC-ARCH-004 §4.1 #8). Duplicates of one TOKEN are accepted."
+            )
+        for target in targets or []:
+            if not lookup_token_deterministic(working_dir, target):
+                errors.append(
+                    f"SUPERSEDED_BY target '{target}' not found in governance store. "
+                    "The referenced TOKEN must exist before it can be superseded."
+                )
         # Continue to collect more errors
 
     # --- Check 5a: ISSUE_REF shape (ADR-RFC-ARCH-004 §4.1 invariant #10) ---
