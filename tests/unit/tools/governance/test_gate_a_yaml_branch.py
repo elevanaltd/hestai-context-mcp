@@ -363,3 +363,20 @@ def test_a_round_trip_mismatch_is_a_gate_a_error_naming_field_and_construct(
     assert result.target_path is None
     assert result.canonical_content is None
     assert _has(result.errors, "round_trip_mismatch", "because")
+
+
+# --- pre-review findings: validated value == persisted value -----------------------
+
+
+def test_a_padded_human_adr_ref_is_not_validated_as_if_stripped(tmp_path: Path) -> None:
+    """The bytes written keep the padding, so the check must judge the padded value."""
+    assert _has(_errors(tmp_path, _yaml(HUMAN_ADR_REF=f" {OLD_A} ")), "HUMAN_ADR_REF")
+
+
+def test_an_empty_superseded_by_is_absent_not_present(tmp_path: Path) -> None:
+    errors = _errors(tmp_path, _yaml(SUPERSEDED_BY=""))
+    assert not _has(errors, "SUPERSEDED_BY is present but STATUS")
+    assert _has(errors, "SUPERSEDED_BY target ''")
+    assert _has(
+        _errors(tmp_path, _yaml(STATUS="SUPERSEDED", SUPERSEDED_BY="")), "SUPERSEDED_BY is absent"
+    )
