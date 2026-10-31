@@ -69,8 +69,8 @@ written compactly on one line give the identical string; a single-line list writ
 Unterminated applies only to lists opened by an exact ``KEY::[``. A list that is never
 closed (a new ``KEY::`` line, a block header or ``===`` line at the opener's indent or
 shallower, the envelope end or the end of the text comes first), or that has text after
-its closing ``]``, makes the whole record unparseable: ``parse_decision_record`` returns the empty record and
-:func:`diagnose_octave_record` reports the 1-based line of the opening and the construct
+its closing ``]``, makes the whole record unparseable: ``parse_decision_record`` returns
+the empty record and :func:`diagnose_octave_record` reports the 1-based line of the opening and the construct
 (``unterminated_list`` / ``text_after_list``). A record is never half-read.
 
 Quoted-YAML front matter (PR-4 slice A)
