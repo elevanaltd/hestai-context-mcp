@@ -1053,7 +1053,7 @@ def _validate_yaml_impl(
     if token is None:
         errors.append('DECISION_RECORD requires a token field: token: "<value>"')
         return fail(card_type=card_type)
-    if not _TOKEN_FORMAT_RE.match(token):
+    if not _TOKEN_FORMAT_RE.fullmatch(token):
         errors.append(
             f"TOKEN '{token}' does not match required format "
             r"^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$ "
