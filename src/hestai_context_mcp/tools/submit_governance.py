@@ -450,16 +450,21 @@ async def submit_governance(
     # --- append_ruling mode (#203 S2): exclusive with both other modes ---
     if append_ruling is not None:
         if octave_content is not None or prose_input is not None:
-            return _empty_result(
+            return _append_result(
                 dry_run,
-                [
+                validation_errors=[
                     "append_ruling is mutually exclusive with octave_content and "
                     "prose_input; supply exactly one mode."
                 ],
+                error_code="APPEND_MODE_CONFLICT",
             )
         if write_adr:
-            return _empty_result(
-                dry_run, ["write_adr is prose-only; append_ruling writes no ADR document."]
+            return _append_result(
+                dry_run,
+                validation_errors=[
+                    "write_adr is prose-only; append_ruling writes no ADR document."
+                ],
+                error_code="APPEND_MODE_CONFLICT",
             )
         return await _submit_append_ruling(working_dir, append_ruling, dry_run, review)
 
