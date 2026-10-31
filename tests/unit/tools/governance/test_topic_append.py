@@ -146,6 +146,13 @@ class TestSingleAppend:
             {"id": "R4", "rule": "Auditors get read-only access."},
         ]
 
+    def test_current_is_sorted_by_id_even_when_rulings_are_not(self) -> None:
+        # RULINGS stored R10 before R9: CURRENT still lists R9, R10, R11 (numeric order).
+        base = _BASE.replace("R2", "R10").replace("R3", "R9")
+        blocks = collect_topic_blocks(_render(base).text)
+        assert [e["id"] for e in blocks["rulings"]] == ["R10", "R9", "R11"]
+        assert [c["id"] for c in blocks["current"]] == ["R9", "R10", "R11"]
+
     def test_current_is_rebuilt_from_rule_lines_not_appended_to(self) -> None:
         # The base's CURRENT is out of order and carries stale text for R2: a renderer
         # that appended to the old CURRENT would keep both defects.
