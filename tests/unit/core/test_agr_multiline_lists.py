@@ -84,8 +84,27 @@ def test_closing_bracket_alone_on_its_line_and_mixed_indentation() -> None:
     assert _fields(middle)["AFFECTS"] == "[TOKEN-A,TOKEN-B,TOKEN-C]"
 
 
-def test_first_item_on_the_opening_line() -> None:
-    assert _fields("  AFFECTS::[A,\n    B\n  ]\n")["AFFECTS"] == "[A,B]"
+@pytest.mark.parametrize(
+    ("middle", "key", "expected"),
+    [
+        # Only ``KEY::[`` alone opens list mode (what octave_write emits). Anything else
+        # that opens ``[`` without closing it on its line reads exactly as before #224.
+        ("  NOTE::[see below\n", "NOTE", "[see below"),
+        ("  AFFECTS::[A,\n    B\n  ]\n", "AFFECTS", "[A,"),
+        ("  NOTE::[ see below  \n", "NOTE", "[ see below"),
+        ('  NOTE::[say "hi\n', "NOTE", '[say "hi'),
+    ],
+)
+def test_only_a_bare_open_bracket_enters_list_mode(middle: str, key: str, expected: str) -> None:
+    parsed = parse_decision_record(_record(middle))
+    assert parsed["token"] == "HO-CUBIC-A-20260101"
+    assert parsed["fields"][key] == expected
+    assert agr_read.parse_failure_detail(_record(middle)) is None
+
+
+def test_a_bare_open_bracket_with_trailing_whitespace_or_cr_enters_list_mode() -> None:
+    text = _record("  AFFECTS::[  \r\n    A,\r\n    B\r\n  ]\r\n").replace("\n  TYPE", "\r\n  TYPE")
+    assert parse_decision_record(text)["fields"]["AFFECTS"] == "[A,B]"
 
 
 def test_a_bracket_inside_a_quoted_item_does_not_close_the_list() -> None:
