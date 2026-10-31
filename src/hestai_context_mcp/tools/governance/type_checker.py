@@ -993,9 +993,12 @@ def validate_record_content(working_dir: Path, content: str) -> ValidationResult
     A quoted-YAML record (first line ``---``, ADR-RFC-ARCH-004 §1.1) is judged by
     ``_validate_yaml_impl`` and targets ``{token}.md``; any other content goes,
     byte-for-byte unchanged, to :func:`validate_octave_content` and targets
-    ``{token}.oct.md``. This is the single place submit_governance content mode
-    needs to ask "which syntax is this?" (a later prose-mode-emits-YAML change
-    reuses :func:`decision_record_path` and ``ValidationResult.syntax``).
+    ``{token}.oct.md``. The dispatch is by ``classify_record_text`` on the content
+    alone. ``submit_governance`` also checks the first line itself before choosing which
+    validator to call (existing callers patch ``validate_octave_content`` there), so this
+    function is the Gate A dispatch, not the only syntax decision in the tool. A later
+    prose-mode-emits-YAML change can reuse :func:`decision_record_path` and
+    ``ValidationResult.syntax``.
 
     Never raises on bad input. Always returns a ValidationResult.
     """
