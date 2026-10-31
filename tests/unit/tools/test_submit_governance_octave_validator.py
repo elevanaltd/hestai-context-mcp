@@ -371,8 +371,9 @@ class TestPublicContractUnchanged:
         # Gate C (T5) adds prose_input back-compatibly: octave_content becomes
         # optional and prose_input is the second mode. Issue #77 adds the
         # ``review`` flag back-compatibly (defaults True). Issue #112 adds the
-        # ``write_adr`` flag back-compatibly (defaults False). The pre-existing
-        # params remain so octave_content callers are unaffected.
+        # ``write_adr`` flag back-compatibly (defaults False). Issue #203 S2 adds
+        # the ``append_ruling`` mode back-compatibly (defaults None). The
+        # pre-existing params remain so octave_content callers are unaffected.
         assert set(params) == {
             "working_dir",
             "octave_content",
@@ -380,7 +381,9 @@ class TestPublicContractUnchanged:
             "dry_run",
             "review",
             "write_adr",
+            "append_ruling",
         }
+        assert params["append_ruling"].default is None
         # Back-compat: octave_content is now optional (defaults to None) so the
         # EXACTLY-ONE-OF guard can distinguish the two modes.
         assert params["octave_content"].default is None
