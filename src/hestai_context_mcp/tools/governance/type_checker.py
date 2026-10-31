@@ -1092,7 +1092,7 @@ def _validate_yaml_impl(
 
     # --- SUPERSEDED_BY / supersedes targets must exist ---
     superseded_by = fields.get("SUPERSEDED_BY")
-    if superseded_by is not None and not lookup_token_deterministic(working_dir, superseded_by):
+    if superseded_by and not lookup_token_deterministic(working_dir, superseded_by):
         errors.append(
             f"SUPERSEDED_BY target '{superseded_by}' not found in governance store. "
             "The referenced TOKEN must exist before it can be superseded."
