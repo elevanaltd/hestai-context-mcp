@@ -183,12 +183,15 @@ def push_branch(
 
     The commit edits the record at ``edit`` (in its markdown body, as a real
     creation or append branch changes the file), so the content-match merged
-    signal does not clear it; ``edit=None`` pushes a marker file only.
+    signal does not clear it; ``edit=None`` pushes a marker file only. A missing
+    ``edit`` path raises ``FileNotFoundError`` rather than silently editing nothing.
     """
     scratch = second_session_clone(bare, dest)
+    if edit is not None and not (scratch / edit).is_file():
+        raise FileNotFoundError(f"push_branch: edit path {edit} does not exist on main")
     git(["checkout", "-b", branch, "origin/main"], scratch)
     (scratch / f"marker-{branch.replace('/', '-')}.txt").write_text("marker\n")
-    if edit is not None and (scratch / edit).exists():
+    if edit is not None:
         with (scratch / edit).open("a", encoding="utf-8") as fh:
             fh.write(f"pending change on {branch}\n")
     git(["add", "."], scratch)
