@@ -217,6 +217,17 @@ class TestBytecodeFewShotAndOperators:
     label is literally true), and the AFTER DECISION/BECAUSE genuinely PASS.
     """
 
+    def test_drop_line_keeps_the_plain_relation_words(self) -> None:
+        # HO-AGR-PLAIN-WORDS-REASONING-20261031: the DROP line must not tell the model to
+        # drop connectives while the same contract tells it to write relations in words.
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        drop = next(ln for ln in _COMPRESSION_CONTRACT.splitlines() if ln.startswith("- DROP"))
+        assert "connectives" not in drop
+        assert "filler" in drop and "KEEP" in drop
+        for word in ("because", "so", "and", "or", "but", "while"):
+            assert word in drop, word
+
     def test_contract_carries_no_operator_glyphs(self) -> None:
         # The ruling replaced the compressed-OCTAVE operator clause with plain words.
         from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT

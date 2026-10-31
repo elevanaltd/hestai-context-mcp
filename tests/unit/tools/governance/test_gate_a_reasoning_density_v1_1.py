@@ -376,6 +376,7 @@ class TestSharedConstantParity:
 # --- HO-AGR-PLAIN-WORDS-REASONING-20261031 FOLLOW_UP: guidance names plain words --------------
 
 
+@pytest.mark.unit
 class TestGuidanceStringsRecommendPlainWords:
     """Message text only: same checks, same validity, but no operator recommendation."""
 
