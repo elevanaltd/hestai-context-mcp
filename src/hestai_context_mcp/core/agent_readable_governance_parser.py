@@ -45,9 +45,11 @@ Multi-line list fields (issue #224)
       ]
 
 ONE grammar serves every list field, edge fields (``SUPERSEDES``, ``SUPERSEDED_BY``,
-``AMENDS``, ``EXTENDS``) included. A value that opens a list (starts with ``[`` and has
-no closing ``]`` on its line) runs until the bracket that closes it, counting brackets
-outside double-quoted strings. Blank lines and ``//`` comment lines inside the list are
+``AMENDS``, ``EXTENDS``) included. A field whose line is exactly
+``KEY::[`` (the value is ``[`` after trimming; what ``octave_write`` emits) opens list
+mode and runs until the bracket that closes it, counting brackets outside
+double-quoted strings. Any other value that starts ``[`` without closing it on its line
+(``NOTE::[see below``, ``KEY::[A,``) is read as a single line, exactly as before #224. Blank lines and ``//`` comment lines inside the list are
 ignored. Regex and indent only, no AST.
 
 Representation in ``fields`` (PROD I4): a wrapped list is stored as the COMPACT
@@ -387,11 +389,11 @@ def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]
         if not match:
             continue
         key, value = match.group(1), match.group(2)
-        if value.startswith("["):
-            depth, in_quote, close = _scan_brackets(value, 0, False)
-            if close is None and depth > 0 and not in_quote:
-                pending = _OpenList(key, number, value, depth, in_quote)
-                continue
+        if value.strip() == "[":
+            # Only ``KEY::[`` alone (what octave_write emits) opens list mode. Any other
+            # value that opens ``[`` without closing it keeps the pre-#224 single-line read.
+            pending = _OpenList(key, number, value, 1, False)
+            continue
         fields.append(OctaveField(key, value, number, False))
     if pending is not None:
         return fields, {"line": pending.line, "construct": "unterminated_list"}
