@@ -13,6 +13,7 @@ path must route through it.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -56,8 +57,6 @@ _SCRUB = (
     "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME",
     "GIT_COMMITTER_EMAIL",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_COUNT",
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -112,6 +111,8 @@ def _hermetic_repo(repo: Path) -> None:
     _git(repo, "config", "core.hooksPath", str(repo / ".git" / "no-hooks"))
     _git(repo, "config", "user.email", "test@test.com")
     _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "core.autocrlf", "false")
+    _git(repo, "config", "commit.gpgsign", "false")
     (repo / "README.md").write_text("test")
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "initial")
@@ -125,6 +126,9 @@ def _hermetic_repo(repo: Path) -> None:
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for var in _SCRUB:
         monkeypatch.delenv(var, raising=False)
+    # isolate from the developer's / CI's global and system git config
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     root = tmp_path / "repo"
     root.mkdir()
     _hermetic_repo(root)

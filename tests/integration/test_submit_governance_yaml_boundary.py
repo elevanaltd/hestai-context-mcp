@@ -55,8 +55,6 @@ _SCRUB = (
     "GIT_AUTHOR_EMAIL",
     "GIT_COMMITTER_NAME",
     "GIT_COMMITTER_EMAIL",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_COUNT",
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -76,6 +74,11 @@ def _git_bytes(cwd: Path, *args: str) -> bytes:
 @pytest.fixture()
 def boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """(repo, bare remote); ``gh`` is a PATH stub that prints a PR URL."""
+    for var in _SCRUB:
+        monkeypatch.delenv(var, raising=False)
+    # isolate from the developer's / CI's global and system git config
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     repo = tmp_path / "repo"
     repo.mkdir()
     bare = tmp_path / "origin.git"
@@ -84,6 +87,8 @@ def boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pat
     _git(repo, "config", "core.hooksPath", str(repo / ".git" / "no-hooks"))
     _git(repo, "config", "user.email", "test@test.com")
     _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "core.autocrlf", "false")
+    _git(repo, "config", "commit.gpgsign", "false")
     (repo / "README.md").write_text("test")
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "initial")
@@ -97,8 +102,6 @@ def boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pat
     gh.write_text('#!/bin/sh\n[ "$1 $2" = "pr create" ] || exit 1\n' f"echo {PR_URL}\n")
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    for var in _SCRUB:
-        monkeypatch.delenv(var, raising=False)
     return repo, bare
 
 
