@@ -21,14 +21,13 @@ from hestai_context_mcp.tools.governance.type_checker import (
 
 pytestmark = pytest.mark.unit
 
-_HEAD = (
-    "===DECISION_RECORD===\n"
-    "META:\n"
+_HEAD = "===DECISION_RECORD===\nMETA:\n"
+# The real TYPE, TOKEN, STATUS... come AFTER the nested list, so a leaked nested item would
+# win under first-match and these tests would fail.
+_REAL = (
     "  TYPE::DECISION_RECORD\n"
     '  VERSION::"1.0"\n'
     "  TOKEN::HO-CUBIC-A-20260101\n"
-)
-_REAL = (
     "  STATUS::RATIFIED\n"
     "  TIER::STRATEGIC\n"
     '  AUTHORED_AT::"2026-01-01T00:00:00Z"\n'
@@ -66,11 +65,17 @@ def test_reader_and_gate_a_see_neither_a_nested_item(tmp_path: Path, shadow: str
     key = shadow.split("::", 1)[0]
     parsed = parse_decision_record(text)
     meta = _extract_meta_fields(_strip_block_lines(text))
-    real = {"STATUS": "RATIFIED", "TIER": "STRATEGIC", "TOKEN": "HO-CUBIC-A-20260101"}
+    real = {
+        "STATUS": "RATIFIED",
+        "TIER": "STRATEGIC",
+        "TOKEN": "HO-CUBIC-A-20260101",
+        "TYPE": "DECISION_RECORD",
+        "DECISION": '"A binding decision sentence."',
+    }
     if key in real:
         assert meta[key] == real[key], (key, meta[key])
     else:
-        assert key not in meta or key in {"TYPE", "DECISION"}, (key, meta.get(key))
+        assert key not in meta, (key, meta.get(key))
     assert key not in parsed["fields"]
     assert parsed["status"] == "RATIFIED" and parsed["tier"] == "STRATEGIC"
     assert parsed["token"] == "HO-CUBIC-A-20260101"
@@ -149,3 +154,14 @@ def test_a_real_reserved_key_in_a_block_is_still_rejected(tmp_path: Path) -> Non
     text = _HEAD + "  TOPIC::t\n" + _REAL + blocks + "===END===\n"
     result = validate_octave_content(tmp_path, text)
     assert any("MUST NOT appear" in e for e in result.errors), result.errors
+
+
+def test_an_unterminated_list_reports_its_parse_error_before_any_field_extraction(
+    tmp_path: Path,
+) -> None:
+    """K4: an indented last item ``TYPE::OTHER`` must not be taken as the record TYPE."""
+    text = _HEAD + "  AFFECTS::[\n    A,\n    TYPE::OTHER\n" + _REAL + "===END===\n"
+    result = validate_octave_content(tmp_path, text)
+    assert result.valid is False
+    assert any("unterminated_list" in e for e in result.errors), result.errors
+    assert not any("OTHER" in e for e in result.errors), result.errors
