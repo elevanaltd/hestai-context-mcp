@@ -168,17 +168,33 @@ def test_file_not_found_is_unchanged_none_and_no_error_key(tmp_path, call, targe
     assert "phase_constraints_error" not in ctx
 
 
+def snapshot_tree(root: Path) -> dict[str, tuple[str, int, int]]:
+    """Every path under ``root``, directories included: (kind, mtime_ns, size) for files."""
+    out: dict[str, tuple[str, int, int]] = {}
+    for p in root.rglob("*"):
+        rel = str(p.relative_to(root))
+        if p.is_dir():
+            out[rel] = ("dir", 0, 0)
+        else:
+            stat = p.stat()
+            out[rel] = ("file", stat.st_mtime_ns, stat.st_size)
+    return out
+
+
+def test_snapshot_tree_sees_directory_creation_and_removal(tmp_path):
+    """Guard the guard: an empty dir appearing or vanishing must change the snapshot."""
+    (tmp_path / "keep").mkdir()
+    before = snapshot_tree(tmp_path)
+    (tmp_path / "created-empty-dir").mkdir()
+    assert snapshot_tree(tmp_path) != before
+    (tmp_path / "created-empty-dir").rmdir()
+    (tmp_path / "keep").rmdir()
+    assert snapshot_tree(tmp_path) != before
+
+
 def test_get_context_stays_pure_on_a_malformed_workflow(tmp_path):
     """Containment must not write anything: fs snapshot is identical before and after."""
-
-    def snapshot(root: Path) -> dict[str, tuple[int, int]]:
-        return {
-            str(p.relative_to(root)): (p.stat().st_mtime_ns, p.stat().st_size)
-            for p in root.rglob("*")
-            if p.is_file()
-        }
-
     seed(tmp_path, UNTERMINATED)
-    before = snapshot(tmp_path)
+    before = snapshot_tree(tmp_path)
     call_get_context(tmp_path)
-    assert snapshot(tmp_path) == before
+    assert snapshot_tree(tmp_path) == before

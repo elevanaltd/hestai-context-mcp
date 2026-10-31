@@ -34,7 +34,16 @@ immediately without further queries.
   "context": {
     "product_north_star": "...",
     "project_context": "...",
-    "phase_constraints": "... (null with phase_constraints_error on a malformed workflow list)",
+    "phase_constraints": {
+      "phase": "B1",
+      "purpose": "BUILD_EXECUTION_ROADMAP",
+      "raci": "...",
+      "deliverables": ["B1-BUILD-PLAN.md⊕task_breakdown", "..."],
+      "entry_criteria": [],
+      "exit_criteria": [],
+      "quality_gates": "...",
+      "subphases": "..."
+    },
     "git_state": { "branch": "...", "modified_files": [], "ahead": 0, "behind": 0 },
     "active_sessions": [],
     "conflicts": []
@@ -135,7 +144,16 @@ Pure read — no session created, no files written. Returns the same context str
   "context": {
     "product_north_star": "...",
     "project_context": "...",
-    "phase_constraints": "... (null with phase_constraints_error on a malformed workflow list)",
+    "phase_constraints": {
+      "phase": "B1",
+      "purpose": "BUILD_EXECUTION_ROADMAP",
+      "raci": "...",
+      "deliverables": ["B1-BUILD-PLAN.md⊕task_breakdown", "..."],
+      "entry_criteria": [],
+      "exit_criteria": [],
+      "quality_gates": "...",
+      "subphases": "..."
+    },
     "git_state": { "branch": "...", "modified_files": [], "ahead": 0, "behind": 0 },
     "active_sessions": []
   }

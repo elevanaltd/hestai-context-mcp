@@ -203,6 +203,9 @@ def test_exclusion_key_inside_list_value_wrapped(tmp_path):
         ("B6_FUTURE_PHASE", "FUTURE"),  # not a phase id
         ("B1", "BUILD"),  # no <LETTERS> part
         ("B1_", "BUILD"),  # empty <LETTERS> part
+        ("B1_FOO_", "BUILD"),  # trailing underscore
+        ("B1__FOO", "BUILD"),  # consecutive underscores
+        ("B1_FOO__BAR", "BUILD"),  # consecutive underscores inside
         ("X_B1_HERMES", "BUILD"),  # phase id is not the prefix
     ],
 )
@@ -234,6 +237,13 @@ def test_positive_real_marker_shape_starts_its_phase(tmp_path, phase, key, value
     assert got.purpose == value  # no PURPOSE field: falls back to the marker value
     assert got.raci == f"raci-{phase}"
     assert got.deliverables == [f"{phase}-one", f"{phase}-two"]
+
+
+def test_marker_like_field_with_malformed_underscores_does_not_truncate_a_phase(tmp_path):
+    text = doc(B1, "B2_FOO_::SOMETHING", "B2__BAR::SOMETHING", "RACI::still-b1")
+    assert synth(tmp_path, text, "B1").raci == "still-b1"
+    with pytest.raises(ValueError, match="not found"):
+        synth(tmp_path, text, "B2")
 
 
 def test_first_marker_for_a_phase_wins(tmp_path):
@@ -424,7 +434,7 @@ def test_canonical_fixture_is_what_octave_mcp_writes_today(tmp_path):
         )
     )
     assert result["status"] == "success"
-    assert target.read_text() == CANONICAL.read_text()
+    assert target.read_bytes() == CANONICAL.read_bytes()
 
 
 def test_canonical_fixture_is_the_wrapped_form_of_the_bundled_workflow():
@@ -447,4 +457,4 @@ def test_all_ten_phases_equal_between_bundled_and_canonical(phase):
 def test_pinned_inline_fixture_matches_the_live_bundled_workflow_when_present():
     if not LIVE_BUNDLED.exists():
         pytest.skip(".hestai-sys is not installed here (gitignored); fixture is the pin")
-    assert BUNDLED.read_text() == LIVE_BUNDLED.read_text()
+    assert BUNDLED.read_bytes() == LIVE_BUNDLED.read_bytes()
