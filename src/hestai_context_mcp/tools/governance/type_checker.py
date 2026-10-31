@@ -315,7 +315,8 @@ def _superseded_by_value(content: str) -> str | None:
     # A LIST only when it is a closed one-line ``[...]`` or a wrapped list opened by an
     # exact ``KEY::[`` (read as the compact ``[...]``, or a bare ``[`` if never closed).
     # Any other value starting ``[`` keeps its pre-#229 behaviour (the regex below).
-    if listed is not None and listed.startswith("[") and listed.rstrip().endswith("]"):
+    # Whitespace-tolerant exactly as the reader is (``:: [X]``, a tab, a space before ``]``).
+    if listed is not None and listed.strip().startswith("[") and listed.strip().endswith("]"):
         return listed
     if listed is not None and listed.strip() == "[":
         return listed
@@ -980,7 +981,7 @@ def _validate_impl(
     superseded_by = _superseded_by_value(content)
     if superseded_by is not None:
         listed = superseded_by.strip() == "[" or (
-            superseded_by.startswith("[") and superseded_by.rstrip().endswith("]")
+            superseded_by.strip().startswith("[") and superseded_by.strip().endswith("]")
         )
         # A bare ``[`` is a list the reader could not close: ``_check_list_fields`` has
         # already reported it, so there is no target to look up.
