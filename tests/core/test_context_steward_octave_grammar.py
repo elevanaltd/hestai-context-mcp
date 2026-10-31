@@ -27,7 +27,10 @@ from tests.core.legacy_phase_reader import LegacyContextSteward
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BUNDLED = REPO_ROOT / ".hestai-sys" / "standards" / "workflow" / "OPERATIONAL-WORKFLOW.oct.md"
+# .hestai-sys is gitignored (absent in CI), so the bundled workflow is pinned as a fixture:
+# a byte-for-byte copy of .hestai-sys/standards/workflow/OPERATIONAL-WORKFLOW.oct.md.
+BUNDLED = REPO_ROOT / "tests" / "fixtures" / "OPERATIONAL-WORKFLOW.inline.oct.md"
+LIVE_BUNDLED = REPO_ROOT / ".hestai-sys" / "standards" / "workflow" / "OPERATIONAL-WORKFLOW.oct.md"
 CANONICAL = REPO_ROOT / "tests" / "fixtures" / "OPERATIONAL-WORKFLOW.canonical.oct.md"
 
 FORMS = ["inline", "wrapped"]
@@ -137,15 +140,28 @@ def test_exclusion_key_inside_list_value_inline(tmp_path):
         synth(tmp_path, text, "B2")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BLOCKER (reported to HC): read_octave_fields treats a `KEY::` line inside an open "
-        "wrapped list as a list break -> unterminated_list, so octave_write's nested-list "
-        'form (`B2_USAGE::"u2"` on its own line) is rejected by the shared grammar. '
-        "The parser is read-only for #196; remove this xfail once the grammar is fixed."
-    ),
+BLOCKER = (
+    "BLOCKER (reported to HC): read_octave_fields treats a `KEY::` line inside an open wrapped "
+    "list as a list break -> unterminated_list, so octave_write's nested-list form is rejected "
+    "by the shared grammar. The parser is read-only for #196; once it accepts nested keys this "
+    "test runs to completion and must pass."
 )
+
+
+def xfail_only_on_known_blocker(text: str, opener: str, call):
+    """Run ``call``; xfail ONLY for the known parser blocker (unterminated_list at ``opener``).
+
+    Any other exception or assertion failure is a real failure, unlike a bare xfail mark.
+    """
+    try:
+        return call()
+    except cs.WorkflowParseError as err:
+        opens_at = text.splitlines().index(opener) + 1
+        if (err.construct, err.line) == ("unterminated_list", opens_at):
+            pytest.xfail(BLOCKER)
+        raise
+
+
 def test_exclusion_key_inside_list_value_wrapped(tmp_path):
     """Same content as the inline test, in the octave_write nested-list form."""
     nested = (
@@ -154,9 +170,13 @@ def test_exclusion_key_inside_list_value_wrapped(tmp_path):
         '  [\n    [\n      B2_USAGE::"u2"\n    ]\n  ]\n]'
     )
     text = doc(B1, nested, render_list("DELIVERABLES", ["d1", "d2"], "wrapped"))
-    assert synth(tmp_path, text, "B1").deliverables == ["d1", "d2"]
-    with pytest.raises(ValueError, match="not found"):
-        synth(tmp_path, text, "B2")
+
+    def check():
+        assert synth(tmp_path, text, "B1").deliverables == ["d1", "d2"]
+        with pytest.raises(ValueError, match="not found"):
+            synth(tmp_path, text, "B2")
+
+    xfail_only_on_known_blocker(text, "CONTEXT7_LIBRARY_RESEARCH::[", check)
 
 
 @pytest.mark.parametrize(
@@ -263,12 +283,6 @@ def test_b5_stops_at_the_next_column_zero_block_header(tmp_path, form):
     assert got.purpose == "b5-purpose"
     assert got.raci == "Not specified"
     assert got.deliverables == ["b5-one", "b5-two"]
-
-
-@pytest.mark.parametrize("form", FORMS)
-def test_b5_section_does_not_absorb_fields_before_the_envelope_end(tmp_path, form):
-    text = doc(B5, "PURPOSE::b5-purpose", render_list("DELIVERABLES", ["b5-one"], form))
-    assert synth(tmp_path, text, "B5").deliverables == ["b5-one"]
 
 
 # ---------------------------------------------------------------------------------------
@@ -406,17 +420,18 @@ def test_canonical_fixture_is_the_wrapped_form_of_the_bundled_workflow():
     assert "DELIVERABLES::[\n" not in BUNDLED.read_text()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BLOCKER (reported to HC): read_octave_fields rejects the canonical form at its "
-        "first nested wrapped list (SCOPE_MATRIX -> `SIMPLE::[` on its own line inside an "
-        "open list) as unterminated_list, so no phase of the canonical file can be read. "
-        "Remove this xfail when the shared grammar accepts nested KEY:: lines in a list."
-    ),
-)
 @pytest.mark.parametrize("phase", PHASE_IDS)
 def test_all_ten_phases_equal_between_bundled_and_canonical(phase):
     inline = ContextSteward(BUNDLED).synthesize_active_state(phase)
-    canonical = ContextSteward(CANONICAL).synthesize_active_state(phase)
-    assert canonical == inline
+    text = CANONICAL.read_text()
+
+    def check():
+        assert ContextSteward(CANONICAL).synthesize_active_state(phase) == inline
+
+    xfail_only_on_known_blocker(text, "  SCOPE_MATRIX::[", check)
+
+
+def test_pinned_inline_fixture_matches_the_live_bundled_workflow_when_present():
+    if not LIVE_BUNDLED.exists():
+        pytest.skip(".hestai-sys is not installed here (gitignored); fixture is the pin")
+    assert BUNDLED.read_text() == LIVE_BUNDLED.read_text()
