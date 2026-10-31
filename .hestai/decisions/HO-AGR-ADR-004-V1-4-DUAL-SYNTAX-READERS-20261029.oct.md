@@ -34,5 +34,5 @@ META:
   RATIFIED_BY::"human:operator<shaunbuswell>"
   RATIFIED_AT::"2026-10-31T01:18:58Z"
   OPERATOR_RULING::"Shaun Buswell, 2026-10-31, HC control room session (ceremony 625fb59c), first-party operator turn, relayed by the HC control room: '1. Ratify 219'"
-  REVISION::"2026-10-31T01:18:58Z: STATUS PROPOSED→RATIFIED in place, recording the operator ratification relayed from the HC control room; RATIFIED_AT is when this amendment was written (date -u), not the operator's turn time."
+  REVISION::"2026-10-31: STATUS PROPOSED→RATIFIED in place, recording the operator ratification relayed from the HC control room; RATIFIED_AT is when this amendment was written (date -u), not the operator's turn time."
 ===END===
