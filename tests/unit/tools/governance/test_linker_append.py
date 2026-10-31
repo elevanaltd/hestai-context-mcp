@@ -556,3 +556,12 @@ def test_open_append_pr_passes_title_body_and_pinned_base(
     assert (url, err) == ("https://github.com/o/r/pull/3", None)
     assert seen["argv"] == ["gh", "pr", "create", "--title", "T", "--body", "B", "--base", "main"]
     assert seen["env"]["GH_TOKEN"] == "tok"
+
+
+def test_push_branch_fixture_fails_fast_on_a_missing_edit_path(tmp_path: Path) -> None:
+    """A typo in ``edit`` must not silently push a branch that edits nothing."""
+    _, bare = init_topic_repo(tmp_path)
+    with pytest.raises(FileNotFoundError, match="no-such-record.md"):
+        push_branch(
+            bare, tmp_path / "s", "governance/20261016-x-r1", edit=".hestai/no-such-record.md"
+        )
