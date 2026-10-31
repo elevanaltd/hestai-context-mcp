@@ -154,7 +154,8 @@ def _relevant_tokens(working_dir: Path, prose_input: str, corpus: str) -> tuple[
 # delegated density entirely to the exemplar corpus — too weak a signal, so the model
 # mirrored the (verbose) operator prose into giant DECISION/BECAUSE strings. This
 # states the contract the octave-compression skill teaches: COMPRESS (not transcribe),
-# CONSERVATIVE tier, telegraphic value form with operators carrying the connectives,
+# CONSERVATIVE tier, a short flat value form with relations in plain words (no operator
+# glyphs, HO-AGR-PLAIN-WORDS-REASONING-20261031),
 # explicit loss accounting (PROD::I4), and a hard ban on prose-paragraph values. The
 # Gate-A reasoning-density guard (type_checker §4.1 #13: DECISION/BECAUSE ≤40 words,
 # no embedded newline — ADR-RFC-ARCH-004 v1.1) is the deterministic backstop that
