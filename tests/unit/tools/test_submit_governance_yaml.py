@@ -246,3 +246,26 @@ def test_prose_mode_still_uses_the_octave_pipeline_and_never_the_yaml_seam(
     assert result["success"] is True
     pipeline.assert_awaited_once()
     seam.assert_not_called()
+
+
+def test_a_yaml_validation_without_canonical_bytes_is_a_structured_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard, not assert: a validator that cannot supply canonical bytes must not crash the tool."""
+    from hestai_context_mcp.tools.governance.type_checker import ValidationResult
+
+    broken = ValidationResult(
+        valid=True,
+        token=TOKEN,
+        card_type="DECISION_RECORD",
+        target_path=tmp_path / ".hestai" / "decisions" / f"{TOKEN}.md",
+        syntax="octave",
+        canonical_content=None,
+    )
+    monkeypatch.setattr(sg, "validate_record_content", lambda wd, content: broken)
+    linker = MagicMock(side_effect=AssertionError("linker ran"))
+    monkeypatch.setattr(sg, "run_linker", linker)
+    result = _submit(tmp_path, emit_yaml_record(CORE, None, None), dry_run=False)
+    assert result["success"] is False
+    assert any("canonical" in e for e in result["validation_errors"])
+    linker.assert_not_called()
