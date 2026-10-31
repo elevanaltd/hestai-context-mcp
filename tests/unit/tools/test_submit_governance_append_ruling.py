@@ -225,22 +225,40 @@ class TestExistingRecordReachability:
         assert result["success"] is False
         assert any("already exists" in e for e in result["validation_errors"])
 
-    def test_existing_record_true_appears_only_in_the_append_path(self) -> None:
-        """Every call passing ``existing_record`` in src/ is inside _submit_append_ruling."""
+    def test_existing_record_keyword_is_passed_only_from_the_append_path(self) -> None:
+        """Every call in src/ that passes ``existing_record`` (any value), with the
+        innermost function enclosing it: the append path, plus the ONE pass-through
+        inside ``validate_record_content``. Module-level calls count too."""
         src = Path(sg.__file__).resolve().parents[1]
         found: list[tuple[str, str]] = []
+
+        class _Calls(ast.NodeVisitor):
+            def __init__(self, rel: str) -> None:
+                self.rel, self.stack = rel, ["<module>"]
+
+            def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+                self.stack.append(node.name)
+                self.generic_visit(node)
+                self.stack.pop()
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self._function(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self._function(node)
+
+            def visit_Call(self, node: ast.Call) -> None:
+                if any(kw.arg == "existing_record" for kw in node.keywords):
+                    found.append((self.rel, self.stack[-1]))
+                self.generic_visit(node)
+
         for path in sorted(src.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for func in ast.walk(tree):
-                if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
-                    continue
-                for node in ast.walk(func):
-                    if isinstance(node, ast.Call) and any(
-                        kw.arg == "existing_record" for kw in node.keywords
-                    ):
-                        found.append((path.name, func.name))
-        callers = {name for name in found if name[0] != "type_checker.py"}
-        assert callers == {("submit_governance.py", "_submit_append_ruling")}
+            rel = path.relative_to(src).as_posix()
+            _Calls(rel).visit(ast.parse(path.read_text(encoding="utf-8")))
+        assert sorted(found) == [
+            ("tools/governance/type_checker.py", "validate_record_content"),
+            ("tools/submit_governance.py", "_submit_append_ruling"),
+        ]
 
 
 # ---------------------------------------------------------------------------
