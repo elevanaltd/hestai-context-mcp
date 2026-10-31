@@ -153,15 +153,13 @@ def _gate_a(tmp_path: Path, middle: str):  # type: ignore[no-untyped-def]
 
 def test_gate_a_warns_on_a_multi_line_edge_field_and_stays_valid(tmp_path: Path) -> None:
     for key in ("AMENDS", "EXTENDS", "SUPERSEDES"):
-        result = _gate_a(
-            tmp_path, f"  {key}::[\n    HO-CUBIC-T-20260301,\n    HO-ESCAPES-20261029\n  ]\n"
-        )
+        result = _gate_a(tmp_path, f"  {key}::[\n    {_OTHER},\n    {_ABSENT}\n  ]\n")
         assert result.valid, (key, result.errors)
         assert any(key in w and "multi-line" in w for w in result.warnings), (key, result.warnings)
 
 
 def test_gate_a_gives_no_warning_for_a_single_line_edge_field(tmp_path: Path) -> None:
-    result = _gate_a(tmp_path, "  AMENDS::[HO-CUBIC-T-20260301,HO-ESCAPES-20261029]\n")
+    result = _gate_a(tmp_path, f"  AMENDS::[{_OTHER},{_ABSENT}]\n")
     assert result.valid, result.errors
     assert not any("multi-line" in w for w in result.warnings), result.warnings
 

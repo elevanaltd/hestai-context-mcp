@@ -308,11 +308,16 @@ def _extract_superseded_by(content: str) -> str | None:
 def _superseded_by_value(content: str) -> str | None:
     """The raw SUPERSEDED_BY value: a list (any spacing, one or several lines) or a TOKEN.
 
-    A bracketed value is read through ``_extract_meta_fields`` (which overlays a wrapped
-    list's full compact form); anything else keeps the legacy single-token regex.
+    A closed bracket list is read through ``_extract_meta_fields`` (which overlays a
+    wrapped list's full compact form); anything else keeps the legacy single-token regex.
     """
     listed = _extract_meta_fields(content).get("SUPERSEDED_BY")
-    if listed is not None and listed.lstrip().startswith("["):
+    # A LIST only when it is a closed one-line ``[...]`` or a wrapped list opened by an
+    # exact ``KEY::[`` (read as the compact ``[...]``, or a bare ``[`` if never closed).
+    # Any other value starting ``[`` keeps its pre-#229 behaviour (the regex below).
+    if listed is not None and listed.startswith("[") and listed.rstrip().endswith("]"):
+        return listed
+    if listed is not None and listed.strip() == "[":
         return listed
     return _extract_superseded_by(content)
 
@@ -974,7 +979,9 @@ def _validate_impl(
     # --- Check 5: SUPERSEDED_BY target existence ---
     superseded_by = _superseded_by_value(content)
     if superseded_by is not None:
-        listed = superseded_by.lstrip().startswith("[")
+        listed = superseded_by.strip() == "[" or (
+            superseded_by.startswith("[") and superseded_by.rstrip().endswith("]")
+        )
         # A bare ``[`` is a list the reader could not close: ``_check_list_fields`` has
         # already reported it, so there is no target to look up.
         targets: list[str] | None = None
