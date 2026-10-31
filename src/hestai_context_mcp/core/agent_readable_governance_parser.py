@@ -51,7 +51,10 @@ mode and runs until the bracket that closes it, counting brackets outside
 double-quoted strings. Any other value that starts ``[`` without closing it on its line
 (``NOTE::[see below``, ``KEY::[A,``) is read as a single line, exactly as before #224.
 Blank lines and ``//`` comments (a whole line, or after whitespace following an item)
-inside the list are ignored. Regex and indent only, no AST.
+inside the list are ignored. Inside the list, a line indented DEEPER than the opener is an item (a nested
+``KEY::[`` / ``KEY::value`` item is the form ``octave_write`` writes for a nested list,
+ADR-004 v1.9) and is kept in the compact value, never read as a field of the record;
+indent is measured with tabs expanded to width 4. Regex and indent only, no AST.
 
 Representation in ``fields`` (PROD I4): a wrapped list is stored as the COMPACT
 single-line form ``[A,B]``: every item trimmed (its own quotes kept, so an item with a
@@ -63,8 +66,8 @@ written compactly on one line give the identical string; a single-line list writ
 :func:`list_items`.
 
 Unterminated applies only to lists opened by an exact ``KEY::[``. A list that is never
-closed (a new ``KEY::`` line, a block header, the envelope end or
-the end of the text comes first), or that has text after its closing ``]``, makes the
+closed (a new ``KEY::`` line, a block header or ``===`` line at the opener's indent or
+shallower, the envelope end or the end of the text comes first), or that has text after its closing ``]``, makes the
 whole record unparseable: ``parse_decision_record`` returns the empty record and
 :func:`diagnose_octave_record` reports the 1-based line of the opening and the construct
 (``unterminated_list`` / ``text_after_list``). A record is never half-read.
@@ -359,15 +362,29 @@ def list_items(value: str) -> list[str]:
 class _OpenList:
     """Accumulator for a list that has not closed yet (private to the reader)."""
 
-    def __init__(self, key: str, line: int, value: str, depth: int, in_quote: bool) -> None:
-        self.key, self.line = key, line
+    def __init__(
+        self, key: str, line: int, value: str, depth: int, in_quote: bool, indent: int
+    ) -> None:
+        self.key, self.line, self.indent = key, line, indent
         self.parts = [value.strip()]
         self.depth, self.in_quote = depth, in_quote
 
 
-def _is_list_break(raw: str, in_quote: bool) -> bool:
-    """True if ``raw`` (a line met while a list is open) can only start something new."""
-    if in_quote:
+def _indent_of(raw: str) -> int:
+    """Leading-whitespace width of ``raw`` with tabs expanded to width 4."""
+    expanded = raw.expandtabs(4)
+    return len(expanded) - len(expanded.lstrip())
+
+
+def _is_list_break(raw: str, in_quote: bool, opener_indent: int) -> bool:
+    """True if ``raw`` (a line met while a list is open) ends the list without closing it.
+
+    Only a line at the opener's indent or SHALLOWER can break the list, and only if it is a
+    new ``KEY::`` field, a block header or an ``===`` line. A line indented DEEPER than the
+    opener is a list ITEM, nested ``KEY::[...]`` / ``KEY::value`` items included (this is how
+    ``octave_write`` writes a nested list, ADR-004 v1.9). Inside an open quote nothing breaks.
+    """
+    if in_quote or _indent_of(raw) > opener_indent:
         return False
     if raw.lstrip().startswith("==="):
         return True
@@ -386,7 +403,7 @@ def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]
     pending: _OpenList | None = None
     for number, (block, raw) in enumerate(annotate_lines(text), start=1):
         if pending is not None:
-            if block is not None or _is_list_break(raw, pending.in_quote):
+            if block is not None or _is_list_break(raw, pending.in_quote, pending.indent):
                 return fields, {"line": pending.line, "construct": "unterminated_list"}
             line = _strip_inline_comment(raw, pending.in_quote)
             body = line.strip()
@@ -415,7 +432,7 @@ def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]
         if value.strip() == "[":
             # Only ``KEY::[`` alone (what octave_write emits) opens list mode. Any other
             # value that opens ``[`` without closing it keeps the pre-#224 single-line read.
-            pending = _OpenList(key, number, value, 1, False)
+            pending = _OpenList(key, number, value, 1, False, _indent_of(raw))
             continue
         fields.append(OctaveField(key, value, number, False))
     if pending is not None:
