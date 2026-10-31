@@ -27,20 +27,27 @@ import asyncio
 import logging
 import re
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from hestai_context_mcp.adapters.ai_config import resolve_require_real_validation
+from hestai_context_mcp.core.agent_readable_governance_parser import is_yaml_front_matter
 from hestai_context_mcp.core.governance_reviewer import review_governance
 from hestai_context_mcp.core.intake_pipeline import run_intake_to_pr
 from hestai_context_mcp.ports.octave_validator import (
     OctaveValidationResult,
+    UnavailableOctaveValidator,
     fail_closed_error_message,
     get_octave_validator,
 )
 from hestai_context_mcp.tools.clock_in import validate_working_dir
 from hestai_context_mcp.tools.governance.intake_context import assemble_intake_context
 from hestai_context_mcp.tools.governance.linker import run_linker
-from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
+from hestai_context_mcp.tools.governance.type_checker import (
+    ValidationResult,
+    validate_octave_content,
+    validate_record_content,
+)
 from hestai_context_mcp.tools.shared.review_gate_retrigger import (
     _GH_API_TIMEOUT_SECONDS,
     _GhCliClient,
@@ -428,15 +435,34 @@ async def _submit_octave_content(
         return _empty_result(dry_run, [str(exc)])
 
     # --- Dumb Type Checker (blocking filesystem reads for token lookup) ---
+    # Syntax selection (ADR-RFC-ARCH-004 §1.1): a record whose first line is exactly
+    # ``---`` is quoted YAML and goes through the Gate A seam
+    # (``validate_record_content``); anything else takes the unchanged OCTAVE path.
+    is_yaml = is_yaml_front_matter(octave_content)
     validation = await loop.run_in_executor(
         None,
-        validate_octave_content,
+        validate_record_content if is_yaml else validate_octave_content,
         wd,
         octave_content,
     )
 
     if not validation.valid:
         return _empty_result(dry_run, validation.errors)
+
+    # YAML (EPIC4 PR-5): Gate B is OCTAVE-only and is skipped; the linker writes the
+    # CANONICAL bytes (front matter re-emitted, body verbatim) and Stage 5 reviews them.
+    if is_yaml:
+        yaml_text = validation.canonical_content
+        if yaml_text is None:  # Gate A guarantees it for a valid YAML record
+            return _empty_result(
+                dry_run, ["Internal error: Gate A produced no canonical bytes for a YAML record."]
+            )
+        # The signal is the ACTUAL availability of the optional validator, computed as for
+        # OCTAVE (the port's ``available``), though the validator is not run on YAML.
+        real_available = not isinstance(get_octave_validator(), UnavailableOctaveValidator)
+        return await _link_and_report(
+            wd, validation, yaml_text, dry_run, review, None, real_available, loop
+        )
 
     # --- Gate B: REAL OCTAVE validation (in-process library behind the port) ---
     # octave-mcp's real validator runs here, ADDITIVE to the regex Gate A above.
@@ -490,12 +516,35 @@ async def _submit_octave_content(
                 real_validation_available=False,
             )
 
+    return await _link_and_report(
+        wd,
+        validation,
+        octave_content,
+        dry_run,
+        review,
+        octave_validation,
+        real_validation_available,
+        loop,
+    )
+
+
+async def _link_and_report(
+    wd: Path,
+    validation: ValidationResult,
+    content: str,
+    dry_run: bool,
+    review: bool,
+    octave_validation: dict[str, Any] | None,
+    real_validation_available: bool,
+    loop: asyncio.AbstractEventLoop,
+) -> dict[str, Any]:
+    """Linker + I4 result + Stage 5: the tail shared by the OCTAVE and YAML paths."""
     # --- Linker (blocking: git subprocess + file writes) ---
     linker_fn = partial(
         run_linker,
         working_dir=wd,
         validation=validation,
-        octave_content=octave_content,
+        octave_content=content,
         dry_run=dry_run,
     )
     linker_output = await loop.run_in_executor(None, linker_fn)
@@ -529,4 +578,4 @@ async def _submit_octave_content(
         "real_validation_available": real_validation_available,
         "dry_run": dry_run,
     }
-    return await _maybe_review(result, octave_content, dry_run, review, working_dir=str(wd))
+    return await _maybe_review(result, content, dry_run, review, working_dir=str(wd))

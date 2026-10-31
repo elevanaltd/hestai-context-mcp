@@ -22,8 +22,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
+    RecordText,
+    YamlReject,
+    YamlSyntaxError,
     annotate_lines,
+    canonicalize_yaml_record,
+    classify_record_text,
     iter_block_lines,
+    parse_decision_record,
+    parse_supersedes_list,
 )
 from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 
@@ -222,6 +229,13 @@ class ValidationResult:
         token: Extracted TOKEN or ID value (may be None if extraction failed).
         card_type: Extracted TYPE value (may be None if extraction failed).
         target_path: Computed target path for placement (None on error).
+        syntax: ``"octave"`` (default) or ``"yaml"`` -- which Gate A branch judged the
+            content (EPIC4 PR-5). Decides the target extension and the downstream
+            Gate B / Stage-5 treatment.
+        reject: For a rejected YAML record, the PR-4 reader's structured
+            ``{line, construct}``; otherwise None.
+        canonical_content: For a valid YAML record, the canonical bytes to write (front
+            matter re-emitted, markdown body verbatim); None for OCTAVE or on error.
     """
 
     valid: bool
@@ -230,6 +244,9 @@ class ValidationResult:
     token: str | None = None
     card_type: str | None = None
     target_path: Path | None = None
+    syntax: str = "octave"
+    reject: YamlReject | None = None
+    canonical_content: str | None = None
 
 
 def _extract_sentinel(content: str) -> str | None:
@@ -334,6 +351,16 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
+# The ONE place a record's syntax decides its file extension (ADR-RFC-ARCH-004 §1.1):
+# an OCTAVE record is ``<token>.oct.md``, a quoted-YAML record is ``<token>.md``.
+RECORD_SUFFIX = {"octave": ".oct.md", "yaml": ".md"}
+
+
+def decision_record_path(working_dir: Path, token: str, syntax: str) -> Path:
+    """Target path of a DECISION_RECORD of the given ``syntax`` (``octave`` or ``yaml``)."""
+    return working_dir / ".hestai" / "decisions" / f"{token}{RECORD_SUFFIX[syntax]}"
+
+
 def _compute_target_path(
     working_dir: Path,
     card_type: str,
@@ -356,10 +383,29 @@ def _compute_target_path(
         Computed absolute Path.
     """
     if card_type == _DECISION_RECORD_TYPE:
-        return working_dir / ".hestai" / "decisions" / f"{token}.oct.md"
+        return decision_record_path(working_dir, token, "octave")
 
     # Facet card types
     return working_dir / ".hestai" / "context" / "concepts" / repo_id / f"{token}.oct.md"
+
+
+@dataclass
+class _RecordValues:
+    """The syntax-independent inputs of the §4.1 invariants (#1-#12), already extracted.
+
+    OCTAVE extracts them with line-anchored regexes, YAML from the PR-4 reader's
+    decoded record; ``_check_common_invariants`` then judges both identically, so a
+    rule can never drift between the two syntaxes. Values are bare (unquoted).
+    """
+
+    present: set[str]  # uppercase names of every declared top-level field
+    version: str | None
+    status: str | None
+    tier: str | None
+    authored_at: str | None
+    has_superseded_by: bool
+    human_adr_ref: str | None  # None when absent
+    has_ratified_by: bool
 
 
 def _check_agr_invariants(
@@ -369,14 +415,48 @@ def _check_agr_invariants(
     errors: list[str],
     warnings: list[str],
 ) -> None:
-    """Enforce the ADR-RFC-ARCH-004 §4.1 invariants for a DECISION_RECORD (#88).
+    """Enforce the ADR-RFC-ARCH-004 §4.1 invariants for an OCTAVE DECISION_RECORD (#88).
 
-    Collect-more-errors style (mirrors the established #10 ISSUE_REF / #8
-    SUPERSEDED_BY precedent): every finding is appended to ``errors`` (or
-    ``warnings`` for §4.1 #12) so a single round-trip surfaces ALL problems with
-    the offending field NAMED. Regex-only (North Star §4 / PROD I3); never
-    raises (PROD I4). ``token`` is the already-extracted, §1.3-format-valid
-    TOKEN.
+    Extracts the OCTAVE field values, runs the syntax-independent checks
+    (``_check_common_invariants``) and then the OCTAVE-form reasoning-density check
+    (#13). Collect-more-errors style; regex-only (North Star §4 / PROD I3); never
+    raises (PROD I4). ``token`` is the already-extracted, §1.3-format-valid TOKEN.
+    """
+    meta = _extract_meta_fields(content)
+    human_adr_m = _HUMAN_ADR_REF_RE.search(content)
+    human_adr_ref: str | None = None
+    if human_adr_m is not None:
+        ref = human_adr_m.group(1) if human_adr_m.group(1) is not None else human_adr_m.group(2)
+        human_adr_ref = (ref or "").strip()
+    values = _RecordValues(
+        present=set(meta),
+        version=_strip_quotes(meta["VERSION"]) if "VERSION" in meta else None,
+        status=_strip_quotes(meta["STATUS"]) if "STATUS" in meta else None,
+        tier=_strip_quotes(meta["TIER"]) if "TIER" in meta else None,
+        authored_at=_strip_quotes(meta["AUTHORED_AT"]) if "AUTHORED_AT" in meta else None,
+        has_superseded_by=_extract_superseded_by(content) is not None,
+        human_adr_ref=human_adr_ref,
+        has_ratified_by=_RATIFIED_BY_RE.search(content) is not None,
+    )
+    _check_common_invariants(working_dir, token, values, errors, warnings)
+
+    # --- #13: Reasoning-field density (ADR-RFC-ARCH-004 v1.1 §1.2) ---
+    # DECISION and BECAUSE are LLM "bytecode": flat compressed-OCTAVE strings of
+    # AT MOST MAX_REASONING_WORDS words with NO embedded newline (the ratified
+    # GATE_A_GUARD of HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101). This is
+    # a value-level check ONLY — the structural flat-regex parse is unchanged.
+    _check_reasoning_density(content, errors)
+
+
+def _check_common_invariants(
+    working_dir: Path,
+    token: str,
+    v: _RecordValues,
+    errors: list[str],
+    warnings: list[str],
+    container: str = "the META block",
+) -> None:
+    """The §4.1 invariants that do not depend on the record's syntax.
 
     Invariants enforced here (the residual set unenforced before #88):
       #1-residual  VERSION two-segment shape (§1.5)
@@ -389,21 +469,19 @@ def _check_agr_invariants(
       #11          HUMAN_ADR_REF resolves under the repository
       #12          Ratification provenance (WARNING per §4.2)
     """
-    meta = _extract_meta_fields(content)
-
     # --- #2: Required fields present (the core silent-pass class) ---
     # TYPE and TOKEN are proven present by the time we get here; check the rest
     # so a record the read parser would mark unparseable is rejected on write.
     for required in REQUIRED_META_FIELDS:
-        if required not in meta:
+        if required not in v.present:
             errors.append(
-                f"Required field '{required}' is missing from the META block "
+                f"Required field '{required}' is missing from {container} "
                 "(ADR-RFC-ARCH-004 §1.2 / §4.1 #2)."
             )
 
     # --- #1-residual: VERSION two-segment shape (§1.5) ---
-    if "VERSION" in meta:
-        version = _strip_quotes(meta["VERSION"])
+    if v.version is not None:
+        version = v.version
         if not _VERSION_SHAPE_RE.match(version):
             errors.append(
                 f"VERSION '{version}' is not a two-segment MAJOR.MINOR string "
@@ -412,7 +490,7 @@ def _check_agr_invariants(
             )
 
     # --- #5: STATUS enum ---
-    status = _strip_quotes(meta["STATUS"]) if "STATUS" in meta else None
+    status = v.status
     if status is not None and status not in STATUS_VALUES:
         errors.append(
             f"STATUS '{status}' is not a valid value. "
@@ -421,8 +499,8 @@ def _check_agr_invariants(
         )
 
     # --- #6: TIER enum ---
-    if "TIER" in meta:
-        tier = _strip_quotes(meta["TIER"])
+    if v.tier is not None:
+        tier = v.tier
         if tier not in TIER_VALUES:
             errors.append(
                 f"TIER '{tier}' is not a valid value. "
@@ -432,7 +510,7 @@ def _check_agr_invariants(
 
     # --- #7: Reserved names MUST NOT appear (§1.2) ---
     for reserved in sorted(RESERVED_FIELD_NAMES):
-        if reserved in meta:
+        if reserved in v.present:
             errors.append(
                 f"Reserved field '{reserved}' MUST NOT appear in a v1.x record "
                 "(ADR-RFC-ARCH-004 §1.2 reserved-names / §4.1 #7)."
@@ -443,7 +521,7 @@ def _check_agr_invariants(
     # is normalised to UTC before the date is taken (T3 CIV rework — a lexical
     # leading-date capture mis-handles offsets and silently passes a non-
     # timestamp AUTHORED_AT).
-    authored_at = _strip_quotes(meta["AUTHORED_AT"]) if "AUTHORED_AT" in meta else None
+    authored_at = v.authored_at
     token_date_m = _TOKEN_DATE_SUFFIX_RE.search(token)
     if authored_at is not None and token_date_m is not None:
         token_yyyymmdd = token_date_m.group(1)
@@ -472,7 +550,7 @@ def _check_agr_invariants(
                 )
 
     # --- #9: SUPERSEDED_BY present IFF STATUS == SUPERSEDED ---
-    has_superseded_by = _extract_superseded_by(content) is not None
+    has_superseded_by = v.has_superseded_by
     if status == "SUPERSEDED" and not has_superseded_by:
         errors.append(
             "STATUS is SUPERSEDED but SUPERSEDED_BY is absent; a superseded "
@@ -497,10 +575,8 @@ def _check_agr_invariants(
     #                    (cross-repo survivable — the target may live elsewhere).
     #   * otherwise   -> v1.0 path-form; resolve under the repo exactly as before
     #                    (back-compat; the 5 existing path-form records still pass).
-    human_adr_m = _HUMAN_ADR_REF_RE.search(content)
-    if human_adr_m is not None:
-        ref = human_adr_m.group(1) if human_adr_m.group(1) is not None else human_adr_m.group(2)
-        ref = (ref or "").strip()
+    if v.human_adr_ref is not None:
+        ref = v.human_adr_ref
         if _TOKEN_FORMAT_RE.match(ref):
             # Token-form: well-formed greppable token, no filesystem resolution.
             pass
@@ -512,22 +588,12 @@ def _check_agr_invariants(
             )
 
     # --- #12: Ratification provenance (WARNING per §4.2, NOT error) ---
-    has_ratified_by = _RATIFIED_BY_RE.search(content) is not None
-    if status is not None and status != "PROPOSED" and not has_ratified_by:
+    if status is not None and status != "PROPOSED" and not v.has_ratified_by:
         warnings.append(
             f"RATIFIED_BY is absent on a record whose STATUS is '{status}' "
             "(not PROPOSED); ratification provenance is recommended "
             "(ADR-RFC-ARCH-004 §4.1 #12, severity WARNING)."
         )
-
-    # --- #13: Reasoning-field density (ADR-RFC-ARCH-004 v1.1 §1.2) ---
-    # DECISION and BECAUSE are LLM "bytecode": flat compressed-OCTAVE strings of
-    # AT MOST MAX_REASONING_WORDS words with NO embedded newline (the ratified
-    # GATE_A_GUARD of HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101). This is
-    # a value-level check ONLY — the structural flat-regex parse is unchanged.
-    # Collect-more-errors with the offending field NAMED (operator UX), mirroring
-    # the #10/#9 precedent.
-    _check_reasoning_density(content, errors)
 
 
 _META_HEADER_RE = re.compile(r"^META:\s*$")
@@ -629,24 +695,30 @@ def _check_reasoning_density(content: str, errors: list[str]) -> None:
             )
             continue
 
-        value = form_match.group("inner")
+        _check_density_value(key, form_match.group("inner"), errors)
 
-        if "\n" in value or "\r" in value:
-            errors.append(
-                f"{key} value contains an embedded newline; reasoning fields MUST "
-                "be a single flat line (no newline) — ADR-RFC-ARCH-004 v1.1 §1.2 / "
-                "§4.1 #13. Compress to one telegraphic line using OCTAVE operators "
-                "(→ ⇌ ∴ ⊕) for the connectives."
-            )
 
-        word_count = len(value.split())
-        if word_count > MAX_REASONING_WORDS:
-            errors.append(
-                f"{key} value is {word_count} words (max {MAX_REASONING_WORDS}); "
-                "reasoning fields MUST be compressed bytecode, not prose — "
-                "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13. Drop stopwords and let "
-                "OCTAVE operators (→ ⇌ ∴ ⊕) carry the connectives."
-            )
+def _check_density_value(key: str, value: str, errors: list[str]) -> None:
+    """The syntax-independent half of §4.1 #13: no newline, at most MAX_REASONING_WORDS words.
+
+    ``value`` is the bare (unquoted, and for YAML unescaped) reasoning text.
+    """
+    if "\n" in value or "\r" in value:
+        errors.append(
+            f"{key} value contains an embedded newline; reasoning fields MUST "
+            "be a single flat line (no newline) — ADR-RFC-ARCH-004 v1.1 §1.2 / "
+            "§4.1 #13. Compress to one telegraphic line using OCTAVE operators "
+            "(→ ⇌ ∴ ⊕) for the connectives."
+        )
+
+    word_count = len(value.split())
+    if word_count > MAX_REASONING_WORDS:
+        errors.append(
+            f"{key} value is {word_count} words (max {MAX_REASONING_WORDS}); "
+            "reasoning fields MUST be compressed bytecode, not prose — "
+            "ADR-RFC-ARCH-004 v1.1 §1.2 / §4.1 #13. Drop stopwords and let "
+            "OCTAVE operators (→ ⇌ ∴ ⊕) carry the connectives."
+        )
 
 
 def _authored_at_utc_date(value: str) -> str | None:
@@ -737,6 +809,17 @@ def _strip_block_lines(content: str) -> str:
     and the read side agree on what the record declares (#203 S1).
     """
     return "".join(line for block, line in annotate_lines(content) if block is None)
+
+
+def _check_issue_ref_shape(raw: str, errors: list[str]) -> None:
+    """§4.1 #10: a present ISSUE_REF is a GitHub issue URL or ``repo:<repo-id>#<n>``."""
+    if not raw or not _ISSUE_REF_SHAPE_RE.fullmatch(raw):
+        errors.append(
+            f"ISSUE_REF '{raw}' does not match a valid shape. "
+            "ISSUE_REF must be a GitHub issue URL "
+            "(https://github.com/<org>/<repo>/issues/<n>) or the "
+            "repo:<repo-id>#<n> shorthand (ADR-RFC-ARCH-004 §4.1 #10)."
+        )
 
 
 def _validate_impl(
@@ -862,13 +945,7 @@ def _validate_impl(
         raw = issue_ref_raw_lines[0].strip()
         if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
             raw = raw[1:-1]
-        if not raw or not _ISSUE_REF_SHAPE_RE.fullmatch(raw):
-            errors.append(
-                f"ISSUE_REF '{raw}' does not match a valid shape. "
-                "ISSUE_REF must be a GitHub issue URL "
-                "(https://github.com/<org>/<repo>/issues/<n>) or the "
-                "repo:<repo-id>#<n> shorthand (ADR-RFC-ARCH-004 §4.1 #10)."
-            )
+        _check_issue_ref_shape(raw, errors)
         # Continue to collect more errors
 
     # --- Check 6: Token uniqueness (must NOT already exist for new records) ---
@@ -902,4 +979,169 @@ def _validate_impl(
         token=token,
         card_type=card_type,
         target_path=target_path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# EPIC4 PR-5: the quoted-YAML Gate A branch and the ONE syntax seam.
+# ---------------------------------------------------------------------------
+
+
+def validate_record_content(working_dir: Path, content: str) -> ValidationResult:
+    """The syntax seam: classify ``content`` once, then run the matching Gate A branch.
+
+    A quoted-YAML record (first line ``---``, ADR-RFC-ARCH-004 §1.1) is judged by
+    ``_validate_yaml_impl`` and targets ``{token}.md``; any other content goes,
+    byte-for-byte unchanged, to :func:`validate_octave_content` and targets
+    ``{token}.oct.md``. The dispatch is by ``classify_record_text`` on the content
+    alone. ``submit_governance`` also checks the first line itself before choosing which
+    validator to call (existing callers patch ``validate_octave_content`` there), so this
+    function is the Gate A dispatch, not the only syntax decision in the tool. A later
+    prose-mode-emits-YAML change can reuse :func:`decision_record_path` and
+    ``ValidationResult.syntax``.
+
+    Never raises on bad input. Always returns a ValidationResult.
+    """
+    record = classify_record_text(content)
+    if record.syntax != "yaml":
+        return validate_octave_content(working_dir, content)
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        return _validate_yaml_impl(working_dir, record, content, errors, warnings)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"Unexpected validation error: {exc}")
+        return ValidationResult(valid=False, errors=errors, warnings=warnings, syntax="yaml")
+
+
+def _existing_record_files(working_dir: Path, token: str) -> list[Path]:
+    """Files named ``<token>.oct.md`` or ``<token>.md`` anywhere under ``.hestai/decisions``.
+
+    Catches a file lookup cannot see (an unparseable record, a stray file), so a write
+    can never silently replace one. ``token`` is §1.3-valid, so it is glob-safe.
+    """
+    root = working_dir / ".hestai" / "decisions"
+    if not root.is_dir():
+        return []
+    found = {*root.rglob(f"{token}.md"), *root.rglob(f"{token}.oct.md")}
+    return sorted(path for path in found if path.is_file())
+
+
+def _validate_yaml_impl(
+    working_dir: Path,
+    record: RecordText,
+    raw_content: str,
+    errors: list[str],
+    warnings: list[str],
+) -> ValidationResult:
+    """Gate A for a quoted-YAML DECISION_RECORD (reader errors + the shared invariants)."""
+    if record.diagnostic is not None:
+        reject = record.diagnostic
+        errors.append(
+            f"YAML record rejected at line {reject['line']}: {reject['construct']} "
+            "(ADR-RFC-ARCH-004 §1.1 strict quoted-YAML subset)."
+        )
+        return ValidationResult(valid=False, errors=errors, syntax="yaml", reject=reject)
+
+    parsed = parse_decision_record(record.text)
+    fields = parsed["fields"]
+    card_type = parsed["type"]
+    token = parsed["token"]
+
+    def fail(**kwargs: str | None) -> ValidationResult:
+        return ValidationResult(
+            valid=False, errors=errors, warnings=warnings, syntax="yaml", **kwargs  # type: ignore[arg-type]
+        )
+
+    if card_type != _DECISION_RECORD_TYPE:
+        errors.append(
+            f'A YAML record must declare type: "{_DECISION_RECORD_TYPE}" '
+            f"(found {card_type!r}); only DECISION_RECORDs are written as quoted YAML."
+        )
+        return fail(card_type=card_type)
+    if token is None:
+        errors.append('DECISION_RECORD requires a token field: token: "<value>"')
+        return fail(card_type=card_type)
+    if not _TOKEN_FORMAT_RE.fullmatch(token):
+        errors.append(
+            f"TOKEN '{token}' does not match required format "
+            r"^[A-Z][A-Z0-9_-]{1,126}[A-Z0-9_]-[0-9]{8}$ "
+            "(ADR-RFC-ARCH-004 §1.3)"
+        )
+        return fail(card_type=card_type, token=token)
+
+    present = {key.upper() for key in ("type", "token") if parsed[key] is not None}  # type: ignore[literal-required]
+    present |= {
+        key.upper()
+        for key in ("version", "status", "tier", "decision", "because", "authored_at")
+        if parsed[key] is not None  # type: ignore[literal-required]
+    }
+    present |= set(fields)
+    values = _RecordValues(
+        present=present,
+        version=parsed["version"],
+        status=parsed["status"],
+        tier=parsed["tier"],
+        authored_at=parsed["authored_at"],
+        has_superseded_by=bool(fields.get("SUPERSEDED_BY")),
+        human_adr_ref=fields.get("HUMAN_ADR_REF"),  # as written: the bytes persisted are unstripped
+        has_ratified_by="RATIFIED_BY" in fields,
+    )
+    _check_common_invariants(working_dir, token, values, errors, warnings, "the front matter")
+    for key in REASONING_FIELDS:
+        value = parsed[key.lower()]  # type: ignore[literal-required]
+        if value is not None:
+            _check_density_value(key, value, errors)
+
+    # --- SUPERSEDED_BY / supersedes targets must exist ---
+    superseded_by = fields.get("SUPERSEDED_BY")
+    if superseded_by and not lookup_token_deterministic(working_dir, superseded_by):
+        errors.append(
+            f"SUPERSEDED_BY target '{superseded_by}' not found in governance store. "
+            "The referenced TOKEN must exist before it can be superseded."
+        )
+    if "SUPERSEDES" in fields:
+        for target in parse_supersedes_list(fields["SUPERSEDES"]):
+            if not lookup_token_deterministic(working_dir, target):
+                errors.append(
+                    f"supersedes target '{target}' not found in governance store. "
+                    "The referenced TOKEN must exist before it can be superseded."
+                )
+
+    # --- ISSUE_REF shape (§4.1 #10) ---
+    if "ISSUE_REF" in fields:
+        _check_issue_ref_shape(fields["ISSUE_REF"], errors)
+
+    # --- TOKEN uniqueness ACROSS .oct.md and .md (§4.1 #4) ---
+    if lookup_token_deterministic(working_dir, token):
+        errors.append(
+            f"TOKEN/ID '{token}' already exists in the governance store. "
+            "Duplicate tokens are not allowed for new records."
+        )
+    else:
+        for existing in _existing_record_files(working_dir, token):
+            errors.append(
+                f"TOKEN/ID '{token}' already exists in the governance store: a file "
+                f"named '{existing.name}' is present at "
+                f"{existing.relative_to(working_dir).as_posix()} and would be replaced."
+            )
+
+    # --- canonical bytes + round-trip gate (write-mode ruling C) ---
+    canonical: str | None = None
+    try:
+        canonical = canonicalize_yaml_record(raw_content)
+    except YamlSyntaxError as exc:
+        errors.append(f"YAML record cannot be canonicalised: {exc}")
+
+    if errors:
+        return fail(card_type=card_type, token=token)
+
+    return ValidationResult(
+        valid=True,
+        warnings=warnings,
+        token=token,
+        card_type=card_type,
+        target_path=decision_record_path(working_dir, token, "yaml"),
+        syntax="yaml",
+        canonical_content=canonical,
     )
