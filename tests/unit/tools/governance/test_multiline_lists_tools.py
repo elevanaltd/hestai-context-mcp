@@ -185,3 +185,111 @@ def test_gate_a_warns_on_a_multi_line_superseded_by_and_stays_valid(tmp_path: Pa
         result.errors,
         result.warnings,
     )
+
+
+# --- HC pins: behaviour outcomes accepted on condition that a test holds them ------------
+
+
+def test_single_line_one_item_superseded_by_resolves_to_its_token(tmp_path: Path) -> None:
+    _seed_wrapped_edge(tmp_path, [f"  SUPERSEDED_BY::[{TOKEN_NEW}]"])
+    looked_up = lookup_decision(str(tmp_path), TOKEN_OLD)
+    assert looked_up["ok"] is True, looked_up
+    assert looked_up["resolution_chain_status"] == "complete"
+    assert [e["token"] for e in looked_up["resolution_chain"]] == [TOKEN_OLD, TOKEN_NEW]
+    traced = trace_supersedure(str(tmp_path), TOKEN_OLD)
+    assert traced["ok"] is True, traced
+    assert [e["token"] for e in traced["chain"]] == [TOKEN_OLD, TOKEN_NEW]
+    assert traced["terminal_token"] == TOKEN_NEW
+
+
+def test_single_line_two_item_superseded_by_is_a_fork(tmp_path: Path) -> None:
+    other = "HO-CUBIC-T-20260301"
+    write_record(tmp_path, token=TOKEN_NEW, authored_at="2026-03-01T00:00:00Z")
+    write_record(tmp_path, token=other, authored_at="2026-03-01T00:00:00Z")
+    write_record(
+        tmp_path,
+        token=TOKEN_OLD,
+        status="SUPERSEDED",
+        authored_at="2026-01-01T00:00:00Z",
+        extra_lines=[f"  SUPERSEDED_BY::[{TOKEN_NEW},{other}]"],
+    )
+    looked_up = lookup_decision(str(tmp_path), TOKEN_OLD)
+    assert looked_up["resolution_chain_status"] == "forked"
+    assert looked_up["successors"] == sorted([TOKEN_NEW, other])
+    traced = trace_supersedure(str(tmp_path), TOKEN_OLD)
+    assert traced["ok"] is False
+    assert traced["error"]["code"] == "CHAIN_FORK_DETECTED"
+
+
+def _seed_unterminated_mid_chain(root: Path) -> tuple[Path, int]:
+    bad = write_record(root, token=TOKEN_NEW, extra_lines=_UNTERMINATED)
+    write_record(
+        root,
+        token=TOKEN_OLD,
+        status="SUPERSEDED",
+        authored_at="2026-01-01T00:00:00Z",
+        superseded_by=TOKEN_NEW,
+    )
+    return bad, bad.read_text(encoding="utf-8").splitlines().index("  AFFECTS::[") + 1
+
+
+def test_lookup_reports_an_unterminated_record_hit_mid_chain(tmp_path: Path) -> None:
+    bad, opened = _seed_unterminated_mid_chain(tmp_path)
+    result = lookup_decision(str(tmp_path), TOKEN_OLD)
+    assert result["ok"] is True
+    assert result["resolution_chain_status"] == "unparseable"
+    assert result["rejected_at"] == {
+        "token": TOKEN_NEW,
+        "path": bad.relative_to(tmp_path).as_posix(),
+        "line": opened,
+        "construct": "unterminated_list",
+    }
+    assert [e["token"] for e in result["resolution_chain"]] == [TOKEN_OLD]
+
+
+def test_trace_reports_an_unterminated_record_hit_mid_chain_with_full_context(
+    tmp_path: Path,
+) -> None:
+    bad, opened = _seed_unterminated_mid_chain(tmp_path)
+    error = trace_supersedure(str(tmp_path), TOKEN_OLD)["error"]
+    assert error["code"] == "RECORD_PARSE_FAILED"
+    assert error["tool"] == "trace_supersedure"
+    ctx = error["context"]
+    assert ctx["token"] == TOKEN_NEW
+    assert ctx["path"] == bad.relative_to(tmp_path).as_posix()
+    assert (ctx["line"], ctx["construct"]) == (opened, "unterminated_list")
+    assert [e["token"] for e in ctx["chain"]] == [TOKEN_OLD]
+
+
+# --- pre-review fixes ------------------------------------------------------------------------
+
+
+def test_duplicate_items_in_a_wrapped_superseded_by_still_navigate(tmp_path: Path) -> None:
+    _seed_wrapped_edge(
+        tmp_path, ["  SUPERSEDED_BY::[", f"    {TOKEN_NEW},", f"    {TOKEN_NEW}", "  ]"]
+    )
+    traced = trace_supersedure(str(tmp_path), TOKEN_OLD)
+    assert traced["ok"] is True, traced
+    assert [e["token"] for e in traced["chain"]] == [TOKEN_OLD, TOKEN_NEW]
+
+
+def test_gate_a_rejects_an_empty_superseded_by_list(tmp_path: Path) -> None:
+    for body in ("  SUPERSEDED_BY::[\n  ]\n", "  SUPERSEDED_BY::[]\n"):
+        content = _GATE_A_HEAD.replace("STATUS::PROPOSED", "STATUS::SUPERSEDED") + body
+        result = validate_octave_content(tmp_path, content + "===END===\n")
+        assert not result.valid, body
+        assert any("SUPERSEDED_BY" in e and "empty" in e for e in result.errors), result.errors
+
+
+def test_gate_a_reports_only_the_list_error_for_an_unterminated_superseded_by(
+    tmp_path: Path,
+) -> None:
+    content = (
+        _GATE_A_HEAD.replace("STATUS::PROPOSED", "STATUS::SUPERSEDED")
+        + "  SUPERSEDED_BY::[\n    A,\n"
+        + "===END===\n"
+    )
+    result = validate_octave_content(tmp_path, content)
+    assert not result.valid
+    assert any("unterminated_list" in e for e in result.errors), result.errors
+    assert not any("target '['" in e for e in result.errors), result.errors

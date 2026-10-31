@@ -268,3 +268,20 @@ def test_a_meta_wrapped_list_before_a_block_still_reads_and_the_block_is_untouch
     text = _record("  AFFECTS::[\n    A,\n    B\n  ]\n  TOPIC::t\n" + _BLOCKS_WITH_WRAPPED_LIST)
     fields = parse_decision_record(text)["fields"]
     assert fields["AFFECTS"] == "[A,B]"
+
+
+def test_an_inline_comment_after_an_item_does_not_swallow_the_next_item() -> None:
+    fields = _fields("  AFFECTS::[\n    X, // a note [with] brackets\n    Y,\n  ]\n")
+    assert fields["AFFECTS"] == "[X,Y]"
+
+
+def test_a_url_item_is_not_mistaken_for_an_inline_comment() -> None:
+    fields = _fields("  AFFECTS::[\n    https://example.com/a,\n    Y\n  ]\n")
+    assert fields["AFFECTS"] == "[https://example.com/a,Y]"
+
+
+def test_a_quoted_item_continuing_onto_a_line_that_starts_with_equals_is_not_the_envelope_end() -> (
+    None
+):
+    fields = _fields('  AFFECTS::[\n    "one\n=== two",\n    C\n  ]\n')
+    assert fields["AFFECTS"] == '["one === two",C]'
