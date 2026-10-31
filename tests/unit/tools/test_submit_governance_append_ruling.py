@@ -544,6 +544,24 @@ class TestUniquenessAtMain:
         assert result["success"] is True, result["validation_errors"]
         assert len(stubs["pr"].calls) == 1
 
+    async def test_a_headerless_fenced_token_line_does_not_block(
+        self, tmp_path: Path, stubs
+    ) -> None:
+        # declares_token: inside --- fences a token: line declares only with the
+        # type: DECISION_RECORD header. Without it, this differently named .md is not a
+        # declaration (and it has no top-level TOKEN:: line), so the append succeeds.
+        repo, _ = init_topic_repo(
+            tmp_path,
+            {
+                TOPIC_PATH: TOPIC_RECORD,
+                ".hestai/decisions/notes.md": f'---\ntoken: "{TOPIC_TOKEN}"\n---\n',
+            },
+        )
+        _stale_checkout(repo)
+        result = await submit_governance(str(repo), append_ruling=_request(), review=False)
+        assert result["success"] is True, result["validation_errors"]
+        assert len(stubs["pr"].calls) == 1
+
     async def test_records_that_only_cite_the_token_do_not_block(
         self, tmp_path: Path, stubs
     ) -> None:

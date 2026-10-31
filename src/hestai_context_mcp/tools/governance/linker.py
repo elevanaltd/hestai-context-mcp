@@ -1680,11 +1680,13 @@ def _matches_token_at_main(path: str, data: bytes, token: str) -> bool:
     scans (HC ruling B), plus ``.md`` under concepts, which that lookup does not read.
 
     Deliberately broader than the lexer's lookup, so it fails closed. "Declares" is
-    exactly ``lexer.declares_token`` (a top-level ``TOKEN::`` / ``ID::`` line, or the
-    fenced YAML ``token:`` line) on the blob's text, with NO parse requirement, NO
-    YAML-header requirement for a ``.md`` and NO extension pairing, so an unparseable,
-    header-less or mis-paired twin still counts; a same-name file counts whatever it
-    holds. MANIFEST rows are not consulted. It is never a substring test: a record that
+    exactly ``lexer.declares_token`` on the blob's text, with NO parse requirement and
+    NO extension pairing: text opening with a ``---`` fence declares only through its
+    fenced ``token:`` line AND the ``type:`` DECISION_RECORD header; any other text (a
+    header-less ``.md`` included) declares through a top-level ``TOKEN::`` / ``ID::``
+    line. So an unparseable or mis-paired twin, or a header-less ``.md`` with a
+    ``TOKEN::`` line, still counts; a fenced ``token:`` without the header does not. A
+    same-name file counts whatever it holds. MANIFEST rows are not consulted. It is never a substring test: a record that
     only cites the TOKEN (``AMENDS``, ``RELATED_DECISIONS``, prose) does not match.
     """
     name = path.rsplit("/", 1)[-1]
