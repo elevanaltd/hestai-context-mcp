@@ -1129,7 +1129,9 @@ def _token_record_paths(working_dir: Path, token: str) -> set[Path]:
     ``.md`` under ``.hestai/decisions`` only as a YAML record with the DECISION_RECORD
     header. Unlike the lexer's boolean lookup, a YAML file that declares the TOKEN but
     does not parse still counts, and same-name files (decisions or concepts) count
-    whatever they hold.
+    whatever they hold. Non-record files and MANIFEST rows are not consulted. This is
+    the LOCAL second line; the authority is the broader main-OID check in
+    ``linker.read_append_base``.
     """
     found = set(_existing_record_files(working_dir, token))
     hestai = working_dir / ".hestai"

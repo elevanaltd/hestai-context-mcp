@@ -1675,14 +1675,17 @@ def _declares_at_main(path: str, data: bytes, token: str) -> bool:
 
 def _matches_token_at_main(path: str, data: bytes, token: str) -> bool:
     """True iff the record file at ``path`` could collide with ``token``: it declares it,
-    or is named for it. Only ``.md`` / ``.oct.md`` blobs reach here
-    (``_list_decision_blobs``): the governance store is record files only (HC ruling B).
+    or is named for it. Only ``.md`` / ``.oct.md`` blobs under decisions and concepts
+    reach here (``_list_decision_blobs``): the file types ``lookup_token_deterministic``
+    scans (HC ruling B), plus ``.md`` under concepts, which that lookup does not read.
 
-    "Declares" is exactly ``lexer.declares_token`` (a top-level ``TOKEN::`` / ``ID::``
-    line, or the fenced YAML ``token:`` line) on the blob's text, with NO extension
-    pairing and NO parse requirement, so a malformed twin still counts. It is never a
-    substring test: a record that only cites the TOKEN (``AMENDS``,
-    ``RELATED_DECISIONS``, prose) does not match.
+    Deliberately broader than the lexer's lookup, so it fails closed. "Declares" is
+    exactly ``lexer.declares_token`` (a top-level ``TOKEN::`` / ``ID::`` line, or the
+    fenced YAML ``token:`` line) on the blob's text, with NO parse requirement, NO
+    YAML-header requirement for a ``.md`` and NO extension pairing, so an unparseable,
+    header-less or mis-paired twin still counts; a same-name file counts whatever it
+    holds. MANIFEST rows are not consulted. It is never a substring test: a record that
+    only cites the TOKEN (``AMENDS``, ``RELATED_DECISIONS``, prose) does not match.
     """
     name = path.rsplit("/", 1)[-1]
     if name in (f"{token}.md", f"{token}.oct.md"):
@@ -1700,10 +1703,10 @@ def read_append_base(working_dir: Path, token: str) -> AppendBase:
 
     TOKEN uniqueness is judged HERE, at the same OID the branch is cut from
     (CE 6538573589): any other record file (``.md`` / ``.oct.md``) under decisions
-    or concepts that declares the TOKEN or is named for it
-    (``_matches_token_at_main``) refuses the append as
-    ``TOKEN_AMBIGUOUS_AT_MAIN``, naming every match. The caller's checkout cannot
-    hide a twin that main holds.
+    or concepts that declares the TOKEN or is named for it, by the deliberately
+    broader rule of ``_matches_token_at_main``, refuses the append as
+    ``TOKEN_AMBIGUOUS_AT_MAIN``, naming every match. Non-record files and MANIFEST
+    rows are not consulted. The caller's checkout cannot hide a twin that main holds.
     """
     fetch_err = _fetch_origin(working_dir)
     if fetch_err:
