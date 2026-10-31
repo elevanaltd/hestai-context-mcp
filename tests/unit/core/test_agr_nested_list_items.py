@@ -149,3 +149,15 @@ def test_blank_lines_inside_a_list_with_nested_key_items_are_ignored() -> None:
 def test_a_key_value_line_inside_an_open_quote_is_not_a_break_at_any_indent() -> None:
     fields = _fields('  AFFECTS::[\n    "one\nSCOPE::two",\n    B\n  ]\n')
     assert fields["AFFECTS"] == '["one SCOPE::two",B]'
+
+
+def test_a_tab_plus_spaces_item_is_deeper_than_a_four_space_opener() -> None:
+    """Indent is measured with tabs expanded to width 4: ``\\t  `` is 6 columns, deeper than 4."""
+    fields = _fields("    AFFECTS::[\n\t  A::x,\n\t  B\n    ]\n")
+    assert fields["AFFECTS"] == "[A::x,B]"
+
+
+def test_a_four_space_sibling_is_the_same_depth_as_a_tab_opener() -> None:
+    """A tab opener is 4 columns; a four-space ``KEY::`` line is NOT deeper, so it breaks the list."""
+    text = _record("\tAFFECTS::[\n\t\tA,\n    SCOPE::PROD\n")
+    assert diagnose_octave_record(text) == {"line": _OPENS_AT, "construct": "unterminated_list"}
