@@ -342,7 +342,11 @@ def test_phase_started_before_envelope_end_ignores_fields_after_it(tmp_path, for
 
 
 @pytest.mark.parametrize(
-    "construct_text", ["DELIVERABLES::[\n  a,\n  b\nRACI::x\n", "ENTRY::[\n  a\n] trailing\n"]
+    "construct_text",
+    [
+        pytest.param("DELIVERABLES::[\n  a,\n  b\nRACI::x\n", id="unterminated_list"),
+        pytest.param("ENTRY::[\n  a\n] trailing\n", id="text_after_list"),
+    ],
 )
 def test_malformed_content_after_envelope_end_is_never_read_for_validity(tmp_path, construct_text):
     """An unterminated list / text_after_list AFTER ===END=== must not raise."""

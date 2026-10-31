@@ -61,7 +61,7 @@ PHASE_IDS = ["D0", "D1", "D2", "D3", "B0", "B1", "B2", "B3", "B4", "B5"]
 _PHASE_MARKER_KEY_RE = re.compile(rf"^(?:{'|'.join(PHASE_IDS)})_[A-Z]+(?:_[A-Z]+)*$")
 _BARE_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _BLOCK_HEADER_LINE_RE = re.compile(r"^[A-Z][A-Z0-9_]*:\s*$")
-_ENVELOPE_END = "===END==="
+_ENVELOPE_END_RE = re.compile(r"^===END===\s*$")  # column 0; items in lists are indented
 
 
 class WorkflowParseError(ValueError):
@@ -172,17 +172,19 @@ class ContextSteward:
         Raises:
             WorkflowParseError: If the document has a malformed list.
         """
-        fields, reject = read_octave_fields(content)
+        # Nothing after the closing envelope is ever read, not even for validity: the closing
+        # envelope is the first line that is exactly ``===END===`` at column 0 (trailing
+        # whitespace / CR allowed; wrapped-list items are indented, so they cannot match).
+        # Slicing keeps every earlier line, so field and reject line numbers are unchanged.
+        lines = content.splitlines()
+        envelope_end = next(
+            (n for n, line in enumerate(lines) if _ENVELOPE_END_RE.match(line)), len(lines)
+        )
+        lines = lines[:envelope_end]
+        fields, reject = read_octave_fields("\n".join(lines) + "\n")
         if reject is not None:
             raise WorkflowParseError(self.workflow_path, reject["line"], reject["construct"])
 
-        lines = content.splitlines()
-        # Nothing after the closing envelope is ever read: cut the fields up front.
-        envelope_end = next(
-            (n for n, line in enumerate(lines, start=1) if line.strip() == _ENVELOPE_END),
-            len(lines) + 1,
-        )
-        fields = [f for f in fields if f.line < envelope_end]
         block_header_lines = [
             n for n, line in enumerate(lines, start=1) if _BLOCK_HEADER_LINE_RE.match(line)
         ]
