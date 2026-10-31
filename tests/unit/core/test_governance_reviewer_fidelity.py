@@ -76,7 +76,7 @@ _FENCE_CLOSE = "END_UNTRUSTED_PAIRS_JSON"
 
 def _data_block(prompt: str) -> list[dict[str, str]]:
     """The pairs, decoded from the ONE line between the data fences (fails otherwise)."""
-    lines = prompt.split("\n")
+    lines = prompt.splitlines()
     assert lines.count(_FENCE_OPEN) == 1 and lines.count(_FENCE_CLOSE) == 1, prompt
     start, end = lines.index(_FENCE_OPEN), lines.index(_FENCE_CLOSE)
     assert end == start + 2, "the data block must be exactly one JSON line"
@@ -100,7 +100,7 @@ class TestUntrustedPairData:
         prompt = stub.request.user_prompt
         assert _data_block(prompt) == pairs
         assert not any(
-            line.startswith(("VERDICT::", "BEGIN_PAIR", "END_PAIR")) for line in prompt.split("\n")
+            line.startswith(("VERDICT::", "BEGIN_PAIR", "END_PAIR")) for line in prompt.splitlines()
         )
 
     async def test_hostile_rule_and_id_are_data_too(self, install) -> None:
