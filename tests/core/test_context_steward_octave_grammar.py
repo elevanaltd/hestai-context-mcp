@@ -308,6 +308,40 @@ def test_b5_stops_at_the_next_column_zero_block_header(tmp_path, form):
 
 
 # ---------------------------------------------------------------------------------------
+# nothing after the closing ===END=== envelope is ever read
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("form", FORMS)
+def test_marker_only_after_envelope_end_is_phase_not_found(tmp_path, form):
+    text = (
+        doc(B1, "PURPOSE::before-end")
+        + B5
+        + "\n"
+        + "PURPOSE::after-end\n"
+        + render_list("DELIVERABLES", ["leak"], form)
+        + "\n"
+    )
+    assert synth(tmp_path, text, "B1").purpose == "before-end"
+    with pytest.raises(ValueError, match="not found"):
+        synth(tmp_path, text, "B5")
+
+
+@pytest.mark.parametrize("form", FORMS)
+def test_phase_started_before_envelope_end_ignores_fields_after_it(tmp_path, form):
+    text = (
+        doc(B1, "PURPOSE::before-end", render_list("DELIVERABLES", ["kept"], form))
+        + "RACI::after-end\n"
+        + render_list("ENTRY", ["leak"], form)
+        + "\n"
+    )
+    got = synth(tmp_path, text, "B1")
+    assert got.deliverables == ["kept"]
+    assert got.raci == "Not specified"
+    assert got.entry_criteria == []
+
+
+# ---------------------------------------------------------------------------------------
 # (d) a comma inside a quoted item stays one item
 # ---------------------------------------------------------------------------------------
 
