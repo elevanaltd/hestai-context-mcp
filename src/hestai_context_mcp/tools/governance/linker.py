@@ -91,6 +91,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hestai_context_mcp.core.agent_readable_governance_parser import read_record
 from hestai_context_mcp.tools.governance.manifest import write_manifest
 from hestai_context_mcp.tools.governance.type_checker import ValidationResult
 from hestai_context_mcp.tools.shared.github_auth import (
@@ -1330,6 +1331,25 @@ def run_linker(
         err = _write_file(target_in_wt, octave_content)
         if err:
             errors.append(err)
+
+        # 2a. Read-back (EPIC4 PR-5, hc #220 item 5): the bytes on disk must be a record
+        #     the reader accepts. ``read_record`` re-reads a YAML record as RAW bytes, so
+        #     a newline-folding write can never commit a record the reader would reject.
+        #     Only for a YAML target (``.md``); OCTAVE targets are unchanged.
+        if (
+            not errors
+            and target_in_wt.suffix == ".md"
+            and not target_in_wt.name.endswith(".oct.md")
+        ):
+            written = read_record(target_in_wt)
+            if written.syntax != "yaml" or written.diagnostic is not None:
+                reject = written.diagnostic
+                detail = (
+                    f"line {reject['line']}: {reject['construct']}"
+                    if reject
+                    else "not a YAML front-matter record"
+                )
+                errors.append(f"read-back of {rels[0]} rejected by the reader ({detail})")
 
         # 2b. Two-birds (#112): dumb-write the VERBATIM ADR prose alongside the
         #     AGR. No AI, no OCTAVE, no provenance marker. Written only when the

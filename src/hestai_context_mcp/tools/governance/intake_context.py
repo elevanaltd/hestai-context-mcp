@@ -36,6 +36,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hestai_context_mcp.core.agent_readable_governance_parser import read_record
 from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 
 # Max characters of few-shot corpus assembled for the backend prompt. Mirrors
@@ -82,10 +83,16 @@ def _date_suffix(path: Path) -> str:
 
 
 def _read_text(path: Path) -> str:
+    """OCTAVE text of ``path`` via ``read_record`` (hc #220 item 5), else ``""``.
+
+    Prose mode stays OCTAVE, so a file the reader classifies as YAML front matter
+    (a mis-paired ``.oct.md``) contributes nothing to the few-shot corpus.
+    """
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        record = read_record(path)
     except OSError:
         return ""
+    return record.text if record.syntax == "octave" else ""
 
 
 def _collect_exemplar_cards(working_dir: Path) -> list[str]:
