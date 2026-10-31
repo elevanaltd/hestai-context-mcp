@@ -49,8 +49,9 @@ ONE grammar serves every list field, edge fields (``SUPERSEDES``, ``SUPERSEDED_B
 ``KEY::[`` (the value is ``[`` after trimming; what ``octave_write`` emits) opens list
 mode and runs until the bracket that closes it, counting brackets outside
 double-quoted strings. Any other value that starts ``[`` without closing it on its line
-(``NOTE::[see below``, ``KEY::[A,``) is read as a single line, exactly as before #224. Blank lines and ``//`` comments (a whole line, or after whitespace
-following an item) inside the list are ignored. Regex and indent only, no AST.
+(``NOTE::[see below``, ``KEY::[A,``) is read as a single line, exactly as before #224.
+Blank lines and ``//`` comments (a whole line, or after whitespace following an item)
+inside the list are ignored. Regex and indent only, no AST.
 
 Representation in ``fields`` (PROD I4): a wrapped list is stored as the COMPACT
 single-line form ``[A,B]``: every item trimmed (its own quotes kept, so an item with a

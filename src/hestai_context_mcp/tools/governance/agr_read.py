@@ -464,6 +464,9 @@ def chain_entry(
         "superseded_by": _single_successor(parsed),
         "path": rel_path(working_dir, path),
     }
+    if successors is not None and len(successors) == 1:
+        # Navigate on the de-duplicated successor set, the same source as the fork test.
+        entry["superseded_by"] = successors[0]
     if successors is not None and len(successors) > 1:
         entry["superseded_by"] = None
         entry["fork"] = True
