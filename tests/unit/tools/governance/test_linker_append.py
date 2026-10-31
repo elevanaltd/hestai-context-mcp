@@ -64,10 +64,11 @@ def _hermetic_git(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _GitRecorder:
-    """Wrap the linker's git runners and record every argv they are given."""
+    """Wrap the linker's git runners; record every argv and every stdin they are given."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.calls: list[list[str]] = []
+        self.stdins: list[tuple[list[str], bytes]] = []
         real_text = linker._run_git
         real_bytes = linker._run_git_bytes
 
@@ -79,13 +80,21 @@ class _GitRecorder:
             args: list[str], cwd: Path, stdin: bytes | None = None
         ) -> tuple[int, bytes, str]:
             self.calls.append(list(args))
+            if stdin is not None:
+                self.stdins.append((list(args), stdin))
             return real_bytes(args, cwd, stdin)
 
         monkeypatch.setattr(linker, "_run_git", text_runner)
         monkeypatch.setattr(linker, "_run_git_bytes", bytes_runner)
 
     def naming(self, needle: str) -> list[list[str]]:
-        return [c for c in self.calls if any(needle in a for a in c)]
+        """Calls whose argv OR stdin mentions ``needle``."""
+        hits = [c for c in self.calls if any(needle in a for a in c)]
+        hits += [c for c, data in self.stdins if needle.encode() in data and c not in hits]
+        return hits
+
+    def by(self, subcommand: str) -> list[list[str]]:
+        return [c for c in self.calls if c and c[0] == subcommand]
 
 
 # ---------------------------------------------------------------------------
@@ -186,13 +195,22 @@ class TestRefReadsAreCounted:
         recorder = _GitRecorder(monkeypatch)
         base = read_append_base(repo, TOPIC_TOKEN)
         assert base.error_code is None
+        assert base.main_oid is not None
         assert recorder.naming("origin/main") == [["rev-parse", "--verify", "origin/main^{commit}"]]
-        assert [c for c in recorder.calls if c[0] == "fetch"] == [["fetch", "origin", "--prune"]]
-        # Every later call names the OID, never a ref.
-        later = recorder.calls[2:]
-        assert later and all(
-            any(base.main_oid in a for a in c) for c in later if c[0] != "cat-file"
-        )
+        assert recorder.by("fetch") == [["fetch", "origin", "--prune"]]
+        assert recorder.by("rev-parse") == [["rev-parse", "--verify", "origin/main^{commit}"]]
+        # ls-tree names the OID, never a ref.
+        assert recorder.by("ls-tree") == [
+            ["ls-tree", "-r", "-z", base.main_oid, "--", ".hestai/decisions"]
+        ]
+        # cat-file reads blobs by blob OID only: no ref name, no <rev>:<path> through stdin.
+        assert recorder.by("cat-file") == [["cat-file", "--batch"]]
+        (argv, stdin), *rest = recorder.stdins
+        assert argv == ["cat-file", "--batch"] and rest == []
+        lines = stdin.decode("ascii").splitlines()
+        assert lines and all(re.fullmatch(r"[0-9a-f]{40}", line) for line in lines), lines
+        assert base.main_oid not in lines
+        assert {c[0] for c in recorder.calls} == {"fetch", "rev-parse", "ls-tree", "cat-file"}
 
 
 def _fail_on(monkeypatch: pytest.MonkeyPatch, subcommand: str, code: int) -> None:
