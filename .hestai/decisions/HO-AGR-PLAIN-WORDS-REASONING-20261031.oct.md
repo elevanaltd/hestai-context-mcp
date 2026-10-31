@@ -7,9 +7,9 @@ META:
   TIER::STRATEGIC
   COMPRESSION_TIER::CONSERVATIVE
   LOSS_PROFILE::"[preserve:operator_quote,inner_rule_4_text,retained_limits,amended_clauses,follow_up_surfaces,out_of_scope,IDs;drop:discussion]"
-  AUTHORED_AT::"2026-10-31T01:42:00Z"
+  AUTHORED_AT::"2026-10-31T00:00:00Z"
   RATIFIED_BY::"human:operator<shaunbuswell>"
-  RATIFIED_AT::"2026-10-31T01:42:00Z"
+  RATIFIED_AT::"2026-10-31T00:00:00Z"
   CEREMONY_REF::"625fb59c-a1a2-466b-bb95-608cb4285017"
   AUTHORING_SESSION::"holistic-orchestrator:hc-control-room-20260929"
   AMENDS::[HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620]
@@ -21,8 +21,20 @@ META:
   NOT_ENFORCED::"Gate A does not machine-reject glyphs; the rule is authoring guidance like the clause it replaces. Existing records are not rewritten"
   OUT_OF_SCOPE::"elevana-studio HO-DECISION-RECORD-SHAPE-AND-AMENDMENT-DISCIPLINE-20260909 shape law: the ES room decides whether to adopt this on its own authority"
   RE_REVIEW_TRIGGER::"Re-open if new records keep carrying operator glyphs after the follow-up merges, which would justify a Gate A check"
-  RELATED_DECISIONS::[HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620,HO-GOVERNANCE-AMEND-IN-PLACE-20260926,HO-RECORDS-YAML-DEFAULT-20261031,HO-HC-WEEKEND-DELEGATION-20261031]
-  AFFECTS::["DECISION and BECAUSE authoring","intake_context _COMPRESSION_CONTRACT","Gate A guidance text","ADR-RFC-ARCH-004 sec 1.2 and sec 1.5"]
+  RELATED_DECISIONS::[
+    HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620,
+    HO-GOVERNANCE-AMEND-IN-PLACE-20260926,
+    HO-RECORDS-YAML-DEFAULT-20261031,
+    HO-HC-WEEKEND-DELEGATION-20261031
+  ]
+  AFFECTS::[
+    "DECISION and BECAUSE authoring",
+    "intake_context _COMPRESSION_CONTRACT",
+    "Gate A guidance text",
+    "ADR-RFC-ARCH-004 sec 1.2 and sec 1.5"
+  ]
   DECISION::"DECISION and BECAUSE write relations in plain words, never arrows or symbols, replacing the compressed-OCTAVE operator clause; each stays one flat quoted string of at most forty words with no newline."
   BECAUSE::"The operator ratified LANG-ARCH inner rule 4 for records; the reported lookup tests found no gain from operator glyphs, and the density limits alone keep reasoning fields short."
+  INTERIM::"Until the FOLLOW_UP PR merges, this record and the amended HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 take precedence over the operator-glyph recommendation in ADR-RFC-ARCH-004 sec 1.2 and sec 1.5 and over the Gate A guidance strings in tools/governance/type_checker.py and the intake _COMPRESSION_CONTRACT; authors follow the plain-words rule now"
+  REVISION::"2026-10-31: INTERIM precedence clause added for Stage-5 SR concern issuecomment-6537231939; AUTHORED_AT and RATIFIED_AT set to date precision, the earlier 01:42Z value was an estimate later than the measured filing time"
 ===END===
