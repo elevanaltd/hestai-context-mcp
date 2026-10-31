@@ -961,12 +961,18 @@ def _validate_impl(
 
     # --- Check 5: SUPERSEDED_BY target existence ---
     superseded_by = _extract_superseded_by(content)
-    if superseded_by is not None:
+    if superseded_by is not None and read_octave_fields(raw_content)[1] is None:
+        # (An unterminated list is already reported by ``_check_list_fields``.)
         targets = (
             list_items(_extract_meta_fields(content).get("SUPERSEDED_BY", superseded_by))
             if superseded_by.startswith("[")
             else [superseded_by]
         )
+        if not targets:
+            errors.append(
+                "SUPERSEDED_BY is an empty list; it must name the superseding TOKEN "
+                "(ADR-RFC-ARCH-004 §4.1 #9)."
+            )
         for target in targets:
             if not lookup_token_deterministic(working_dir, target):
                 errors.append(
