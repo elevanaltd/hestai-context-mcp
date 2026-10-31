@@ -5,7 +5,11 @@ for agent context injection. Parsing goes through the repo's single OCTAVE
 list grammar (``read_octave_fields`` / ``list_items`` in
 ``agent_readable_governance_parser``), so a workflow written by hand (inline
 ``KEY::[a,b]`` lists) and the same workflow rewritten by ``octave_write``
-(wrapped ``KEY::[`` lists) read identically. No octave-mcp import (PROD::I6).
+(wrapped ``KEY::[`` lists) read identically, for flat lists. Known limitation: a nested
+``KEY::`` line inside a wrapped list (octave_write's form of nested lists, e.g.
+SCOPE_MATRIX in the bundled workflow) is rejected by the shared grammar as
+``unterminated_list`` until the parser follow-up (ADR-004 v1.9, part of #196) lands, so such
+a document raises :class:`WorkflowParseError`. No octave-mcp import (PROD::I6).
 
 Harvested from legacy hestai-mcp core/governance/state/context_steward.py.
 
@@ -54,7 +58,7 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
 # Phase identifiers used in workflow documents
 PHASE_IDS = ["D0", "D1", "D2", "D3", "B0", "B1", "B2", "B3", "B4", "B5"]
 
-_PHASE_MARKER_KEY_RE = re.compile(r"^(?:D[0-3]|B[0-5])_[A-Z]+(?:_[A-Z]+)*$")
+_PHASE_MARKER_KEY_RE = re.compile(rf"^(?:{'|'.join(PHASE_IDS)})_[A-Z]+(?:_[A-Z]+)*$")
 _BARE_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _BLOCK_HEADER_LINE_RE = re.compile(r"^[A-Z][A-Z0-9_]*:\s*$")
 _ENVELOPE_END = "===END==="

@@ -85,7 +85,10 @@ def get_context(working_dir: str) -> dict[str, Any]:
                 project_context: str | None,
                 phase_constraints: dict | None,
                 git_state: {branch, ahead, behind, modified_files},
-                active_sessions: [str]
+                active_sessions: [str],
+                phase_constraints_error: {code, file, line, construct}  # optional: only
+                    # when the workflow document has a malformed list (phase_constraints
+                    # is then None); file is relative to working_dir
             }
         }
 
