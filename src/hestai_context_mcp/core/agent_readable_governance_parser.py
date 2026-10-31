@@ -71,7 +71,8 @@ closed (a new ``KEY::`` line, a block header or ``===`` line at the opener's ind
 shallower, the envelope end or the end of the text comes first), or that has text after
 its closing ``]``, makes the whole record unparseable: ``parse_decision_record`` returns
 the empty record and :func:`diagnose_octave_record` reports the 1-based line of the
-opening and the construct (``unterminated_list`` / ``text_after_list``). A record is never half-read.
+opening and the construct (``unterminated_list`` / ``text_after_list``). A record is never
+half-read.
 
 Quoted-YAML front matter (PR-4 slice A)
 ---------------------------------------
@@ -269,6 +270,7 @@ class OctaveField(NamedTuple):
     value: str
     line: int
     wrapped: bool
+    end_line: int = 0  # the 1-based closing-bracket line of a wrapped list (else == line)
 
 
 def _scan_brackets(text: str, depth: int, in_quote: bool) -> tuple[int, bool, int | None]:
@@ -392,19 +394,21 @@ def _is_list_break(raw: str, in_quote: bool, opener_indent: int) -> bool:
     return bool(_FIELD_LINE_RE.match(raw) or _BLOCK_HEADER_RE.match(raw))
 
 
-def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]:
-    """Read every META ``KEY::value`` pair of an OCTAVE record, wrapped lists included.
+def _scan_octave_fields(
+    text: str, within_blocks: bool
+) -> tuple[list[OctaveField], YamlReject | None]:
+    """The ONE OCTAVE field/list scan behind every public reader below.
 
-    Pure, regex-only, never raises. Lines inside CURRENT / RULINGS blocks are NOT META
-    and are skipped (key-collision rule, §1.7 / #14). Returns ``(fields, reject)``;
-    when ``reject`` is not ``None`` (``unterminated_list`` / ``text_after_list``) the
-    record must be treated as unparseable and ``fields`` holds only what preceded it.
+    ``within_blocks`` False skips (and breaks lists at) CURRENT / RULINGS block lines, as the
+    META reader does; True scans them too, so a list INSIDE a block is also recognised.
     """
     fields: list[OctaveField] = []
     pending: _OpenList | None = None
     for number, (block, raw) in enumerate(annotate_lines(text), start=1):
+        if block is not None and not within_blocks:
+            block = "skip"
         if pending is not None:
-            if block is not None or _is_list_break(raw, pending.in_quote, pending.indent):
+            if block == "skip" or _is_list_break(raw, pending.in_quote, pending.indent):
                 return fields, {"line": pending.line, "construct": "unterminated_list"}
             line = _strip_inline_comment(raw, pending.in_quote)
             body = line.strip()
@@ -421,10 +425,11 @@ def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]
             pending.parts.append(line[: close + 1].strip())
             joined = "\n".join(pending.parts)
             items = _split_list_items(joined[joined.index("[") + 1 : joined.rindex("]")])
-            fields.append(OctaveField(pending.key, "[" + ",".join(items) + "]", pending.line, True))
+            value = "[" + ",".join(items) + "]"
+            fields.append(OctaveField(pending.key, value, pending.line, True, number))
             pending = None
             continue
-        if block is not None:
+        if block == "skip":
             continue
         match = _FIELD_LINE_RE.match(raw)
         if not match:
@@ -435,10 +440,58 @@ def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]
             # value that opens ``[`` without closing it keeps the pre-#224 single-line read.
             pending = _OpenList(key, number, value, 1, False, _indent_of(raw))
             continue
-        fields.append(OctaveField(key, value, number, False))
+        fields.append(OctaveField(key, value, number, False, number))
     if pending is not None:
         return fields, {"line": pending.line, "construct": "unterminated_list"}
     return fields, None
+
+
+def wrapped_list_spans(text: str) -> list[tuple[int, int]]:
+    """``(opener_line, closing_line)`` of every well-formed wrapped list, blocks included.
+
+    1-based, from the same scan as :func:`read_octave_fields`: the lines strictly between
+    the two are list INTERIOR (never fields). Unterminated lists have no span.
+    """
+    return [(f.line, f.end_line) for f in _scan_octave_fields(text, True)[0] if f.wrapped]
+
+
+def collapse_wrapped_lists(text: str) -> str:
+    """``text`` with every META wrapped list rewritten as its one-line compact ``KEY::[A,B]``.
+
+    Gate A runs its per-field regexes over this view, so nested ``KEY::`` items inside a
+    list are not fields to it, exactly as for the reader. Lists inside CURRENT / RULINGS
+    blocks and unterminated lists are left as written. Pure, regex-only.
+    """
+    if is_yaml_front_matter(text):
+        return text
+    spans = {f.line: f for f in _scan_octave_fields(text, False)[0] if f.wrapped}
+    if not spans:
+        return text
+    lines = _text_lines(text, False)
+    out: list[str] = []
+    number = 1
+    while number <= len(lines):
+        entry = spans.get(number)
+        if entry is None:
+            out.append(lines[number - 1])
+            number += 1
+            continue
+        opener = lines[number - 1]
+        indent = opener[: len(opener) - len(opener.lstrip())]
+        out.append(f"{indent}{entry.key}::{entry.value}\n")
+        number = entry.end_line + 1
+    return "".join(out)
+
+
+def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]:
+    """Read every META ``KEY::value`` pair of an OCTAVE record, wrapped lists included.
+
+    Pure, regex-only, never raises. Lines inside CURRENT / RULINGS blocks are NOT META
+    and are skipped (key-collision rule, §1.7 / #14). Returns ``(fields, reject)``;
+    when ``reject`` is not ``None`` (``unterminated_list`` / ``text_after_list``) the
+    record must be treated as unparseable and ``fields`` holds only what preceded it.
+    """
+    return _scan_octave_fields(text, False)
 
 
 def diagnose_octave_record(text: str | None) -> YamlReject | None:

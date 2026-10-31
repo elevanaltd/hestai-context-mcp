@@ -29,13 +29,14 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     annotate_lines,
     canonicalize_yaml_record,
     classify_record_text,
+    collapse_wrapped_lists,
     has_yaml_decision_header,
-    iter_block_lines,
     list_items,
     parse_decision_record,
     parse_supersedes_list,
     read_octave_fields,
     read_record,
+    wrapped_list_spans,
 )
 from hestai_context_mcp.tools.governance.lexer import declares_token, lookup_token_deterministic
 
@@ -364,16 +365,6 @@ def _extract_meta_fields(content: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for key, value in _META_FIELD_LINE_RE.findall(content):
         fields.setdefault(key, value)
-    # Issue #224: a list wrapped over several lines matched above as its opener only
-    # (``[``); overlay the reader's full compact value so Gate A and the read parser
-    # see the same field. Every other value is exactly what the line regex gave.
-    seen: set[str] = set()
-    for entry in read_octave_fields(content)[0]:
-        if entry.key in seen:
-            continue
-        seen.add(entry.key)
-        if entry.wrapped and entry.key in fields:
-            fields[entry.key] = entry.value
     return fields
 
 
@@ -632,6 +623,17 @@ def _check_common_invariants(
 _META_HEADER_RE = re.compile(r"^META:\s*$")
 
 
+def _list_interior_lines(content: str) -> set[int]:
+    """1-based numbers of the lines INSIDE wrapped lists (opener excluded, closer included).
+
+    The same scan as the reader (``wrapped_list_spans``): these lines are list text, never
+    fields, so the reserved-key scans (#14/#15) must not count them.
+    """
+    return {
+        n for opener, closer in wrapped_list_spans(content) for n in range(opener + 1, closer + 1)
+    }
+
+
 def _check_core_key_placement(content: str, errors: list[str]) -> None:
     """Reject a top-level core key placed BEFORE the ``META:`` header.
 
@@ -642,10 +644,11 @@ def _check_core_key_placement(content: str, errors: list[str]) -> None:
     repeats can never win first-match. Lines inside CURRENT / RULINGS are
     handled by #14. A no-op when the record has no ``META:`` header.
     """
-    for block, line in annotate_lines(content):
+    interior = _list_interior_lines(content)
+    for number, (block, line) in enumerate(annotate_lines(content), start=1):
         if _META_HEADER_RE.match(line):
             return
-        if block is not None:
+        if block is not None or number in interior:
             continue
         m = _META_FIELD_LINE_RE.match(line)
         if m is not None and m.group(1) in TOPIC_BLOCK_RESERVED_KEYS:
@@ -689,7 +692,10 @@ def _check_topic_block_keys(content: str, errors: list[str]) -> None:
     offending line is reported with the key and the block named (collect-more-
     errors). Regex-only; no-op for records without these blocks.
     """
-    for block, line in iter_block_lines(content):
+    interior = _list_interior_lines(content)
+    for number, (block, line) in enumerate(annotate_lines(content), start=1):
+        if block is None or number in interior:
+            continue
         m = _META_FIELD_LINE_RE.match(line)
         if m is None or m.group(1) not in TOPIC_BLOCK_RESERVED_KEYS:
             continue
@@ -867,7 +873,8 @@ def _strip_block_lines(content: str) -> str:
     every invariant input from the same block-excluded text so the write side
     and the read side agree on what the record declares (#203 S1).
     """
-    return "".join(line for block, line in annotate_lines(content) if block is None)
+    collapsed = collapse_wrapped_lists(content)
+    return "".join(line for block, line in annotate_lines(collapsed) if block is None)
 
 
 def _check_issue_ref_shape(raw: str, errors: list[str]) -> None:
