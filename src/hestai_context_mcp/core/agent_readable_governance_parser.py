@@ -204,18 +204,31 @@ def _text_lines(text: str, yaml: bool) -> list[str]:
 
 
 class _ListState:
-    """Bracket depth and quote state of one open wrapped list, as ``annotate_lines`` sees it."""
+    """Bracket depth, quote state and break rule of ONE open wrapped list.
+
+    The single piece of list-boundary tracking: ``annotate_lines`` (block detection) and
+    ``_scan_octave_fields`` (the field reader) both consume it, so they cannot disagree on
+    where a list is open, inside a quote, or broken.
+    """
 
     def __init__(self, indent: int) -> None:
         self.indent, self.depth, self.in_quote = indent, 1, False
 
-    def update(self, line: str) -> bool:
-        """Feed one list line; True once the list has closed."""
-        text = _strip_inline_comment(line, self.in_quote)
-        if not text.strip():
-            return False
-        self.depth, self.in_quote, close = _scan_brackets(text, self.depth, self.in_quote)
-        return close is not None
+    def is_break(self, raw: str) -> bool:
+        """True if ``raw`` ends the list without closing it (see :func:`_is_list_break`)."""
+        return _is_list_break(raw, self.in_quote, self.indent)
+
+    def feed(self, raw: str) -> tuple[str, int | None]:
+        """Consume one list line: ``(line without comment, index of the closing bracket)``.
+
+        A blank (or comment-only) line changes nothing. The close index is ``None`` while
+        the list stays open.
+        """
+        line = _strip_inline_comment(raw, self.in_quote)
+        if not line.strip():
+            return line, None
+        self.depth, self.in_quote, close = _scan_brackets(line, self.depth, self.in_quote)
+        return line, close
 
 
 def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
@@ -248,11 +261,11 @@ def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
                 yield None, line
                 continue
         if not yaml and open_list is not None:
-            # Inside an open wrapped list a line is list text, not a block header, when it
-            # sits inside an open quote or is indented deeper than the opener (the same rule
-            # as ``_is_list_break``); the reader and the block scan must agree on that.
-            if open_list.in_quote or _indent_of(line) > open_list.indent:
-                if open_list.update(line):
+            # Inside an open wrapped list a line is list text, not a block header, unless
+            # the shared rule says it breaks the list (``_ListState.is_break``): blank lines,
+            # comments, items and anything inside an open quote never do.
+            if not open_list.is_break(line):
+                if open_list.feed(line)[1] is not None:
                     open_list = None
                 yield None, line
                 continue
@@ -392,20 +405,18 @@ def list_items(value: str) -> list[str]:
     return [_strip_quotes(text)] if text else []
 
 
-class _OpenList:
-    """Accumulator for a list that has not closed yet (private to the reader)."""
+class _OpenList(_ListState):
+    """A list the field scan has not seen close yet: the shared state plus its text."""
 
-    def __init__(
-        self, key: str, line: int, value: str, depth: int, in_quote: bool, indent: int
-    ) -> None:
-        self.key, self.line, self.indent = key, line, indent
+    def __init__(self, key: str, line: int, value: str, indent: int) -> None:
+        super().__init__(indent)
+        self.key, self.line = key, line
         self.parts = [value.strip()]
-        self.depth, self.in_quote = depth, in_quote
 
 
 def _indent_of(raw: str) -> int:
     """Leading-whitespace width of ``raw``: each tab counts as four spaces (not a tab stop)."""
-    lead = raw[: len(raw) - len(raw.lstrip())]
+    lead = raw[: len(raw) - len(raw.lstrip(" \t"))]
     return len(lead.replace("\t", "    "))
 
 
@@ -438,15 +449,12 @@ def _scan_octave_fields(
         if block is not None and not within_blocks:
             block = "skip"
         if pending is not None:
-            if block == "skip" or _is_list_break(raw, pending.in_quote, pending.indent):
+            if block == "skip" or pending.is_break(raw):
                 return fields, {"line": pending.line, "construct": "unterminated_list"}
-            line = _strip_inline_comment(raw, pending.in_quote)
+            line, close = pending.feed(raw)
             body = line.strip()
             if not body:
                 continue
-            pending.depth, pending.in_quote, close = _scan_brackets(
-                line, pending.depth, pending.in_quote
-            )
             if close is None:
                 pending.parts.append(body)
                 continue
@@ -468,7 +476,7 @@ def _scan_octave_fields(
         if value.strip() == "[":
             # Only ``KEY::[`` alone (what octave_write emits) opens list mode. Any other
             # value that opens ``[`` without closing it keeps the pre-#224 single-line read.
-            pending = _OpenList(key, number, value, 1, False, _indent_of(raw))
+            pending = _OpenList(key, number, value, _indent_of(raw))
             continue
         fields.append(OctaveField(key, value, number, False, number))
     if pending is not None:
