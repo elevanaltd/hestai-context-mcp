@@ -89,7 +89,7 @@ because: "<…>"
 - A TOKEN resolves to `<token>.oct.md` first, then `<token>.md`, then by embedded TOKEN. The deterministic TOKEN lookup (§1.6) sees `<token>.md` as well as `<token>.oct.md`: a YAML record declares its TOKEN by its fenced `token:` line, whether or not the whole record parses. Block lines and the markdown body never declare a TOKEN.
 - **Extension/syntax pairing is strict**: `<token>.oct.md` is read only as OCTAVE and `<token>.md` only as YAML. A file whose content does not match its extension is not a record: it is not resolved, listed, indexed or declared as a TOKEN.
 - **Write path (v1.5)**: `submit_governance` content mode accepts a quoted-YAML record, recognised by a first line of exactly `---`, and writes it to `.hestai/decisions/<token>.md`. Gate A's YAML branch judges it (§4.1); Gate B, the OCTAVE validator, is not applied to YAML. Prose mode still emits OCTAVE only.
-- **The write canonicalises**: the front matter is parsed, gated by a round trip (every decoded value of the re-emitted bytes must equal the submitted one, otherwise `round_trip_mismatch`), and re-emitted canonically (fixed key order, LF line endings, canonical scalars and block indentation). The markdown body after the closing fence is kept VERBATIM. The file bytes written are exactly the canonical bytes, and canonical emission is idempotent: re-emitting a written record yields the same bytes. A hash over the whole file bytes (the §3.5 `expected_record_hash`) therefore covers the body as well as the front matter. A record hand-authored before v1.5 is hashed as its bytes; it becomes canonical only when a canonicalising write rewrites it, which v1.5 does not do (content mode writes new records only; rewriting an existing record arrives with `append_ruling`, slice S2). After the write the linker re-reads the file and fails the write if the reader would reject it.
+- **The write canonicalises**: the front matter is parsed, gated by a round trip (every decoded value of the re-emitted bytes must equal the submitted one, otherwise `round_trip_mismatch`), and re-emitted canonically (fixed key order, LF line endings, canonical scalars and block indentation). The markdown body after the closing fence is kept VERBATIM. The file bytes written are exactly the canonical bytes, and canonical emission is idempotent: re-emitting a written record yields the same bytes. A hash over the whole file bytes (the §3.5 `expected_record_hash`) therefore covers the body as well as the front matter. A record hand-authored before v1.5 is hashed as its bytes; it becomes canonical only when a canonicalising write rewrites it, which content mode does not do (it writes new records only); `append_ruling` (v1.7, §3.5) now rewrites an existing YAML topic record through the same canonicalising write. After the write the linker re-reads the file and fails the write if the reader would reject it.
 
 **Revision**: 2026-10-29: §1.1 widened from OCTAVE-only to dual syntax and the quoted-YAML form, escape set, strict rejection and candidate detection and extension/syntax pairing recorded (HO-TOPIC-RECORDS-YAML-SYNTAX-20261029; EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025). 2026-10-31: the quoted-YAML write path (content mode), its canonical-write contract and the Gate B exemption recorded (EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025; HO-TOPIC-RECORDS-YAML-SYNTAX-20261029). 2026-10-31: multi-line OCTAVE list fields and the deploy note recorded (HC ruling on hestai-context-mcp#224 under HO-HC-WEEKEND-DELEGATION-20261031).
 
@@ -100,7 +100,7 @@ because: "<…>"
 | Field | Type | Notes |
 |---|---|---|
 | `TYPE` | literal | MUST be `DECISION_RECORD` |
-| `VERSION` | semver-2-segment | `MAJOR.MINOR` per §1.5. Current: `1.6` (records authored before the v1.1/v1.2/v1.3/v1.4/v1.5/v1.6 amendments remain valid at `1.0`; v1.1, v1.2, v1.3, v1.4, v1.5 and v1.6 are all MINOR-additive — see §1.5). |
+| `VERSION` | semver-2-segment | `MAJOR.MINOR` per §1.5. Current: `1.7` (records authored before the v1.1/v1.2/v1.3/v1.4/v1.5/v1.6/v1.7 amendments remain valid at `1.0`; v1.1, v1.2, v1.3, v1.4, v1.5, v1.6 and v1.7 are all MINOR-additive — see §1.5). |
 | `TOKEN` | string | Globally unique identifier within the repository (see §1.3) |
 | `STATUS` | enum | One of `PROPOSED`, `RATIFIED`, `SUPERSEDED`, `VOID` (see §1.4) |
 | `TIER` | enum | One of `STRATEGIC`, `TACTICAL`, `OPERATIONAL`. Semantic gravity per the cited research brief. |
@@ -180,7 +180,7 @@ Rules:
 - **MINOR bump** — additive. New optional fields, new admissible enum values for non-required fields, new reserved names. Parsers written against `MAJOR=N.MINOR=K` MUST tolerate `MAJOR=N.MINOR>K` by ignoring unknown optional fields.
 - No patch level. Spec corrections land at the next MINOR.
 
-Current schema is `1.6`. Future additive extensions become `1.7`, `1.8`, etc.
+Current schema is `1.7`. Future additive extensions become `1.8`, `1.9`, etc.
 
 **v1.1 (MINOR-additive, per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620 / #101)**: AGRs are treated as LLM "bytecode". The reasoning-bearing fields `DECISION` and `BECAUSE` are constrained to a single flat line of ≤40 words with no embedded newline, using compressed-OCTAVE operators for connectives (new value-level invariant §4.1 #13; no structural parser change). `HUMAN_ADR_REF` gains a greppable-TOKEN canonical form alongside the legacy path form. Both are MINOR-additive: a `1.0` record that already satisfies the ≤40-word/no-newline density (as every conforming one-sentence `DECISION`/`BECAUSE` does) remains valid, and v1.1 introduces no new required field. Parsers written against `1.0` continue to parse `1.1` records (the structural grammar is unchanged).
 
@@ -256,7 +256,7 @@ rulings:
 - The lowercase spellings of the key-collision rule are forbidden inside blocks: `version`, `token`, `id`, `type`, `status`, `tier`, `decision`, `because`, `authored_at` and `superseded_by` reject the record (`reserved_key_in_block`).
 - A `current:` or `rulings:` line in the markdown body after the closing fence is never a block.
 - `lookup_decision` `current_state` and the `list_decisions` `topic` filter (§3.2, §3.3) behave identically for both syntaxes.
-- Writing YAML blocks (v1.5): `submit_governance` content mode accepts a YAML topic record carrying these blocks and writes them in the canonical indentation above (§1.1). `append_ruling` builds on that write path and remains planned (slice S2 of #203).
+- Writing YAML blocks (v1.5): `submit_governance` content mode accepts a YAML topic record carrying these blocks and writes them in the canonical indentation above (§1.1). `append_ruling` builds on that write path and is delivered in v1.7 (§3.5).
 
 **Revision**: 2026-10-29: YAML form of the `CURRENT` / `RULINGS` blocks added; the OCTAVE form is unchanged. 2026-10-31: YAML block writing ships in v1.5 (EPIC4-RECORDS-YAML-BATCH-MERGE-AUTHORITY-20261025; HO-TOPIC-RECORDS-YAML-SYNTAX-20261029).
 
