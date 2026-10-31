@@ -19,6 +19,8 @@ from hestai_context_mcp.tools.governance.type_checker import (
     validate_octave_content,
 )
 
+from ._agr_fixtures import TOKEN_OLD
+
 pytestmark = pytest.mark.unit
 
 _HEAD = "===DECISION_RECORD===\nMETA:\n"
@@ -27,7 +29,7 @@ _HEAD = "===DECISION_RECORD===\nMETA:\n"
 _REAL = (
     "  TYPE::DECISION_RECORD\n"
     '  VERSION::"1.0"\n'
-    "  TOKEN::HO-CUBIC-A-20260101\n"
+    f"  TOKEN::{TOKEN_OLD}\n"
     "  STATUS::RATIFIED\n"
     "  TIER::STRATEGIC\n"
     '  AUTHORED_AT::"2026-01-01T00:00:00Z"\n'
@@ -68,7 +70,7 @@ def test_reader_and_gate_a_see_neither_a_nested_item(tmp_path: Path, shadow: str
     real = {
         "STATUS": "RATIFIED",
         "TIER": "STRATEGIC",
-        "TOKEN": "HO-CUBIC-A-20260101",
+        "TOKEN": TOKEN_OLD,
         "TYPE": "DECISION_RECORD",
         "DECISION": '"A binding decision sentence."',
     }
@@ -78,14 +80,14 @@ def test_reader_and_gate_a_see_neither_a_nested_item(tmp_path: Path, shadow: str
         assert key not in meta, (key, meta.get(key))
     assert key not in parsed["fields"]
     assert parsed["status"] == "RATIFIED" and parsed["tier"] == "STRATEGIC"
-    assert parsed["token"] == "HO-CUBIC-A-20260101"
+    assert parsed["token"] == TOKEN_OLD
 
 
 @pytest.mark.parametrize("shadow", _SHADOWS)
 def test_a_nested_item_cannot_shadow_meta_in_gate_a(tmp_path: Path, shadow: str) -> None:
     result = validate_octave_content(tmp_path, _record(_nested(shadow)))
     assert result.valid, (shadow, result.errors)
-    assert result.token == "HO-CUBIC-A-20260101"
+    assert result.token == TOKEN_OLD
 
 
 def test_a_nested_status_item_in_a_wrapped_affects_list_leaves_gate_a_on_ratified(
@@ -112,7 +114,7 @@ def test_the_core_key_before_meta_scan_ignores_nested_list_text(tmp_path: Path) 
         "META:\n"
         "  TYPE::DECISION_RECORD\n"
         '  VERSION::"1.0"\n'
-        "  TOKEN::HO-CUBIC-A-20260101\n" + _REAL + "===END===\n"
+        f"  TOKEN::{TOKEN_OLD}\n" + _REAL + "===END===\n"
     )
     result = validate_octave_content(tmp_path, text)
     assert result.valid, result.errors
@@ -125,7 +127,7 @@ def test_a_real_core_key_before_meta_is_still_rejected(tmp_path: Path) -> None:
         "META:\n"
         "  TYPE::DECISION_RECORD\n"
         '  VERSION::"1.0"\n'
-        "  TOKEN::HO-CUBIC-A-20260101\n" + _REAL + "===END===\n"
+        f"  TOKEN::{TOKEN_OLD}\n" + _REAL + "===END===\n"
     )
     result = validate_octave_content(tmp_path, text)
     assert any("before the META block" in e for e in result.errors), result.errors
@@ -165,3 +167,12 @@ def test_an_unterminated_list_reports_its_parse_error_before_any_field_extractio
     assert result.valid is False
     # The documented parse error is FIRST; any follow-on error from the leaked item comes after.
     assert "unterminated_list" in result.errors[0], result.errors
+
+
+def test_gate_a_agrees_when_a_blank_line_precedes_a_quoted_item_holding_a_block_header(
+    tmp_path: Path,
+) -> None:
+    """CRS B1: the reader and Gate A both read the closed list; no false block errors."""
+    notes = '  NOTES::[\n    A,\n\n    "first line\nCURRENT:\n  R1::second",\n    B\n  ]\n'
+    result = validate_octave_content(tmp_path, _record(notes))
+    assert result.valid, result.errors

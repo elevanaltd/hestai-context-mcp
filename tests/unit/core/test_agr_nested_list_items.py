@@ -18,13 +18,14 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     list_items,
     parse_decision_record,
 )
+from tests.unit.tools.governance._agr_fixtures import TOKEN_OLD
 
 _HEAD = (
     "===DECISION_RECORD===\n"
     "META:\n"
     "  TYPE::DECISION_RECORD\n"
     '  VERSION::"1.0"\n'
-    "  TOKEN::HO-CUBIC-A-20260101\n"
+    f"  TOKEN::{TOKEN_OLD}\n"
     "  STATUS::RATIFIED\n"
     "  TIER::STRATEGIC\n"
     '  AUTHORED_AT::"2026-01-01T00:00:00Z"\n'
@@ -194,3 +195,37 @@ def test_tabs_count_as_four_literal_spaces_not_as_tab_stops() -> None:
     """``" \t"`` is 1 + 4 = 5 columns: deeper than a four-space opener (a tab stop would say 4)."""
     fields = _fields("    AFFECTS::[\n \tA::x,\n \tB\n    ]\n")
     assert fields["AFFECTS"] == "[A::x,B]"
+
+
+# --- CRS B1 (#239): annotate_lines and the field scan share list-boundary tracking -------------
+
+_QUOTED_WITH_HEADER = '    "first line\nCURRENT:\n  R1::second",\n'
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "\n",  # a blank line
+        "   \n",  # a whitespace-only line
+        "// a note at column zero\n",  # a whole-line comment shallower than the opener
+        "    // a note\n",  # a whole-line comment deeper than the opener
+        "\r\n",  # a CR-LF blank line
+    ],
+    ids=["blank", "spaces", "comment-col0", "comment-deep", "crlf-blank"],
+)
+def test_a_gap_line_does_not_reset_the_open_list_state(gap: str) -> None:
+    middle = f"  NOTES::[\n    A,\n{gap}{_QUOTED_WITH_HEADER}    B\n  ]\n  SCOPE::PROD\n"
+    text = _record(middle)
+    parsed = parse_decision_record(text)
+    assert parsed["token"] == TOKEN_OLD
+    assert diagnose_octave_record(text) is None
+    assert parsed["fields"]["NOTES"].startswith('[A,"first line CURRENT: R1::second"')
+    assert parsed["fields"]["SCOPE"] == "PROD"
+    assert collect_topic_blocks(text) == {"current": [], "rulings": []}
+
+
+def test_a_blank_line_before_the_quoted_header_variant_of_k1() -> None:
+    middle = f"  NOTES::[\n\n{_QUOTED_WITH_HEADER}    B\n  ]\n"
+    text = _record(middle)
+    assert diagnose_octave_record(text) is None
+    assert collect_topic_blocks(text) == {"current": [], "rulings": []}
