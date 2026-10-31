@@ -371,3 +371,38 @@ class TestSharedConstantParity:
 
         assert agr_read.MAX_REASONING_WORDS is type_checker.MAX_REASONING_WORDS
         assert agr_read.REASONING_FIELDS is type_checker.REASONING_FIELDS
+
+
+# --- HO-AGR-PLAIN-WORDS-REASONING-20261031 FOLLOW_UP: guidance names plain words --------------
+
+
+@pytest.mark.unit
+class TestGuidanceStringsRecommendPlainWords:
+    """Message text only: same checks, same validity, but no operator recommendation."""
+
+    _GLYPHS = "→⇌∴⊕∧∨"
+
+    def _errors(self, tmp_path: Path, **kwargs: str) -> list[str]:
+        result = validate_octave_content(tmp_path, _record(**kwargs))
+        assert result.valid is False
+        return result.errors
+
+    def test_newline_remedy_names_plain_words(self, tmp_path: Path) -> None:
+        errors = self._errors(tmp_path, decision="First clause\r  second clause")
+        text = " | ".join(errors)
+        assert "plain words" in text
+        assert not any(g in text for g in self._GLYPHS), text
+
+    def test_word_count_remedy_names_plain_words(self, tmp_path: Path) -> None:
+        errors = self._errors(tmp_path, decision=_words(MAX_REASONING_WORDS + 1))
+        text = " | ".join(errors)
+        assert "plain words" in text
+        assert not any(g in text for g in self._GLYPHS), text
+
+    def test_flat_string_form_error_names_plain_words(self, tmp_path: Path) -> None:
+        content = _record().replace(
+            'DECISION::"Adopt the bytecode form for reasoning fields."', "DECISION::unquoted"
+        )
+        text = " | ".join(validate_octave_content(tmp_path, content).errors)
+        assert "plain words" in text
+        assert not any(g in text for g in self._GLYPHS), text
