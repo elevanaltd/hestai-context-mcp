@@ -25,8 +25,8 @@ A *phase marker* is a field that meets BOTH conditions:
 
 A phase's fields are every field after its marker up to the first *end stop*: the
 next phase marker, a column-0 block header (``^[A-Z][A-Z0-9_]*:\\s*$``, e.g.
-``ERROR_HANDLING_TAXONOMY:``), or the ``===END===`` envelope. The first marker for
-a phase wins. Membership is decided by marker and line order, never by indentation
+``ERROR_HANDLING_TAXONOMY:``), or the ``===END===`` envelope. Nothing after the closing ``===END===`` is ever read (no
+markers, no fields). The first marker for a phase wins. Membership is decided by marker and line order, never by indentation
 (only D0 is indented, under ``WORKFLOW_PHASES:``).
 
 Known exclusions (fields that LOOK like markers but are not; each has a negative
@@ -176,10 +176,15 @@ class ContextSteward:
         if reject is not None:
             raise WorkflowParseError(self.workflow_path, reject["line"], reject["construct"])
 
-        stop_lines = [
-            number
-            for number, line in enumerate(content.splitlines(), start=1)
-            if _BLOCK_HEADER_LINE_RE.match(line) or line.strip() == _ENVELOPE_END
+        lines = content.splitlines()
+        # Nothing after the closing envelope is ever read: cut the fields up front.
+        envelope_end = next(
+            (n for n, line in enumerate(lines, start=1) if line.strip() == _ENVELOPE_END),
+            len(lines) + 1,
+        )
+        fields = [f for f in fields if f.line < envelope_end]
+        block_header_lines = [
+            n for n, line in enumerate(lines, start=1) if _BLOCK_HEADER_LINE_RE.match(line)
         ]
         phase_data: dict[str, str] = {}
         start: int | None = None
@@ -190,7 +195,7 @@ class ContextSteward:
                     start = field.line
                     phase_data[field.key] = field.value
                 continue
-            if marker is not None or any(start < s <= field.line for s in stop_lines):
+            if marker is not None or any(start < s <= field.line for s in block_header_lines):
                 break
             phase_data[field.key] = field.value
 
