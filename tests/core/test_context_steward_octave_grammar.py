@@ -341,6 +341,39 @@ def test_phase_started_before_envelope_end_ignores_fields_after_it(tmp_path, for
     assert got.entry_criteria == []
 
 
+@pytest.mark.parametrize(
+    "construct_text", ["DELIVERABLES::[\n  a,\n  b\nRACI::x\n", "ENTRY::[\n  a\n] trailing\n"]
+)
+def test_malformed_content_after_envelope_end_is_never_read_for_validity(tmp_path, construct_text):
+    """An unterminated list / text_after_list AFTER ===END=== must not raise."""
+    text = doc(B1, "PURPOSE::before-end", "ENTRY::[e1,e2]") + construct_text
+    got = synth(tmp_path, text, "B1")
+    assert got.purpose == "before-end"
+    assert got.entry_criteria == ["e1", "e2"]
+
+
+def test_envelope_end_with_trailing_whitespace_or_cr_still_closes_the_document(tmp_path):
+    text = doc(B1, "PURPOSE::before-end").replace("===END===\n", "===END===  \r\n")
+    text += "DELIVERABLES::[\n  unterminated\n"
+    assert synth(tmp_path, text, "B1").purpose == "before-end"
+
+
+def test_indented_envelope_text_inside_a_wrapped_quoted_item_does_not_end_the_document(tmp_path):
+    body = [
+        B1,
+        "DELIVERABLES::[",
+        '  "first line',
+        "  ===END===",
+        '  last line",',
+        "  plain",
+        "]",
+        "RACI::after-the-list",
+    ]
+    got = synth(tmp_path, doc(*body), "B1")
+    assert got.raci == "after-the-list"
+    assert got.deliverables == ["first line ===END=== last line", "plain"]
+
+
 # ---------------------------------------------------------------------------------------
 # (d) a comma inside a quoted item stays one item
 # ---------------------------------------------------------------------------------------
