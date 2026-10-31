@@ -1870,7 +1870,17 @@ def run_append_linker(
         if err:
             result["error"] = err
             return result
-        result["head_sha"], _ = _resolve_oid(worktree_path, "HEAD")
+        head_sha, head_err = _resolve_oid(worktree_path, "HEAD")
+        if head_err or head_sha is None:
+            # Exit-0 contract: the commit just made cannot be identified, so nothing
+            # is pushed or opened (CE 6538361209).
+            detail = (head_err or "").removeprefix(_IN_FLIGHT_UNDETERMINED_PREFIX)
+            result["error"] = (
+                f"LINKER_FAILED: git rev-parse HEAD after the append commit failed; "
+                f"nothing was pushed. {detail}".rstrip()
+            )
+            return result
+        result["head_sha"] = head_sha
 
         err = _push_branch(worktree_path, branch_name)
         if err:
