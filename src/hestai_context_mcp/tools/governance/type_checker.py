@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
+    EDGE_FIELDS,
     RecordText,
     YamlReject,
     YamlSyntaxError,
@@ -29,8 +30,10 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     canonicalize_yaml_record,
     classify_record_text,
     iter_block_lines,
+    list_items,
     parse_decision_record,
     parse_supersedes_list,
+    read_octave_fields,
 )
 from hestai_context_mcp.tools.governance.lexer import lookup_token_deterministic
 
@@ -341,6 +344,16 @@ def _extract_meta_fields(content: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for key, value in _META_FIELD_LINE_RE.findall(content):
         fields.setdefault(key, value)
+    # Issue #224: a list wrapped over several lines matched above as its opener only
+    # (``[``); overlay the reader's full compact value so Gate A and the read parser
+    # see the same field. Every other value is exactly what the line regex gave.
+    seen: set[str] = set()
+    for entry in read_octave_fields(content)[0]:
+        if entry.key in seen:
+            continue
+        seen.add(entry.key)
+        if entry.wrapped and entry.key in fields:
+            fields[entry.key] = entry.value
     return fields
 
 
@@ -623,6 +636,31 @@ def _check_core_key_placement(content: str, errors: list[str]) -> None:
             )
 
 
+def _check_list_fields(raw_content: str, errors: list[str], warnings: list[str]) -> None:
+    """Issue #224: a list that never closes is an ERROR; a multi-line EDGE list is a WARNING.
+
+    The reader reads a wrapped list in full (one grammar for every list field), so a
+    record ``octave_write`` wrapped stays valid and amendable. An unterminated list
+    would make the record unreadable (``RECORD_PARSE_FAILED``), so it is rejected here
+    with the line where the list opens. Reads the raw text so the line numbers match
+    the file; regex-only.
+    """
+    fields, reject = read_octave_fields(raw_content)
+    if reject is not None:
+        errors.append(
+            f"List field is malformed at line {reject['line']}: {reject['construct']}. "
+            "A multi-line list must close with ] before the next field, with nothing "
+            "after the ] (ADR-RFC-ARCH-004 §1.1)."
+        )
+    for entry in fields:
+        if entry.wrapped and entry.key in EDGE_FIELDS:
+            warnings.append(
+                f"{entry.key} is a multi-line list (line {entry.line}). The reader reads it in "
+                "full, but a lineage edge is easier to audit on one line "
+                "(ADR-RFC-ARCH-004 §1.1)."
+            )
+
+
 def _check_topic_block_keys(content: str, errors: list[str]) -> None:
     """Reject a top-level reserved key nested inside a CURRENT / RULINGS block.
 
@@ -888,6 +926,7 @@ def _validate_impl(
         # #14/#15 need the block lines, so they read the raw (unstripped) text.
         _check_topic_block_keys(raw_content, errors)
         _check_core_key_placement(raw_content, errors)
+        _check_list_fields(raw_content, errors, warnings)
 
     elif card_type in _FACET_CARD_TYPES:
         token = _extract_id(content)
@@ -922,11 +961,18 @@ def _validate_impl(
 
     # --- Check 5: SUPERSEDED_BY target existence ---
     superseded_by = _extract_superseded_by(content)
-    if superseded_by is not None and not lookup_token_deterministic(working_dir, superseded_by):
-        errors.append(
-            f"SUPERSEDED_BY target '{superseded_by}' not found in governance store. "
-            "The referenced TOKEN must exist before it can be superseded."
+    if superseded_by is not None:
+        targets = (
+            list_items(_extract_meta_fields(content).get("SUPERSEDED_BY", superseded_by))
+            if superseded_by.startswith("[")
+            else [superseded_by]
         )
+        for target in targets:
+            if not lookup_token_deterministic(working_dir, target):
+                errors.append(
+                    f"SUPERSEDED_BY target '{target}' not found in governance store. "
+                    "The referenced TOKEN must exist before it can be superseded."
+                )
         # Continue to collect more errors
 
     # --- Check 5a: ISSUE_REF shape (ADR-RFC-ARCH-004 §4.1 invariant #10) ---

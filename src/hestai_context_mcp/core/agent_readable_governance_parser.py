@@ -34,6 +34,37 @@ The canonical DECISION_RECORD envelope (§1.1)::
 Quote-optionality (§1.1): values may be bare or double-quoted; the parser strips
 a single surrounding pair of double quotes from extracted values.
 
+Multi-line list fields (issue #224)
+-----------------------------------
+``octave_write`` wraps long lists over several lines::
+
+      RELATED_DECISIONS::[
+        TOKEN-A,
+        "item, with a comma",
+        TOKEN-B,
+      ]
+
+ONE grammar serves every list field, edge fields (``SUPERSEDES``, ``SUPERSEDED_BY``,
+``AMENDS``, ``EXTENDS``) included. A value that opens a list (starts with ``[`` and has
+no closing ``]`` on its line) runs until the bracket that closes it, counting brackets
+outside double-quoted strings. Blank lines and ``//`` comment lines inside the list are
+ignored. Regex and indent only, no AST.
+
+Representation in ``fields`` (PROD I4): a wrapped list is stored as the COMPACT
+single-line form ``[A,B]``: every item trimmed (its own quotes kept, so an item with a
+comma inside quotes stays one item), empty items and a trailing comma dropped, items
+joined by ``,`` with no spaces. A list written on one line is returned exactly as
+written (byte parity with the pre-#224 reader), so a wrapped list and the same list
+written compactly on one line give the identical string; a single-line list written
+``[A, B]`` keeps its space, as it always did. Consumers that need the items call
+:func:`list_items`.
+
+A list that is never closed (a new ``KEY::`` line, a block header, the envelope end or
+the end of the text comes first), or that has text after its closing ``]``, makes the
+whole record unparseable: ``parse_decision_record`` returns the empty record and
+:func:`diagnose_octave_record` reports the 1-based line of the opening and the construct
+(``unterminated_list`` / ``text_after_list``). A record is never half-read.
+
 Quoted-YAML front matter (PR-4 slice A)
 ---------------------------------------
 A record whose FIRST line is ``---`` is read as a quoted-YAML front-matter
@@ -106,9 +137,9 @@ _CORE_FIELDS = (
 
 # A single ``KEY::value`` OCTAVE assignment at line start (whitespace-tolerant —
 # OCTAVE bodies are indented). KEY is an uppercase OCTAVE identifier; the value
-# is the rest of the line. List-valued fields (e.g. AMENDS::[A, B]) are captured
-# raw and left to the caller; the read tools only need scalar core fields plus
-# SUPERSEDED_BY (scalar). This is regex-only — no structural OCTAVE parsing.
+# is the rest of the line. A list written on one line (e.g. AMENDS::[A, B]) is captured
+# raw; a list wrapped over several lines is joined by ``read_octave_fields`` into the
+# compact ``[A,B]`` form (issue #224). Regex-only — no structural OCTAVE parsing.
 _FIELD_LINE_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]*)::(.*?)\s*$")
 
 
@@ -212,6 +243,170 @@ def iter_block_lines(text: str) -> Iterator[tuple[str, str]]:
     for block, line in annotate_lines(text):
         if block is not None:
             yield block, line
+
+
+# Edge fields: the supersession / lineage lists. Gate A WARNS when one spans several lines.
+EDGE_FIELDS = ("SUPERSEDES", "SUPERSEDED_BY", "AMENDS", "EXTENDS")
+
+
+class OctaveField(NamedTuple):
+    """One META ``KEY::value`` assignment as the OCTAVE reader sees it.
+
+    ``value`` is raw (quotes NOT stripped); for a wrapped list it is the compact
+    ``[A,B]`` form. ``line`` is the 1-based line of the key; ``wrapped`` is True when the
+    list was written over several lines.
+    """
+
+    key: str
+    value: str
+    line: int
+    wrapped: bool
+
+
+def _scan_brackets(text: str, depth: int, in_quote: bool) -> tuple[int, bool, int | None]:
+    """Walk ``text`` counting ``[``/``]`` outside double quotes.
+
+    Returns ``(depth, in_quote, close_index)``; ``close_index`` is the index of the ``]``
+    that brings ``depth`` back to zero, else ``None``.
+    """
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if in_quote:
+            if char == "\\":
+                i += 1
+            elif char == '"':
+                in_quote = False
+        elif char == '"':
+            in_quote = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return 0, False, i
+        i += 1
+    return depth, in_quote, None
+
+
+def _split_list_items(inner: str) -> list[str]:
+    """Split the text between a list's outer brackets on commas outside quotes/brackets.
+
+    Items are trimmed (quotes kept, inner whitespace runs across lines collapsed to one
+    space); empty items are dropped.
+    """
+    items: list[str] = []
+    start, depth, in_quote, i = 0, 0, False, 0
+    while i <= len(inner):
+        char = inner[i] if i < len(inner) else ","
+        if in_quote:
+            if char == "\\":
+                i += 1
+            elif char == '"':
+                in_quote = False
+        elif char == '"':
+            in_quote = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+        elif char == "," and depth <= 0:
+            item = re.sub(r"\s*\n\s*", " ", inner[start:i].strip())
+            if item:
+                items.append(item)
+            start = i + 1
+        i += 1
+    return items
+
+
+def list_items(value: str) -> list[str]:
+    """The items of a list-valued field, each with one pair of surrounding quotes stripped.
+
+    ``[A,B]`` / ``[A, B]`` -> ``["A", "B"]``. A value that is not bracketed is a list of
+    one (itself, quotes stripped). Works identically on a wrapped and a one-line list.
+    """
+    text = value.strip()
+    if text.startswith("[") and text.endswith("]"):
+        return [_strip_quotes(item) for item in _split_list_items(text[1:-1])]
+    return [_strip_quotes(text)] if text else []
+
+
+class _OpenList:
+    """Accumulator for a list that has not closed yet (private to the reader)."""
+
+    def __init__(self, key: str, line: int, value: str, depth: int, in_quote: bool) -> None:
+        self.key, self.line = key, line
+        self.parts = [value.strip()]
+        self.depth, self.in_quote = depth, in_quote
+
+
+def _is_list_break(raw: str, in_quote: bool) -> bool:
+    """True if ``raw`` (a line met while a list is open) can only start something new."""
+    if raw.lstrip().startswith("==="):
+        return True
+    if in_quote:
+        return False
+    return bool(_FIELD_LINE_RE.match(raw) or _BLOCK_HEADER_RE.match(raw))
+
+
+def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]:
+    """Read every META ``KEY::value`` pair of an OCTAVE record, wrapped lists included.
+
+    Pure, regex-only, never raises. Lines inside CURRENT / RULINGS blocks are NOT META
+    and are skipped (key-collision rule, §1.7 / #14). Returns ``(fields, reject)``;
+    when ``reject`` is not ``None`` (``unterminated_list`` / ``text_after_list``) the
+    record must be treated as unparseable and ``fields`` holds only what preceded it.
+    """
+    fields: list[OctaveField] = []
+    pending: _OpenList | None = None
+    for number, (block, raw) in enumerate(annotate_lines(text), start=1):
+        if pending is not None:
+            if block is not None or _is_list_break(raw, pending.in_quote):
+                return fields, {"line": pending.line, "construct": "unterminated_list"}
+            body = raw.strip()
+            if not body or (body.startswith("//") and not pending.in_quote):
+                continue
+            pending.depth, pending.in_quote, close = _scan_brackets(
+                raw, pending.depth, pending.in_quote
+            )
+            if close is None:
+                pending.parts.append(body)
+                continue
+            tail = raw[close + 1 :].strip()
+            if tail and not tail.startswith("//"):
+                return fields, {"line": pending.line, "construct": "text_after_list"}
+            pending.parts.append(raw[: close + 1].strip())
+            joined = "\n".join(pending.parts)
+            items = _split_list_items(joined[joined.index("[") + 1 : joined.rindex("]")])
+            fields.append(OctaveField(pending.key, "[" + ",".join(items) + "]", pending.line, True))
+            pending = None
+            continue
+        if block is not None:
+            continue
+        match = _FIELD_LINE_RE.match(raw)
+        if not match:
+            continue
+        key, value = match.group(1), match.group(2)
+        if value.startswith("["):
+            depth, in_quote, close = _scan_brackets(value, 0, False)
+            if close is None and depth > 0 and not in_quote:
+                pending = _OpenList(key, number, value, depth, in_quote)
+                continue
+        fields.append(OctaveField(key, value, number, False))
+    if pending is not None:
+        return fields, {"line": pending.line, "construct": "unterminated_list"}
+    return fields, None
+
+
+def diagnose_octave_record(text: str | None) -> YamlReject | None:
+    """Return ``{line, construct}`` for an OCTAVE record with a malformed list, else ``None``.
+
+    ``None`` for YAML text and for an OCTAVE record whose lists are well formed.
+    ``line`` is the 1-based line where the offending list opens.
+    """
+    if not text or is_yaml_front_matter(text):
+        return None
+    return read_octave_fields(text)[1]
 
 
 def _match_current(line: str, yaml: bool) -> tuple[str, str] | None:
@@ -807,16 +1002,15 @@ def _parse_impl(text: str) -> DecisionRecord:
     core: dict[str, str] = {}
     extra: dict[str, str] = {}
 
-    # Lines inside CURRENT/RULINGS blocks are NOT META: keep them out of
-    # ``fields`` so a nested key (e.g. TOPIC, SCOPE) cannot shadow a META field.
-    for block, raw_line in annotate_lines(text):
-        if block is not None:
-            continue
-        match = _FIELD_LINE_RE.match(raw_line)
-        if not match:
-            continue
-        key = match.group(1)
-        value = _strip_quotes(match.group(2))
+    # Lines inside CURRENT/RULINGS blocks are NOT META: ``read_octave_fields`` keeps
+    # them out so a nested key (e.g. TOPIC, SCOPE) cannot shadow a META field. A list
+    # that never closes makes the record unparseable (never half-read, issue #224).
+    octave_fields, reject = read_octave_fields(text)
+    if reject is not None:
+        return _empty_record()
+    for field in octave_fields:
+        key = field.key
+        value = _strip_quotes(field.value)
 
         if key in _CORE_FIELDS:
             # First occurrence wins (META block precedes any prose echoes).

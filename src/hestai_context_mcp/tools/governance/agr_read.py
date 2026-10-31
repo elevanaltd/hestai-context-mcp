@@ -23,10 +23,12 @@ from typing import Any
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     DecisionRecord,
+    diagnose_octave_record,
     diagnose_yaml_record,
     extract_yaml_token,
     has_yaml_decision_header,
     is_yaml_front_matter,
+    list_items,
     parse_decision_record,
     parse_supersedes_list,
     read_record,
@@ -81,13 +83,14 @@ PARSE_ERROR_WORDING = "missing OCTAVE envelope or YAML front matter, or required
 
 
 def parse_failure_detail(content: str) -> dict[str, Any] | None:
-    """Return ``{"line": int, "construct": str}`` for a rejected YAML record, else ``None``.
+    """Return ``{"line": int, "construct": str}`` for a rejected record, else ``None``.
 
-    The B1 loud-reject detail: a YAML record the strict subset refuses is reported
+    The B1 loud-reject detail: a YAML record the strict subset refuses, or an OCTAVE
+    record with a list that never closes (``unterminated_list``, issue #224), is reported
     with its 1-based line and the offending construct, never silently skipped.
-    ``None`` for OCTAVE records and for YAML records that are merely incomplete.
+    ``None`` for records that are merely incomplete.
     """
-    reject = diagnose_yaml_record(content)
+    reject = diagnose_yaml_record(content) or diagnose_octave_record(content)
     return None if reject is None else {"line": reject["line"], "construct": reject["construct"]}
 
 
@@ -384,15 +387,25 @@ def derive_supersession(working_dir: Path) -> dict[str, list[str]]:
     return {target: sorted(derivers) for target, derivers in sorted(edges.items())}
 
 
+def explicit_successors(parsed: DecisionRecord) -> list[str]:
+    """TOKENs named by a record's own ``SUPERSEDED_BY`` (a bare TOKEN or a list of them).
+
+    A list, written on one line or wrapped over several (issue #224), yields one
+    successor per item; two different items are a fork like any other.
+    """
+    explicit = parsed.get("fields", {}).get("SUPERSEDED_BY")
+    if not explicit:
+        return []
+    return list_items(explicit) if explicit.lstrip().startswith("[") else [explicit]
+
+
 def successors_of(parsed: DecisionRecord, derived: dict[str, list[str]]) -> list[str]:
     """Sorted distinct successors of a record: its SUPERSEDED_BY plus derived edges.
 
     More than one means a FORK (never silently resolved to one of them).
     """
     found = set(derived.get(parsed.get("token") or "", []))
-    explicit = parsed.get("fields", {}).get("SUPERSEDED_BY")
-    if explicit:
-        found.add(explicit)
+    found.update(explicit_successors(parsed))
     return sorted(found)
 
 
@@ -419,6 +432,20 @@ def apply_derived_supersession(
     return out
 
 
+def _single_successor(parsed: DecisionRecord) -> str | None:
+    """The one ``SUPERSEDED_BY`` TOKEN of a record, as written for a bare TOKEN.
+
+    A bare value is returned untouched (byte parity). A one-item list is unwrapped to its
+    TOKEN; a list of several is not one successor, so ``None`` (the fork is reported by
+    :func:`chain_entry` via ``successors``).
+    """
+    raw = parsed.get("fields", {}).get("SUPERSEDED_BY")
+    if raw is None or not raw.lstrip().startswith("["):
+        return raw
+    items = list_items(raw)
+    return items[0] if len(items) == 1 else None
+
+
 def chain_entry(
     working_dir: Path,
     parsed: DecisionRecord,
@@ -434,7 +461,7 @@ def chain_entry(
         "token": parsed.get("token"),
         "status": parsed.get("status"),
         "authored_at": parsed.get("authored_at"),
-        "superseded_by": parsed.get("fields", {}).get("SUPERSEDED_BY"),
+        "superseded_by": _single_successor(parsed),
         "path": rel_path(working_dir, path),
     }
     if successors is not None and len(successors) > 1:
@@ -506,7 +533,9 @@ def walk_supersession_chain(
                 "chain": chain,
             }
         loaded = parse_decision_record(content)
-        if is_yaml_front_matter(content) and not record_is_parseable(loaded):
+        if (
+            is_yaml_front_matter(content) or diagnose_octave_record(content) is not None
+        ) and not record_is_parseable(loaded):
             return {
                 "outcome": "unparseable",
                 "token": current,
