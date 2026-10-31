@@ -68,6 +68,7 @@ def test_a_wrapped_list_with_a_nested_key_list_item_reads_in_full() -> None:
 
 def test_a_nested_item_key_does_not_leak_into_the_record_fields() -> None:
     fields = _fields(_NESTED_LIST_ITEM)
+    assert "SCOPE_MATRIX" in fields  # the record parsed (not vacuously rejected)
     assert "SIMPLE" not in fields
 
 
@@ -121,3 +122,30 @@ def test_an_unterminated_list_followed_by_a_sibling_still_fails_loudly(middle: s
 def test_an_unclosed_nested_bracket_is_unterminated_at_the_envelope_end() -> None:
     text = _HEAD + "  AFFECTS::[\n    A::[\n      B\n    ]\n===END===\n"
     assert diagnose_octave_record(text) == {"line": _OPENS_AT, "construct": "unterminated_list"}
+
+
+def test_nested_and_outer_brackets_both_open_at_the_envelope_end() -> None:
+    text = _HEAD + "  AFFECTS::[\n    A::[\n      B\n===END===\n"
+    assert diagnose_octave_record(text) == {"line": _OPENS_AT, "construct": "unterminated_list"}
+
+
+def test_a_deeper_envelope_looking_line_is_an_item_not_the_envelope_end() -> None:
+    fields = _fields("  AFFECTS::[\n    === note,\n    B\n  ]\n")
+    assert fields["AFFECTS"] == "[=== note,B]"
+
+
+def test_tab_indented_items_under_a_tab_indented_opener_are_items() -> None:
+    middle = "\tAFFECTS::[\n\t\tA::x,\n\t\tB\n\t]\n  SCOPE::PROD\n"
+    fields = _fields(middle)
+    assert fields["AFFECTS"] == "[A::x,B]"
+    assert fields["SCOPE"] == "PROD"
+
+
+def test_blank_lines_inside_a_list_with_nested_key_items_are_ignored() -> None:
+    fields = _fields("  AFFECTS::[\n\n    A::x,\n\n    B\n  ]\n")
+    assert fields["AFFECTS"] == "[A::x,B]"
+
+
+def test_a_key_value_line_inside_an_open_quote_is_not_a_break_at_any_indent() -> None:
+    fields = _fields('  AFFECTS::[\n    "one\nSCOPE::two",\n    B\n  ]\n')
+    assert fields["AFFECTS"] == '["one SCOPE::two",B]'
