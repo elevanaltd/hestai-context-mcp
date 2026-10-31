@@ -173,13 +173,15 @@ class TestCompressionContract:
         assert "COMPRESSION_TIER" in ctx.prompt
         assert "LOSS_PROFILE" in ctx.prompt
 
-    def test_prompt_mandates_telegraphic_value_form(self, tmp_path: Path) -> None:
+    def test_prompt_mandates_plain_words_value_form(self, tmp_path: Path) -> None:
+        # HO-AGR-PLAIN-WORDS-REASONING-20261031 FOLLOW_UP: relations in plain words.
         _seed_repo(tmp_path)
         ctx = assemble_intake_context(tmp_path, "record a decision")
         lower = ctx.prompt.lower()
-        assert "telegraphic" in lower
-        # Operators are named so the model knows what carries the connectives.
-        assert "⊕" in ctx.prompt and "⇌" in ctx.prompt and "→" in ctx.prompt
+        assert "plain words" in lower
+        assert "never arrows or symbols" in lower
+        # The flat-string limits stay.
+        assert "flat" in lower and "40" in ctx.prompt and "newline" in lower
 
     def test_prompt_bans_prose_paragraph_values(self, tmp_path: Path) -> None:
         _seed_repo(tmp_path)
@@ -202,8 +204,8 @@ class TestCompressionContract:
 
 
 class TestBytecodeFewShotAndOperators:
-    """#111 residual: the contract must (a) name the full ratified operator set
-    (→ ⇌ ∴ ⊕) and (b) carry a telegraphic verbose→bytecode worked example.
+    """#111 residual, amended by HO-AGR-PLAIN-WORDS-REASONING-20261031 FOLLOW_UP: the
+    contract carries a verbose to flat-string worked example and NO operator glyphs.
 
     GAP-A: the ``∴`` (therefore) operator was missing from the contract's
     operator list while the Gate-A guard's own remediation text already cites it
@@ -215,11 +217,12 @@ class TestBytecodeFewShotAndOperators:
     label is literally true), and the AFTER DECISION/BECAUSE genuinely PASS.
     """
 
-    def test_prompt_names_therefore_operator(self, tmp_path: Path) -> None:
-        # GAP-A: ∴ (therefore) joins the ratified operator set (→ ⇌ ∴ ⊕).
-        _seed_repo(tmp_path)
-        ctx = assemble_intake_context(tmp_path, "record a decision")
-        assert "∴" in ctx.prompt
+    def test_contract_carries_no_operator_glyphs(self) -> None:
+        # The ruling replaced the compressed-OCTAVE operator clause with plain words.
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        found = [g for g in "→⇌∴⊕∧∨" if g in _COMPRESSION_CONTRACT]
+        assert found == [], f"contract still carries operator glyphs: {found}"
 
     def test_prompt_carries_verbose_to_bytecode_fewshot(self, tmp_path: Path) -> None:
         # GAP-B: a stable, distinctive few-shot marker must be present so the
@@ -228,7 +231,7 @@ class TestBytecodeFewShotAndOperators:
         ctx = assemble_intake_context(tmp_path, "record a decision")
         # The example label (the JIT prompt is deterministic; this is a pure
         # prompt-contains assertion, no AI call).
-        assert "EXAMPLE (verbose prose → flat bytecode)" in ctx.prompt
+        assert "EXAMPLE (verbose prose to flat string)" in ctx.prompt
         # And both poles of the worked transform are present.
         assert "BEFORE" in ctx.prompt and "AFTER" in ctx.prompt
 
