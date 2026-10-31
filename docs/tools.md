@@ -74,9 +74,8 @@ immediately without further queries.
   read with the repo's OCTAVE list grammar: flat wrapped and inline lists read the same, a comma
   inside a quoted item stays one item, and items carry no surrounding quotes
   (`"B1-BUILD-PLAN.md"` is returned as `B1-BUILD-PLAN.md`).
-  Known limitation: a nested `KEY::` line inside a wrapped list (octave_write's nested-list
-  form) is rejected until the parser follow-up (ADR-004 v1.9) lands; that reports
-  `phase_constraints_error` with `construct: unterminated_list`.
+  Nested keyed items inside a wrapped list (octave_write's nested-list form) read fully from
+  ADR-004 v1.9, so the canonical form reads the same as the inline form.
 - Detects focus conflicts when multiple sessions are active on the same working directory.
 - Restores portable session state from prior sessions via the `LocalFilesystemAdapter`.
 - Does not fail if North Star or project context files are absent — returns what is available.
@@ -179,9 +178,8 @@ Pure read — no session created, no files written. Returns the same context str
   read with the repo's OCTAVE list grammar: flat wrapped and inline lists read the same, a comma
   inside a quoted item stays one item, and items carry no surrounding quotes
   (`"B1-BUILD-PLAN.md"` is returned as `B1-BUILD-PLAN.md`).
-  Known limitation: a nested `KEY::` line inside a wrapped list (octave_write's nested-list
-  form) is rejected until the parser follow-up (ADR-004 v1.9) lands; that reports
-  `phase_constraints_error` with `construct: unterminated_list`.
+  Nested keyed items inside a wrapped list (octave_write's nested-list form) read fully from
+  ADR-004 v1.9, so the canonical form reads the same as the inline form.
 - Intended for the Payload Compiler (Position 3) which may call it repeatedly or in parallel.
 - Enforced at source level: `get_context.py` has zero imports from the `storage/` subsystem
   (`PURITY_GUARD::G3`). This is verified by a static test.

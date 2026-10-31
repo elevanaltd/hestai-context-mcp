@@ -140,40 +140,6 @@ def test_exclusion_key_inside_list_value_inline(tmp_path):
         synth(tmp_path, text, "B2")
 
 
-BLOCKER = (
-    "parser follow-up: read_octave_fields indent rule for nested KEY:: items in wrapped lists "
-    "(ADR-004 v1.9, separate PR); part of #196"
-)
-
-
-class KnownParserBlocker(Exception):  # noqa: N818 - a marker, not an error type
-    """Raised ONLY for the exact known blocker: unterminated_list at the nested-list opener."""
-
-
-def known_parser_blocker(text: str, opener: str, call):
-    """Run ``call``; turn the exact known blocker into :class:`KnownParserBlocker`.
-
-    Used with ``xfail(strict=True, raises=KnownParserBlocker)``: the test is an expected
-    failure ONLY for ``unterminated_list`` at ``opener``'s line. Any other exception or
-    assertion failure is a real failure, and once the parser handles nested keys the test
-    XPASSes, which strict mode turns into a failure (remove the xfail then).
-    """
-    try:
-        return call()
-    except ValueError as err:  # WorkflowParseError is a ValueError; its attrs identify it
-        opens_at = text.splitlines().index(opener) + 1
-        if (getattr(err, "construct", None), getattr(err, "line", None)) == (
-            "unterminated_list",
-            opens_at,
-        ):
-            raise KnownParserBlocker(BLOCKER) from err
-        raise
-
-
-xfail_known_blocker = pytest.mark.xfail(strict=True, raises=KnownParserBlocker, reason=BLOCKER)
-
-
-@xfail_known_blocker
 def test_exclusion_key_inside_list_value_wrapped(tmp_path):
     """Same content as the inline test, in the octave_write nested-list form."""
     nested = (
@@ -183,12 +149,9 @@ def test_exclusion_key_inside_list_value_wrapped(tmp_path):
     )
     text = doc(B1, nested, render_list("DELIVERABLES", ["d1", "d2"], "wrapped"))
 
-    def check():
-        assert synth(tmp_path, text, "B1").deliverables == ["d1", "d2"]
-        with pytest.raises(ValueError, match="not found"):
-            synth(tmp_path, text, "B2")
-
-    known_parser_blocker(text, "CONTEXT7_LIBRARY_RESEARCH::[", check)
+    assert synth(tmp_path, text, "B1").deliverables == ["d1", "d2"]
+    with pytest.raises(ValueError, match="not found"):
+        synth(tmp_path, text, "B2")
 
 
 @pytest.mark.parametrize(
@@ -513,16 +476,10 @@ def test_canonical_fixture_is_the_wrapped_form_of_the_bundled_workflow():
     assert "DELIVERABLES::[\n" not in BUNDLED.read_text()
 
 
-@xfail_known_blocker
 @pytest.mark.parametrize("phase", PHASE_IDS)
 def test_all_ten_phases_equal_between_bundled_and_canonical(phase):
     inline = ContextSteward(BUNDLED).synthesize_active_state(phase)
-    text = CANONICAL.read_text()
-
-    def check():
-        assert ContextSteward(CANONICAL).synthesize_active_state(phase) == inline
-
-    known_parser_blocker(text, "  SCOPE_MATRIX::[", check)
+    assert ContextSteward(CANONICAL).synthesize_active_state(phase) == inline
 
 
 def test_pinned_inline_fixture_matches_the_live_bundled_workflow_when_present():
