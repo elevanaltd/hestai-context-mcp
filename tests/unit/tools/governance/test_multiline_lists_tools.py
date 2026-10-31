@@ -180,6 +180,7 @@ def test_gate_a_warns_on_a_multi_line_superseded_by_and_stays_valid(tmp_path: Pa
         + f"  SUPERSEDED_BY::[\n    {TOKEN_NEW}\n  ]\n===END===\n"
     )
     result = validate_octave_content(tmp_path, content)
+    assert result.valid, result.errors
     assert any("SUPERSEDED_BY" in w and "multi-line" in w for w in result.warnings), (
         result.errors,
         result.warnings,
