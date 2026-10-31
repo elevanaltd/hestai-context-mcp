@@ -439,7 +439,7 @@ _CITER_OCTAVE = (
 _CITER_YAML = PLAIN_RECORD.replace(
     'ratified_by: "human:operator<fixture>"\n',
     f'ratified_by: "human:operator<fixture>"\nrelated_decisions: "{TOPIC_TOKEN}"\n',
-).replace(PLAIN_TOKEN, "HO-CITES-IN-YAML-20261015") + (
+).replace(PLAIN_TOKEN, "HO-CUBIC-NOTYPE-20261029") + (
     f'\nBody quoting the topic: token: "{TOPIC_TOKEN}"\nTOKEN::{TOPIC_TOKEN}\n'
 )
 
@@ -554,7 +554,7 @@ class TestUniquenessAtMain:
             {
                 TOPIC_PATH: TOPIC_RECORD,
                 ".hestai/decisions/HO-CITES-THE-TOPIC-20261015.oct.md": _CITER_OCTAVE,
-                ".hestai/decisions/HO-CITES-IN-YAML-20261015.md": _CITER_YAML,
+                ".hestai/decisions/HO-CUBIC-NOTYPE-20261029.md": _CITER_YAML,
             },
         )
         _stale_checkout(repo)  # the citations exist only at main: the main-side matcher decides

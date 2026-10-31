@@ -148,9 +148,9 @@ class TestReadAppendBase:
         assert base.data is None and base.from_record_hash is None
 
     def test_token_only_in_the_markdown_body_is_not_found(self, tmp_path: Path) -> None:
-        body_only = TOPIC_RECORD + 'token: "HO-BODY-ONLY-20261015"\n'
+        body_only = TOPIC_RECORD + 'token: "HO-BODY-20260101"\n'
         repo, _ = init_topic_repo(tmp_path, {TOPIC_PATH: body_only})
-        base = read_append_base(repo, "HO-BODY-ONLY-20261015")
+        base = read_append_base(repo, "HO-BODY-20260101")
         assert base.error_code == "TOKEN_NOT_FOUND_AT_MAIN"
 
     def test_yaml_front_matter_in_an_oct_md_file_is_not_a_record(self, tmp_path: Path) -> None:
