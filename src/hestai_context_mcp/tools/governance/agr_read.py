@@ -23,7 +23,13 @@ from typing import Any
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     DecisionRecord,
+    diagnose_yaml_record,
+    extract_yaml_token,
+    has_yaml_decision_header,
+    is_yaml_front_matter,
     parse_decision_record,
+    parse_supersedes_list,
+    read_record,
 )
 
 # §1.3 TOKEN format + the §1.2 required-field contract + the v1.1 §4.1 #13
@@ -69,8 +75,43 @@ _TYPE_IS_DECISION_RECORD_RE = re.compile(
 )
 
 
+# Shared §3.1.1 wording for a record that is in scope but failed to parse. Names
+# BOTH syntaxes (OCTAVE ``.oct.md`` and quoted-YAML front-matter ``.md``).
+PARSE_ERROR_WORDING = "missing OCTAVE envelope or YAML front matter, or required §1.2 field(s)"
+
+
+def parse_failure_detail(content: str) -> dict[str, Any] | None:
+    """Return ``{"line": int, "construct": str}`` for a rejected YAML record, else ``None``.
+
+    The B1 loud-reject detail: a YAML record the strict subset refuses is reported
+    with its 1-based line and the offending construct, never silently skipped.
+    ``None`` for OCTAVE records and for YAML records that are merely incomplete.
+    """
+    reject = diagnose_yaml_record(content)
+    return None if reject is None else {"line": reject["line"], "construct": reject["construct"]}
+
+
+def parse_failure_detail_for_path(path: Path) -> dict[str, Any] | None:
+    """:func:`parse_failure_detail` for a file (``None`` if it cannot be read)."""
+    try:
+        return parse_failure_detail(read_record(path).text)
+    except OSError:
+        return None
+
+
+def parse_error_text(detail: dict[str, Any] | None) -> str:
+    """The shared ``parse_error`` string, naming the line/construct when known."""
+    if detail is None:
+        return PARSE_ERROR_WORDING
+    return f"{PARSE_ERROR_WORDING}; rejected at line {detail['line']}: {detail['construct']}"
+
+
 def is_decision_record(content: str) -> bool:
-    """True iff this OCTAVE document declares itself a DECISION_RECORD (AGR).
+    """True iff this OCTAVE or YAML document declares itself a DECISION_RECORD (AGR).
+
+    A document opening with a ``---`` fence is judged ONLY by its YAML header
+    (``type: "DECISION_RECORD"`` inside the fences); OCTAVE-shaped lines in its
+    markdown body can never qualify it.
 
     Type membership is a SCOPING signal, distinct from parse-completeness
     (``record_is_parseable``). ``.hestai/decisions/`` legitimately co-hosts
@@ -87,6 +128,8 @@ def is_decision_record(content: str) -> bool:
     as ``DOCUMENT_TYPE::DECISION_RECORD`` / ``CONTENT_TYPE::DECISION_RECORD``
     can never qualify (CRS P2 — same failure class as F1).
     """
+    if is_yaml_front_matter(content):
+        return has_yaml_decision_header(content)
     if _extract_sentinel(content) == _DECISION_RECORD_TYPE:
         return True
     return _TYPE_IS_DECISION_RECORD_RE.search(content) is not None
@@ -141,15 +184,37 @@ def decisions_root(working_dir: Path) -> Path:
     return working_dir / ".hestai" / "decisions"
 
 
-def iter_record_paths(working_dir: Path) -> list[Path]:
-    """Return every ``.oct.md`` under ``.hestai/decisions/**`` (sorted, stable).
+def _is_yaml_record_file(path: Path) -> bool:
+    """True iff ``path`` is a plain ``.md`` carrying the YAML decision header."""
+    if path.name.endswith(".oct.md") or not path.is_file():
+        return False
+    try:
+        return has_yaml_decision_header(read_record(path).text)
+    except OSError:
+        return False
 
-    Honours both the §1.1 flat layout and ``<group>/`` sub-grouping. Read-only.
+
+def _is_yaml_in_oct_md(path: Path) -> bool:
+    """True iff a ``.oct.md`` file holds YAML front matter (out of spec: never a record)."""
+    try:
+        return is_yaml_front_matter(read_record(path).text)
+    except OSError:
+        return False
+
+
+def iter_record_paths(working_dir: Path) -> list[Path]:
+    """Return every candidate record under ``.hestai/decisions/**`` (sorted, stable).
+
+    Every OCTAVE ``*.oct.md`` (YAML front matter inside one is out of spec and ignored) plus every other ``*.md`` that carries the YAML decision
+    header (so READMEs and other markdown are never misread as records). Honours
+    both the §1.1 flat layout and ``<group>/`` sub-grouping. Read-only.
     """
     root = decisions_root(working_dir)
     if not root.exists():
         return []
-    return sorted(root.rglob("*.oct.md"))
+    paths = {p for p in root.rglob("*.oct.md") if not _is_yaml_in_oct_md(p)}
+    paths.update(p for p in root.rglob("*.md") if _is_yaml_record_file(p))
+    return sorted(paths)
 
 
 def is_valid_token(token: str) -> bool:
@@ -177,17 +242,40 @@ def _is_decision_record_for_token(path: Path, token: str) -> bool:
     filename drifted from its TOKEN must still resolve by content. Read-only.
     """
     try:
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = read_record(path).text
     except OSError:
         return False
-    return is_decision_record(content) and _extract_token(content) == token
+    if not is_decision_record(content):
+        return False
+    if path.name.endswith(".md") and not path.name.endswith(".oct.md"):
+        # Extension/syntax pairing: a plain ``.md`` resolves only YAML records.
+        return is_yaml_front_matter(content) and extract_yaml_token(content) == token
+    if is_yaml_front_matter(content):
+        return False  # strict pairing: ``.oct.md`` is OCTAVE-only
+    return _extract_token(content) == token
+
+
+def _is_unextractable_yaml_candidate(path: Path) -> bool:
+    """True iff ``path`` is a YAML decision candidate whose ``token:`` scalar cannot be read.
+
+    Only consulted for a file whose NAME is ``<token>.md``: the filename supplies the
+    identity the unreadable token scalar cannot, so the malformed record is reported
+    (RECORD_PARSE_FAILED with path/line/construct) rather than hidden as not-found. A
+    record whose token IS readable but differs from the filename never matches here.
+    """
+    try:
+        content = read_record(path).text
+    except OSError:
+        return False
+    return has_yaml_decision_header(content) and extract_yaml_token(content) is None
 
 
 def discover_record(working_dir: Path, token: str) -> Path | None:
     """Resolve a TOKEN to its on-disk DECISION_RECORD path, or ``None``.
 
     Resolution is path-first (§1.1 filename↔TOKEN): the canonical filename is
-    ``<token>.oct.md`` under the flat root or any sub-group. Every candidate is
+    ``<token>.oct.md`` (else ``<token>.md`` for a YAML record) under the flat root
+    or any sub-group. Every candidate is
     verified to be a DECISION_RECORD whose embedded TOKEN equals ``token`` —
     a co-located non-AGR ``.oct.md`` can never resolve as a record (F1 guard).
     As a fallback (a record whose filename drifted from its TOKEN), the store is
@@ -217,6 +305,15 @@ def discover_record(working_dir: Path, token: str) -> Path | None:
     for candidate in sorted(root.rglob(f"{token}.oct.md")):
         if _is_decision_record_for_token(candidate, token):
             return candidate
+    direct_yaml = root / f"{token}.md"
+    if direct_yaml.exists() and _is_decision_record_for_token(direct_yaml, token):
+        return direct_yaml
+    for candidate in sorted(root.rglob(f"{token}.md")):
+        if _is_decision_record_for_token(candidate, token):
+            return candidate
+    for candidate in [direct_yaml, *sorted(root.rglob(f"{token}.md"))]:
+        if candidate.is_file() and _is_unextractable_yaml_candidate(candidate):
+            return candidate
 
     # Fallback: embedded-TOKEN scan (filename drifted from TOKEN), type-verified.
     for path in iter_record_paths(working_dir):
@@ -227,7 +324,7 @@ def discover_record(working_dir: Path, token: str) -> Path | None:
 
 def load_parsed(path: Path) -> DecisionRecord:
     """Read + parse a record file into a structured dict (pure read)."""
-    content = path.read_text(encoding="utf-8", errors="replace")
+    content = read_record(path).text
     return parse_decision_record(content)
 
 
@@ -242,24 +339,117 @@ def classify_file(path: Path) -> tuple[bool, DecisionRecord]:
 
     Reads the file a single time so type-membership and field-parse share one IO.
     """
-    content = path.read_text(encoding="utf-8", errors="replace")
+    content = read_record(path).text
     return is_decision_record(content), parse_decision_record(content)
 
 
-def chain_entry(working_dir: Path, parsed: DecisionRecord, path: Path) -> dict[str, Any]:
-    """Build one §3.4 chain entry from a parsed record + its path."""
-    return {
+_EDGE_SOURCE_STATUSES = frozenset({"RATIFIED", "SUPERSEDED"})
+
+
+def derive_supersession(working_dir: Path) -> dict[str, list[str]]:
+    """Map each superseded TOKEN to the sorted tokens of the YAML records that supersede it.
+
+    Edges come ONLY from a parseable YAML record's ``supersedes:`` list, and only
+    when that record's own STATUS is RATIFIED or SUPERSEDED (PROPOSED, DRAFT, VOID
+    and anything else derive nothing). OCTAVE records (including legacy prose
+    ``SUPERSEDES``) and rejected YAML records derive nothing. A pure corpus scan (PROD I5): no file is written, and the
+    superseded record's own file is never consulted or touched.
+    """
+    root = decisions_root(working_dir)
+    if not root.exists():
+        return {}
+    edges: dict[str, set[str]] = {}
+    for path in sorted(root.rglob("*.md")):
+        if path.name.endswith(".oct.md") or not path.is_file():
+            continue
+        try:
+            content = read_record(path).text
+        except OSError:
+            continue
+        if not is_yaml_front_matter(content):
+            continue
+        parsed = parse_decision_record(content)
+        raw = parsed["fields"].get("SUPERSEDES")
+        deriver = parsed["token"]
+        if raw is None or deriver is None or not record_is_parseable(parsed):
+            continue
+        if not is_valid_token(deriver):
+            continue  # discover_record could never resolve such a successor
+        if parsed["status"] not in _EDGE_SOURCE_STATUSES:
+            continue
+        if discover_record(working_dir, deriver) != path:
+            continue  # the deriver's TOKEN resolves to a different file: no false edge
+        for target in parse_supersedes_list(raw):
+            edges.setdefault(target, set()).add(deriver)
+    return {target: sorted(derivers) for target, derivers in sorted(edges.items())}
+
+
+def successors_of(parsed: DecisionRecord, derived: dict[str, list[str]]) -> list[str]:
+    """Sorted distinct successors of a record: its SUPERSEDED_BY plus derived edges.
+
+    More than one means a FORK (never silently resolved to one of them).
+    """
+    found = set(derived.get(parsed.get("token") or "", []))
+    explicit = parsed.get("fields", {}).get("SUPERSEDED_BY")
+    if explicit:
+        found.add(explicit)
+    return sorted(found)
+
+
+def apply_derived_supersession(
+    parsed: DecisionRecord, derived: dict[str, list[str]]
+) -> DecisionRecord:
+    """Overlay derived supersession on a parsed record (returns a copy; file untouched).
+
+    OR rule: a record with a derived edge reads ``SUPERSEDED`` — except a ``VOID``
+    record, which stays ``VOID`` (it outranks SUPERSEDED) while the edge still
+    appears in its chain. When it has exactly one successor overall and no explicit
+    ``SUPERSEDED_BY``, that successor is surfaced as ``fields["SUPERSEDED_BY"]``.
+    On a fork ``fields`` is left exactly as the file has it.
+    """
+    token = parsed.get("token")
+    derived_successors = derived.get(token or "")
+    if not derived_successors:
+        return parsed
+    out: DecisionRecord = {**parsed, "fields": dict(parsed["fields"])}
+    if out["status"] != "VOID":
+        out["status"] = "SUPERSEDED"
+    if "SUPERSEDED_BY" not in out["fields"] and len(derived_successors) == 1:
+        out["fields"]["SUPERSEDED_BY"] = derived_successors[0]
+    return out
+
+
+def chain_entry(
+    working_dir: Path,
+    parsed: DecisionRecord,
+    path: Path,
+    successors: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build one §3.4 chain entry from a parsed record + its path.
+
+    On a fork (``successors`` has more than one TOKEN) ``superseded_by`` is
+    ``None`` and the entry additionally carries ``fork: True`` and ``successors``.
+    """
+    entry: dict[str, Any] = {
         "token": parsed.get("token"),
         "status": parsed.get("status"),
         "authored_at": parsed.get("authored_at"),
         "superseded_by": parsed.get("fields", {}).get("SUPERSEDED_BY"),
         "path": rel_path(working_dir, path),
     }
+    if successors is not None and len(successors) > 1:
+        entry["superseded_by"] = None
+        entry["fork"] = True
+        entry["successors"] = successors
+    return entry
 
 
-def walk_supersession_chain(working_dir: Path, start_token: str) -> dict[str, Any]:
-    """Follow SUPERSEDED_BY pointers from ``start_token`` to the terminal.
+def walk_supersession_chain(
+    working_dir: Path, start_token: str, derived: dict[str, list[str]] | None = None
+) -> dict[str, Any]:
+    """Follow supersession edges from ``start_token`` to the terminal.
 
+    Edges are a record's ``SUPERSEDED_BY`` OR a derived YAML ``supersedes:`` edge.
     Pure read. The caller guarantees ``start_token`` already resolves on disk.
 
     Returns a structured result (PROD I4) — one of:
@@ -267,10 +457,19 @@ def walk_supersession_chain(working_dir: Path, start_token: str) -> dict[str, An
       * ``{"outcome": "broken", "broken_at_token", "missing_successor_token",
          "chain": [...]}``
       * ``{"outcome": "cycle", "cycle_at_token", "chain": [...]}``
+      * ``{"outcome": "unparseable", "token", "path", "detail", "chain"}`` — a YAML
+        record on the walk (start or mid-chain) was rejected or incomplete; the walk
+        stops rather than half-read it (``detail`` is ``{line, construct}`` or ``{}``).
+      * ``{"outcome": "fork", "fork_at_token", "successors": [...], "chain": [...]}``
+        — a record with two DIFFERENT successors; the walk stops there and
+        reports both rather than picking one. The same successor named by both
+        sources is not a fork.
 
     Cycle detection is fail-closed (visited-set) — never an unbounded walk
-    (§3.4). The chain follows the ``SUPERSEDED_BY`` subgraph only.
+    (§3.4).
     """
+    if derived is None:
+        derived = derive_supersession(working_dir)
     chain: list[dict[str, Any]] = []
     visited: set[str] = set()
     current = start_token
@@ -294,10 +493,39 @@ def walk_supersession_chain(working_dir: Path, start_token: str) -> dict[str, An
                 "chain": chain,
             }
 
-        parsed = load_parsed(path)
-        entry = chain_entry(working_dir, parsed, path)
+        try:
+            content = read_record(path).text
+        except OSError:
+            # Unreadable mid-walk (permissions, deleted after discovery): stop with the
+            # same structured outcome as a rejected record rather than raising.
+            return {
+                "outcome": "unparseable",
+                "token": current,
+                "path": rel_path(working_dir, path),
+                "detail": {},
+                "chain": chain,
+            }
+        loaded = parse_decision_record(content)
+        if is_yaml_front_matter(content) and not record_is_parseable(loaded):
+            return {
+                "outcome": "unparseable",
+                "token": current,
+                "path": rel_path(working_dir, path),
+                "detail": parse_failure_detail(content) or {},
+                "chain": chain,
+            }
+        parsed = apply_derived_supersession(loaded, derived)
+        successors = successors_of(parsed, derived)
+        entry = chain_entry(working_dir, parsed, path, successors)
         chain.append(entry)
 
+        if len(successors) > 1:
+            return {
+                "outcome": "fork",
+                "fork_at_token": current,
+                "successors": successors,
+                "chain": chain,
+            }
         successor = entry["superseded_by"]
         if not successor:
             return {

@@ -2,6 +2,7 @@
 
 Builds a flat TOKEN/ID -> file_path index from:
   - .hestai/decisions/**/*.oct.md  (DECISION_RECORD, TOKEN field)
+  - .hestai/decisions/**/*.md      (quoted-YAML front-matter DECISION_RECORD, token field)
   - .hestai/context/concepts/**/*.oct.md  (facet cards, ID field)
 
 The MANIFEST is written to .hestai/MANIFEST.md after each successful
@@ -14,6 +15,15 @@ import os
 import re
 import tempfile
 from pathlib import Path
+
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    TOKEN_FORMAT_PATTERN,
+    extract_yaml_token,
+    has_yaml_decision_header,
+    is_yaml_front_matter,
+    read_record,
+    yaml_record_is_parseable,
+)
 
 # Regex to extract TOKEN from DECISION_RECORD (quoted form).
 # Line-anchored (\s*$) so a trailing-garbage line  TOKEN::"<value>" junk  is not
@@ -35,12 +45,25 @@ _ID_RE = re.compile(r'(?m)^  ID::"([^"]+)"\s*$')
 _ID_BARE_RE = re.compile(r"(?m)^  ID::([A-Z][A-Z0-9_]{2,127})\s*$")
 
 
+_YAML_TOKEN_OK = re.compile(TOKEN_FORMAT_PATTERN)
+
+
 def _extract_token_or_id(content: str) -> str | None:
     """Extract TOKEN or ID from raw oct.md content using regex.
 
-    Tries TOKEN field first (DECISION_RECORD), then ID field (facet cards).
+    A document opening with a ``---`` fence is read as a quoted-YAML record: only
+    its fenced ``token:`` line counts (the markdown body is ignored). Otherwise
+    tries TOKEN field first (DECISION_RECORD), then ID field (facet cards).
     Returns the extracted value or None if neither found.
     """
+    if is_yaml_front_matter(content):
+        if not has_yaml_decision_header(content):
+            return None
+        token = extract_yaml_token(content)
+        # Only a well-formed §1.3 TOKEN is indexed: a raw value is interpolated into a
+        # pipe-delimited table row, so a '|' (or any malformed token) must never get in.
+        return token if token is not None and _YAML_TOKEN_OK.fullmatch(token) else None
+
     m = _TOKEN_RE.search(content)
     if m:
         return m.group(1)
@@ -79,11 +102,22 @@ def build_manifest(working_dir: Path) -> str:
     for root in (decisions_root, concepts_root):
         if not root.exists():
             continue
-        for oct_file in sorted(root.rglob("*.oct.md")):
+        candidates = set(root.rglob("*.oct.md"))
+        if root == decisions_root:
+            candidates.update(p for p in root.rglob("*.md") if not p.name.endswith(".oct.md"))
+        for oct_file in sorted(candidates):
+            if not oct_file.is_file():
+                continue
             try:
-                content = oct_file.read_text(encoding="utf-8", errors="replace")
+                raw = read_record(oct_file)
             except OSError:
                 continue
+            content = raw.text
+            if oct_file.name.endswith(".oct.md"):
+                if is_yaml_front_matter(content):
+                    continue  # strict pairing: ``.oct.md`` is OCTAVE-only
+            elif not (has_yaml_decision_header(content) and yaml_record_is_parseable(content)):
+                continue  # YAML is indexed only if it parses (a rejected record is not "there")
             key = _extract_token_or_id(content)
             if key:
                 rel = oct_file.relative_to(working_dir)
