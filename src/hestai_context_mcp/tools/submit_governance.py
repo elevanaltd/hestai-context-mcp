@@ -452,7 +452,10 @@ async def _submit_octave_content(
     # CANONICAL bytes (front matter re-emitted, body verbatim) and Stage 5 reviews them.
     if is_yaml:
         yaml_text = validation.canonical_content
-        assert yaml_text is not None  # Gate A guarantees it for a valid YAML record
+        if yaml_text is None:  # Gate A guarantees it for a valid YAML record
+            return _empty_result(
+                dry_run, ["Internal error: Gate A produced no canonical bytes for a YAML record."]
+            )
         return await _link_and_report(wd, validation, yaml_text, dry_run, review, None, True, loop)
 
     # --- Gate B: REAL OCTAVE validation (in-process library behind the port) ---
