@@ -22,7 +22,6 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     emit_yaml_record,
 )
 from hestai_context_mcp.tools import submit_governance as sg
-from hestai_context_mcp.tools.governance import type_checker
 
 from .governance._agr_fixtures import snapshot_tree, write_record, yaml_record_text
 
@@ -240,7 +239,7 @@ def test_prose_mode_still_uses_the_octave_pipeline_and_never_the_yaml_seam(
     pipeline = AsyncMock(return_value={"success": True, "octave": OCTAVE_RECORD})
     monkeypatch.setattr(sg, "run_intake_to_pr", pipeline)
     seam = MagicMock(side_effect=AssertionError("prose mode touched the YAML seam"))
-    monkeypatch.setattr(type_checker, "validate_record_content", seam, raising=False)
+    monkeypatch.setattr(sg, "validate_record_content", seam)
     result = asyncio.run(
         sg.submit_governance(working_dir=str(tmp_path), prose_input="decide x", review=False)
     )
