@@ -188,3 +188,16 @@ def test_linker_refuses_to_commit_a_record_the_reader_rejects(
         text=True,
     ).stdout.strip()
     assert count == "1"
+
+
+def test_an_unreadable_written_record_is_a_structured_error_not_an_exception(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable(path: Path) -> object:
+        raise OSError("simulated read failure")
+
+    monkeypatch.setattr(linker, "read_record", unreadable)
+    out, open_pr = _run(repo, emit_yaml_record(CORE, None, None), monkeypatch)
+    assert out["error"] is not None and "read-back" in out["error"]
+    assert out["branch"] is None
+    open_pr.assert_not_called()
