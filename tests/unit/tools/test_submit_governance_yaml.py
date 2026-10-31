@@ -78,10 +78,11 @@ def _submit(tmp_path: Path, content: str, **kwargs: Any) -> dict[str, Any]:
 
 @pytest.fixture()
 def no_gate_b(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Gate B (the OCTAVE validator) must never see a YAML record."""
-    boom = MagicMock(side_effect=AssertionError("Gate B ran on a YAML record"))
-    monkeypatch.setattr(sg, "get_octave_validator", boom)
-    return boom
+    """Gate B (the OCTAVE validator) must never VALIDATE a YAML record (returns ``.validate``)."""
+    validator = MagicMock()
+    validator.validate.side_effect = AssertionError("Gate B ran on a YAML record")
+    monkeypatch.setattr(sg, "get_octave_validator", lambda: validator)
+    return validator.validate  # type: ignore[no-any-return]
 
 
 def test_valid_yaml_record_is_accepted_and_targets_dot_md(
@@ -269,3 +270,20 @@ def test_a_yaml_validation_without_canonical_bytes_is_a_structured_error(
     assert result["success"] is False
     assert any("canonical" in e for e in result["validation_errors"])
     linker.assert_not_called()
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_yaml_reports_the_actual_octave_validator_availability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available: bool
+) -> None:
+    """Gate B is skipped for YAML, but the availability signal is the real one (F3)."""
+    from hestai_context_mcp.ports.octave_validator import UnavailableOctaveValidator
+
+    validator = MagicMock() if available else UnavailableOctaveValidator()
+    if available:
+        validator.validate.side_effect = AssertionError("Gate B ran on a YAML record")
+    monkeypatch.setattr(sg, "get_octave_validator", lambda: validator)
+    result = _submit(tmp_path, emit_yaml_record(CORE, None, None))
+    assert result["success"] is True
+    assert result["real_validation_available"] is available
+    assert result["octave_validation"] is None
