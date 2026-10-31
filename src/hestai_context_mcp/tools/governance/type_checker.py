@@ -305,6 +305,18 @@ def _extract_superseded_by(content: str) -> str | None:
     return None
 
 
+def _superseded_by_value(content: str) -> str | None:
+    """The raw SUPERSEDED_BY value: a list (any spacing, one or several lines) or a TOKEN.
+
+    A bracketed value is read through ``_extract_meta_fields`` (which overlays a wrapped
+    list's full compact form); anything else keeps the legacy single-token regex.
+    """
+    listed = _extract_meta_fields(content).get("SUPERSEDED_BY")
+    if listed is not None and listed.lstrip().startswith("["):
+        return listed
+    return _extract_superseded_by(content)
+
+
 def _extract_issue_ref(content: str) -> str | None:
     """Extract and normalise the ISSUE_REF value if exactly one line is present.
 
@@ -447,7 +459,7 @@ def _check_agr_invariants(
         status=_strip_quotes(meta["STATUS"]) if "STATUS" in meta else None,
         tier=_strip_quotes(meta["TIER"]) if "TIER" in meta else None,
         authored_at=_strip_quotes(meta["AUTHORED_AT"]) if "AUTHORED_AT" in meta else None,
-        has_superseded_by=_extract_superseded_by(content) is not None,
+        has_superseded_by=_superseded_by_value(content) is not None,
         human_adr_ref=human_adr_ref,
         has_ratified_by=_RATIFIED_BY_RE.search(content) is not None,
     )
@@ -960,20 +972,28 @@ def _validate_impl(
             return ValidationResult(valid=False, errors=errors, card_type=card_type, token=token)
 
     # --- Check 5: SUPERSEDED_BY target existence ---
-    superseded_by = _extract_superseded_by(content)
-    if superseded_by is not None and read_octave_fields(raw_content)[1] is None:
-        # (An unterminated list is already reported by ``_check_list_fields``.)
-        targets = (
-            list_items(_extract_meta_fields(content).get("SUPERSEDED_BY", superseded_by))
-            if superseded_by.startswith("[")
-            else [superseded_by]
-        )
-        if not targets:
+    superseded_by = _superseded_by_value(content)
+    if superseded_by is not None:
+        listed = superseded_by.lstrip().startswith("[")
+        # A bare ``[`` is a list the reader could not close: ``_check_list_fields`` has
+        # already reported it, so there is no target to look up.
+        targets: list[str] | None = None
+        if not listed:
+            targets = [superseded_by]
+        elif superseded_by.strip() != "[":
+            targets = list_items(superseded_by)
+        if targets is not None and not targets:
             errors.append(
                 "SUPERSEDED_BY is an empty list; it must name the superseding TOKEN "
                 "(ADR-RFC-ARCH-004 §4.1 #9)."
             )
-        for target in targets:
+        if targets and len(set(targets)) > 1:
+            errors.append(
+                f"SUPERSEDED_BY names {len(set(targets))} distinct TOKENs "
+                f"({', '.join(sorted(set(targets)))}); a record has exactly one successor "
+                "(ADR-RFC-ARCH-004 §4.1 #8). Duplicates of one TOKEN are accepted."
+            )
+        for target in targets or []:
             if not lookup_token_deterministic(working_dir, target):
                 errors.append(
                     f"SUPERSEDED_BY target '{target}' not found in governance store. "
