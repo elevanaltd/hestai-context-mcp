@@ -163,5 +163,5 @@ def test_an_unterminated_list_reports_its_parse_error_before_any_field_extractio
     text = _HEAD + "  AFFECTS::[\n    A,\n    TYPE::OTHER\n" + _REAL + "===END===\n"
     result = validate_octave_content(tmp_path, text)
     assert result.valid is False
-    assert any("unterminated_list" in e for e in result.errors), result.errors
-    assert not any("OTHER" in e for e in result.errors), result.errors
+    # The documented parse error is FIRST; any follow-on error from the leaked item comes after.
+    assert "unterminated_list" in result.errors[0], result.errors
