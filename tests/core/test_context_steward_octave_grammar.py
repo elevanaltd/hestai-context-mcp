@@ -155,9 +155,12 @@ def xfail_only_on_known_blocker(text: str, opener: str, call):
     """
     try:
         return call()
-    except cs.WorkflowParseError as err:
+    except ValueError as err:  # WorkflowParseError is a ValueError; its attrs identify it
         opens_at = text.splitlines().index(opener) + 1
-        if (err.construct, err.line) == ("unterminated_list", opens_at):
+        if (getattr(err, "construct", None), getattr(err, "line", None)) == (
+            "unterminated_list",
+            opens_at,
+        ):
             pytest.xfail(BLOCKER)
         raise
 
