@@ -374,9 +374,9 @@ def test_a_padded_human_adr_ref_is_not_validated_as_if_stripped(tmp_path: Path) 
 
 
 def test_an_empty_superseded_by_is_absent_not_present(tmp_path: Path) -> None:
-    errors = _errors(tmp_path, _yaml(SUPERSEDED_BY=""))
-    assert not _has(errors, "SUPERSEDED_BY is present but STATUS")
-    assert _has(errors, "SUPERSEDED_BY target ''")
-    assert _has(
-        _errors(tmp_path, _yaml(STATUS="SUPERSEDED", SUPERSEDED_BY="")), "SUPERSEDED_BY is absent"
-    )
+    """Empty means absent for the iff check AND the target check: no misleading error."""
+    result = validate_record_content(tmp_path, _yaml(SUPERSEDED_BY=""))
+    assert result.valid, result.errors
+    errors = _errors(tmp_path, _yaml(STATUS="SUPERSEDED", SUPERSEDED_BY=""))
+    assert _has(errors, "SUPERSEDED_BY is absent")
+    assert not _has(errors, "target ''")
