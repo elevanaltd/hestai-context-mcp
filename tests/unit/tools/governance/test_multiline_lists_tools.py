@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from hestai_context_mcp.core.agent_readable_governance_parser import parse_decision_record
+from hestai_context_mcp.tools.governance import agr_read
 from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
 from hestai_context_mcp.tools.list_decisions import list_decisions
 from hestai_context_mcp.tools.lookup_decision import lookup_decision
@@ -438,3 +440,85 @@ def test_gate_a_treats_unclosed_or_trailing_bracket_values_as_before(
     else:
         assert "target" not in errors
     assert "empty list" not in errors and "distinct" not in errors
+
+
+# --- N1 (CRS): Gate A and the reader agree on a SUPERSEDED_BY list, whitespace included -----------
+
+
+def test_gate_a_accepts_a_space_before_the_bracket_with_an_existing_target(tmp_path: Path) -> None:
+    write_record(tmp_path, token=TOKEN_NEW, authored_at="2026-03-01T00:00:00Z")
+    result = validate_octave_content(
+        tmp_path, _superseded_record(f"  SUPERSEDED_BY:: [{TOKEN_NEW}]\n")
+    )
+    assert result.valid, result.errors
+
+
+def test_gate_a_checks_the_target_of_a_space_before_the_bracket_list(tmp_path: Path) -> None:
+    result = validate_octave_content(
+        tmp_path, _superseded_record(f"  SUPERSEDED_BY:: [{_ABSENT}]\n")
+    )
+    assert result.valid is False
+    assert any(f"target '{_ABSENT}' not found" in e for e in result.errors), result.errors
+    assert not any("SUPERSEDED_BY is absent" in e for e in result.errors), result.errors
+
+
+def test_gate_a_rejects_two_distinct_items_after_a_space_before_the_bracket(
+    tmp_path: Path,
+) -> None:
+    _seed_two_successors(tmp_path)
+    result = validate_octave_content(
+        tmp_path, _superseded_record(f"  SUPERSEDED_BY:: [{TOKEN_NEW}, {_OTHER}]\n")
+    )
+    assert result.valid is False
+    assert any("§4.1 #8" in e for e in result.errors), result.errors
+
+
+# Forms (closed or bare) the reader resolves to an edge: Gate A must see the same presence
+# and the same targets. ``{x}`` / ``{y}`` are tokens absent from the store, so every target
+# Gate A looks up is reported by name.
+# Not in the table, reported instead: a BARE token after leading whitespace (``:: X``).
+# The reader keeps the space (an unusable successor, so the chain reads as broken) and the
+# legacy Gate A regex counts the field absent; both pre-date #224 and neither resolves an edge.
+_AGREEMENT_FORMS = [
+    "{x}",
+    "[{x}]",
+    " [{x}]",
+    "\t[{x}]",
+    "[{x} ]",
+    "[ {x}]",
+    "[{x}]  ",
+    '["{x}"]',
+    "[{x},{y}]",
+    "[{x}, {y}]",
+    "[{x},\t{y}]",
+    " [ {x} , {y} ]",
+    "[{x},{x}]",
+]
+
+
+@pytest.mark.parametrize("form", _AGREEMENT_FORMS)
+def test_reader_and_gate_a_agree_on_presence_and_targets(tmp_path: Path, form: str) -> None:
+    value = form.format(x=_ABSENT, y=_OTHER)
+    body = f"  SUPERSEDED_BY::{value}\n"
+    record = _superseded_record(body)
+    reader_targets = set(agr_read.explicit_successors(parse_decision_record(record)))
+    result = validate_octave_content(tmp_path, record)
+    errors = " | ".join(result.errors)
+    gate_present = "SUPERSEDED_BY is absent" not in errors
+    gate_targets = set(re.findall(r"SUPERSEDED_BY target '([^']+)' not found", errors))
+    assert gate_present == bool(reader_targets), (form, errors)
+    assert gate_targets == reader_targets, (form, errors)
+
+
+def test_wrapped_forms_agree_too(tmp_path: Path) -> None:
+    for body in (
+        f"  SUPERSEDED_BY::[\n    {_ABSENT}\n  ]\n",
+        f"  SUPERSEDED_BY::[  \n\t{_ABSENT} ,\n\t{_OTHER}\t\n  ]  \n",
+    ):
+        record = _superseded_record(body)
+        reader_targets = set(agr_read.explicit_successors(parse_decision_record(record)))
+        errors = " | ".join(validate_octave_content(tmp_path, record).errors)
+        assert (
+            set(re.findall(r"SUPERSEDED_BY target '([^']+)' not found", errors)) == reader_targets
+        )
+        assert "SUPERSEDED_BY is absent" not in errors
