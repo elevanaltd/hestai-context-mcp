@@ -965,8 +965,9 @@ def emit_yaml_record(
     fields: Mapping[str, str],
     blocks: TopicBlocks | None = None,
     supersedes: list[str] | None = None,
+    body: str = "",
 ) -> str:
-    """Emit one canonical quoted-YAML record (front matter only), or raise.
+    """Emit one canonical quoted-YAML record (front matter plus ``body``), or raise.
 
     Pure and deterministic: the same logical input gives byte-identical output
     whatever the mapping order (fixed key order, LF endings, exact ``---`` fences,
@@ -981,7 +982,12 @@ def emit_yaml_record(
     own ``construct`` name, so this can never write a record the reader refuses.
     Value rules that belong to Gate A (STATUS/TIER enums, density, dates) are NOT
     checked here.
+
+    ``body`` (the markdown after the closing fence, ADR-RFC-ARCH-004 §1.1) is appended
+    VERBATIM: no newline or other normalisation, so file bytes == canonical bytes.
     """
+    if not isinstance(body, str):
+        raise YamlSyntaxError("invalid_body", f"not a string: {type(body).__name__}")
     pairs: dict[str, str] = {}
     for raw_key, value in fields.items():
         key = _emit_key(raw_key)
@@ -1016,4 +1022,84 @@ def emit_yaml_record(
     if blocks:
         lines.extend(_emit_blocks(blocks))
     lines.append(_YAML_FENCE)
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" + body
+
+
+def _raw_body(raw: bytes | str) -> str:
+    """The text after the closing fence line, taken from the RAW input.
+
+    ``classify_record_text`` folds CRLF to LF over the whole text, which would
+    normalise the body; the body is therefore split from the raw decode instead.
+    Only called for a record the reader accepted, so the closing fence exists.
+    """
+    text = raw.decode("utf-8", errors="surrogateescape") if isinstance(raw, bytes) else raw
+    lines = text.split("\n")
+    for index in range(1, len(lines)):
+        if _is_fence_line(lines[index]):
+            body = "\n".join(lines[index + 1 :])
+            if any(0xD800 <= ord(ch) <= 0xDFFF for ch in body):
+                raise YamlSyntaxError("invalid_utf8", "the markdown body is not valid UTF-8")
+            return body
+    raise YamlSyntaxError("missing_closing_fence")
+
+
+def _flat_fields(record: DecisionRecord) -> dict[str, str]:
+    """Every decoded field of a record by uppercase name (core fields and extras alike)."""
+    flat = {k.upper(): v for k, v in record.items() if k != "fields" and isinstance(v, str)}
+    flat.update(record["fields"])
+    return flat
+
+
+def _round_trip_mismatch(
+    before: tuple[DecisionRecord, TopicBlocks], after: tuple[DecisionRecord, TopicBlocks]
+) -> str | None:
+    """Name of the first differing record part (a field name, ``current`` or ``rulings``)."""
+    fields_a, fields_b = _flat_fields(before[0]), _flat_fields(after[0])
+    for name in sorted(set(fields_a) | set(fields_b)):
+        if fields_a.get(name) != fields_b.get(name):
+            return name.lower()
+    if before[1]["current"] != after[1]["current"]:
+        return "current"
+    if before[1]["rulings"] != after[1]["rulings"]:
+        return "rulings"
+    return None
+
+
+def canonicalize_yaml_record(raw: bytes | str) -> str:
+    """Parse a submitted YAML record, gate the round trip, and return its canonical text.
+
+    The one write-path step (EPIC4 PR-5, ruling C): the front matter is re-emitted by
+    :func:`emit_yaml_record` and the markdown body is copied verbatim from the RAW input.
+    ``canonicalize(canonical) == canonical`` byte for byte. Raises
+    :class:`YamlSyntaxError` with the reader's own ``construct`` for a record the
+    reader rejects, and ``round_trip_mismatch`` (naming the field) if any decoded value
+    of the re-emitted bytes differs from the submitted one.
+    """
+    record = classify_record_text(raw)
+    if record.syntax != "yaml":
+        raise YamlSyntaxError("not_yaml", "the record does not open with a --- fence")
+    if record.diagnostic is not None:
+        raise YamlSyntaxError(record.diagnostic["construct"], f"line {record.diagnostic['line']}")
+
+    parsed = parse_decision_record(record.text)
+    blocks = collect_topic_blocks(record.text)
+    fields = _flat_fields(parsed)
+    fields.pop("SUPERSEDES", None)
+    supersedes_value = parsed["fields"].get("SUPERSEDES")
+    supersedes = parse_supersedes_list(supersedes_value) if supersedes_value is not None else None
+    body = _raw_body(raw)
+
+    out = emit_yaml_record(fields, blocks, supersedes, body=body)
+
+    problem = diagnose_yaml_record(out)
+    if problem is not None:
+        raise YamlSyntaxError(
+            "round_trip_mismatch", f"re-emitted record rejected: {problem['construct']}"
+        )
+    again = (parse_decision_record(out), collect_topic_blocks(out))
+    differing = _round_trip_mismatch((parsed, blocks), again)
+    if differing is not None:
+        raise YamlSyntaxError("round_trip_mismatch", f"field {differing!r} changed on re-emission")
+    if not out.endswith(body):
+        raise YamlSyntaxError("round_trip_mismatch", "field 'body' changed on re-emission")
+    return out

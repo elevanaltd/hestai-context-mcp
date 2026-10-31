@@ -24,7 +24,9 @@ from pathlib import Path
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     RecordText,
     YamlReject,
+    YamlSyntaxError,
     annotate_lines,
+    canonicalize_yaml_record,
     classify_record_text,
     iter_block_lines,
     parse_decision_record,
@@ -232,6 +234,8 @@ class ValidationResult:
             Gate B / Stage-5 treatment.
         reject: For a rejected YAML record, the PR-4 reader's structured
             ``{line, construct}``; otherwise None.
+        canonical_content: For a valid YAML record, the canonical bytes to write (front
+            matter re-emitted, markdown body verbatim); None for OCTAVE or on error.
     """
 
     valid: bool
@@ -242,6 +246,7 @@ class ValidationResult:
     target_path: Path | None = None
     syntax: str = "octave"
     reject: YamlReject | None = None
+    canonical_content: str | None = None
 
 
 def _extract_sentinel(content: str) -> str | None:
@@ -1000,7 +1005,7 @@ def validate_record_content(working_dir: Path, content: str) -> ValidationResult
     errors: list[str] = []
     warnings: list[str] = []
     try:
-        return _validate_yaml_impl(working_dir, record, errors, warnings)
+        return _validate_yaml_impl(working_dir, record, content, errors, warnings)
     except Exception as exc:  # noqa: BLE001
         errors.append(f"Unexpected validation error: {exc}")
         return ValidationResult(valid=False, errors=errors, warnings=warnings, syntax="yaml")
@@ -1022,6 +1027,7 @@ def _existing_record_files(working_dir: Path, token: str) -> list[Path]:
 def _validate_yaml_impl(
     working_dir: Path,
     record: RecordText,
+    raw_content: str,
     errors: list[str],
     warnings: list[str],
 ) -> ValidationResult:
@@ -1117,6 +1123,13 @@ def _validate_yaml_impl(
                 f"{existing.relative_to(working_dir).as_posix()} and would be replaced."
             )
 
+    # --- canonical bytes + round-trip gate (write-mode ruling C) ---
+    canonical: str | None = None
+    try:
+        canonical = canonicalize_yaml_record(raw_content)
+    except YamlSyntaxError as exc:
+        errors.append(f"YAML record cannot be canonicalised: {exc}")
+
     if errors:
         return fail(card_type=card_type, token=token)
 
@@ -1127,4 +1140,5 @@ def _validate_yaml_impl(
         card_type=card_type,
         target_path=decision_record_path(working_dir, token, "yaml"),
         syntax="yaml",
+        canonical_content=canonical,
     )
