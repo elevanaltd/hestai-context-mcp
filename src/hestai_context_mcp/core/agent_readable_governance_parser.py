@@ -51,10 +51,11 @@ mode and runs until the bracket that closes it, counting brackets outside
 double-quoted strings. Any other value that starts ``[`` without closing it on its line
 (``NOTE::[see below``, ``KEY::[A,``) is read as a single line, exactly as before #224.
 Blank lines and ``//`` comments (a whole line, or after whitespace following an item)
-inside the list are ignored. Inside the list, a line indented DEEPER than the opener is an item (a nested
-``KEY::[`` / ``KEY::value`` item is the form ``octave_write`` writes for a nested list,
-ADR-004 v1.9) and is kept in the compact value, never read as a field of the record;
-indent is measured with tabs expanded to width 4. Regex and indent only, no AST.
+inside the list are ignored. Inside the list, a line indented DEEPER than the opener is
+an item (a nested ``KEY::[`` / ``KEY::value`` item is the form ``octave_write`` writes
+for a nested list, ADR-004 v1.9) and is kept in the compact value, never read as a field
+of the record; indent is measured with tabs expanded to width 4. Regex and indent only,
+no AST.
 
 Representation in ``fields`` (PROD I4): a wrapped list is stored as the COMPACT
 single-line form ``[A,B]``: every item trimmed (its own quotes kept, so an item with a
@@ -67,8 +68,8 @@ written compactly on one line give the identical string; a single-line list writ
 
 Unterminated applies only to lists opened by an exact ``KEY::[``. A list that is never
 closed (a new ``KEY::`` line, a block header or ``===`` line at the opener's indent or
-shallower, the envelope end or the end of the text comes first), or that has text after its closing ``]``, makes the
-whole record unparseable: ``parse_decision_record`` returns the empty record and
+shallower, the envelope end or the end of the text comes first), or that has text after
+its closing ``]``, makes the whole record unparseable: ``parse_decision_record`` returns the empty record and
 :func:`diagnose_octave_record` reports the 1-based line of the opening and the construct
 (``unterminated_list`` / ``text_after_list``). A record is never half-read.
 
