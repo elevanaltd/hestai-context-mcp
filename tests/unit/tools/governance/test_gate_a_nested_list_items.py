@@ -15,6 +15,7 @@ import pytest
 from hestai_context_mcp.core.agent_readable_governance_parser import parse_decision_record
 from hestai_context_mcp.tools.governance.type_checker import (
     _extract_meta_fields,
+    _strip_block_lines,
     validate_octave_content,
 )
 
@@ -64,7 +65,7 @@ def test_reader_and_gate_a_see_neither_a_nested_item(tmp_path: Path, shadow: str
     text = _record(_nested(shadow))
     key = shadow.split("::", 1)[0]
     parsed = parse_decision_record(text)
-    meta = _extract_meta_fields(text)
+    meta = _extract_meta_fields(_strip_block_lines(text))
     real = {"STATUS": "RATIFIED", "TIER": "STRATEGIC", "TOKEN": "HO-CUBIC-A-20260101"}
     if key in real:
         assert meta[key] == real[key], (key, meta[key])
@@ -85,7 +86,7 @@ def test_a_nested_item_cannot_shadow_meta_in_gate_a(tmp_path: Path, shadow: str)
 def test_a_nested_status_item_in_a_wrapped_affects_list_leaves_gate_a_on_ratified(
     tmp_path: Path,
 ) -> None:
-    meta = _extract_meta_fields(_record(_nested('STATUS::"VOID"')))
+    meta = _extract_meta_fields(_strip_block_lines(_record(_nested('STATUS::"VOID"'))))
     assert meta["STATUS"] == "RATIFIED"
     assert "SUPERSEDED_BY" not in meta
 
@@ -93,7 +94,9 @@ def test_a_nested_status_item_in_a_wrapped_affects_list_leaves_gate_a_on_ratifie
 def test_a_wrapped_superseded_by_list_still_reads_in_gate_a(tmp_path: Path) -> None:
     """The collapse to the compact form keeps a real wrapped list readable by Gate A."""
     text = _HEAD + "  SUPERSEDED_BY::[\n    HO-ESCAPES-20261029\n  ]\n" + _REAL + "===END===\n"
-    assert _extract_meta_fields(text)["SUPERSEDED_BY"] == "[HO-ESCAPES-20261029]"
+    assert (
+        _extract_meta_fields(_strip_block_lines(text))["SUPERSEDED_BY"] == "[HO-ESCAPES-20261029]"
+    )
 
 
 def test_the_core_key_before_meta_scan_ignores_nested_list_text(tmp_path: Path) -> None:
