@@ -655,7 +655,10 @@ def _parse_fidelity(
     verdict = verdict_match.group(1) if verdict_match else None
     named = [rid for rid in ids if any(re.search(rf"\b{re.escape(rid)}\b", c) for c in concerns)]
 
-    if verdict == "APPROVED" and not concerns:
+    # APPROVED needs an explicit, whitespace-only CONCERNS block: a missing line
+    # (truncated or malformed output) or separator-only content fails closed (#210).
+    concerns_empty = concerns_match is not None and not concerns_match.group(1).strip()
+    if verdict == "APPROVED" and concerns_empty:
         return {
             "verdict": "APPROVED",
             "assessment": assessment,
@@ -664,7 +667,13 @@ def _parse_fidelity(
             "metrics": metrics,
             "fidelity_pairs": [],
         }
-    if verdict in ("APPROVED", "CONCERNS"):
+    if verdict == "APPROVED" and not concerns:
+        flagged = list(ids)
+        concerns.append(
+            "Reviewer returned APPROVED without an explicit CONCERNS::[] line "
+            "(missing or malformed); every pair needs a human check."
+        )
+    elif verdict in ("APPROVED", "CONCERNS"):
         flagged = named or list(ids)
         if not named:
             concerns.append(
