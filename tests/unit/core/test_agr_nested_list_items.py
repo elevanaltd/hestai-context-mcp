@@ -110,7 +110,7 @@ def test_a_column_zero_opener_and_closing_bracket_close_the_list() -> None:
         # a field SHALLOWER than the opener breaks it
         "    AFFECTS::[\n      A,\n  SCOPE::PROD\n    ]\n",
         # a column-zero block header breaks it
-        "  AFFECTS::[\n    A::x,\nCURRENT:\n  ]\n",
+        "  AFFECTS::[\n    A::x,\nCURRENT:\n]\n",
     ],
 )
 def test_an_unterminated_list_followed_by_a_sibling_still_fails_loudly(middle: str) -> None:
