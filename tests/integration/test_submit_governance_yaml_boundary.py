@@ -114,6 +114,7 @@ SUBMITTED = (
     'type: "DECISION_RECORD"\r\n'
     'version: "1.4"\r\n'
     'status: "RATIFIED"\r\n'
+    'ratified_by: "human:operator"\r\n'
     'tier: "STRATEGIC"\r\n'
     'authored_at: "2026-10-29T00:00:00Z"\r\n'
     f"decision: {encode_yaml_scalar(CORE['DECISION'])}\r\n"
@@ -152,7 +153,8 @@ def test_yaml_record_round_trips_through_submit_governance_and_lookup_decision(
 
     # Read it back as a consumer would: clone the pushed branch, lookup_decision.
     clone = tmp_path / "clone"
-    _git(tmp_path, "clone", "-q", "--branch", branch, str(bare), str(clone))
+    _git(tmp_path, "clone", "-q", str(bare), str(clone))
+    _git(clone, "checkout", "-q", "--detach", f"origin/{branch}")
     looked_up = lookup_decision(str(clone), TOKEN)
     assert looked_up["ok"] is True, looked_up
     record = looked_up["record"]
