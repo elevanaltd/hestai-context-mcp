@@ -1080,8 +1080,8 @@ def _validate_yaml_impl(
         status=parsed["status"],
         tier=parsed["tier"],
         authored_at=parsed["authored_at"],
-        has_superseded_by="SUPERSEDED_BY" in fields,
-        human_adr_ref=fields["HUMAN_ADR_REF"].strip() if "HUMAN_ADR_REF" in fields else None,
+        has_superseded_by=bool(fields.get("SUPERSEDED_BY")),
+        human_adr_ref=fields.get("HUMAN_ADR_REF"),  # as written: the bytes persisted are unstripped
         has_ratified_by="RATIFIED_BY" in fields,
     )
     _check_common_invariants(working_dir, token, values, errors, warnings, "the front matter")
