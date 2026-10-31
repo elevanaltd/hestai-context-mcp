@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
+    collect_topic_blocks,
     diagnose_octave_record,
     list_items,
     parse_decision_record,
@@ -161,3 +162,35 @@ def test_a_four_space_sibling_is_the_same_depth_as_a_tab_opener() -> None:
     """A tab opener is 4 columns; a four-space ``KEY::`` line is NOT deeper, so it breaks the list."""
     text = _record("\tAFFECTS::[\n\t\tA,\n    SCOPE::PROD\n\t]\n")
     assert diagnose_octave_record(text) == {"line": _OPENS_AT, "construct": "unterminated_list"}
+
+
+# --- cubic round 1 (#239): block headers inside an open quote, and the tab rule -----------------
+
+
+@pytest.mark.parametrize("header", ["CURRENT:", "RULINGS:"])
+def test_a_block_header_line_inside_an_open_quoted_item_is_list_text(header: str) -> None:
+    middle = f'  NOTES::[\n    "first line\n{header}\n  R1::second",\n    B\n  ]\n  SCOPE::PROD\n'
+    text = _record(middle)
+    parsed = parse_decision_record(text)
+    assert parsed["fields"]["NOTES"] == f'["first line {header} R1::second",B]'
+    assert parsed["fields"]["SCOPE"] == "PROD"
+    assert diagnose_octave_record(text) is None
+    blocks = collect_topic_blocks(text)
+    assert blocks == {"current": [], "rulings": []}
+
+
+def test_a_real_block_after_such_a_list_is_still_a_block() -> None:
+    middle = '  NOTES::[\n    "a\nCURRENT:\nb"\n  ]\n' 'CURRENT:\n  R1::"a rule"\n'
+    blocks = collect_topic_blocks(_record(middle))
+    assert [e["rule"] for e in blocks["current"]] == ["a rule"]
+
+
+def test_a_block_header_outside_a_quote_still_breaks_the_list() -> None:
+    text = _record('  NOTES::[\n    "a",\nCURRENT:\n]\n')
+    assert diagnose_octave_record(text) == {"line": _OPENS_AT, "construct": "unterminated_list"}
+
+
+def test_tabs_count_as_four_literal_spaces_not_as_tab_stops() -> None:
+    """``" \t"`` is 1 + 4 = 5 columns: deeper than a four-space opener (a tab stop would say 4)."""
+    fields = _fields("    AFFECTS::[\n \tA::x,\n \tB\n    ]\n")
+    assert fields["AFFECTS"] == "[A::x,B]"
