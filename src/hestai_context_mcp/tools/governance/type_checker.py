@@ -659,6 +659,15 @@ def _check_core_key_placement(content: str, errors: list[str]) -> None:
             )
 
 
+def _list_reject_error(reject: YamlReject) -> str:
+    """The Gate A error for a malformed list (``unterminated_list`` / ``text_after_list``)."""
+    return (
+        f"List field is malformed at line {reject['line']}: {reject['construct']}. "
+        "A multi-line list must close with ] before the next field, with nothing "
+        "after the ] (ADR-RFC-ARCH-004 §1.1)."
+    )
+
+
 def _check_list_fields(raw_content: str, errors: list[str], warnings: list[str]) -> None:
     """Issue #224: a list that never closes is an ERROR; a multi-line EDGE list is a WARNING.
 
@@ -668,13 +677,7 @@ def _check_list_fields(raw_content: str, errors: list[str], warnings: list[str])
     with the line where the list opens. Reads the raw text so the line numbers match
     the file; regex-only.
     """
-    fields, reject = read_octave_fields(raw_content)
-    if reject is not None:
-        errors.append(
-            f"List field is malformed at line {reject['line']}: {reject['construct']}. "
-            "A multi-line list must close with ] before the next field, with nothing "
-            "after the ] (ADR-RFC-ARCH-004 §1.1)."
-        )
+    fields, _reject = read_octave_fields(raw_content)  # a reject is reported up front
     for entry in fields:
         if entry.wrapped and entry.key in EDGE_FIELDS:
             warnings.append(
@@ -904,6 +907,14 @@ def _validate_impl(
             "Content must begin with ===TYPE_NAME=== on the very first line."
         )
         return ValidationResult(valid=False, errors=errors)
+
+    # --- Check 1b (#224): a malformed list is reported BEFORE any field extraction, so an
+    # item such as ``TYPE::OTHER`` in an unterminated list can never become the record TYPE
+    # and end validation early with a different error.
+    if sentinel == _DECISION_RECORD_TYPE:
+        list_reject = read_octave_fields(raw_content)[1]
+        if list_reject is not None:
+            errors.append(_list_reject_error(list_reject))
 
     # --- Check 2: TYPE field extraction ---
     card_type = _extract_type(content)

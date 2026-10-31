@@ -54,7 +54,7 @@ Blank lines and ``//`` comments (a whole line, or after whitespace following an 
 inside the list are ignored. Inside the list, a line indented DEEPER than the opener is
 an item (a nested ``KEY::[`` / ``KEY::value`` item is the form ``octave_write`` writes
 for a nested list, ADR-004 v1.9) and is kept in the compact value, never read as a field
-of the record; indent is measured with tabs expanded to width 4. Regex and indent only,
+of the record; indent is measured with each tab counted as four spaces. Regex and indent only,
 no AST.
 
 Representation in ``fields`` (PROD I4): a wrapped list is stored as the COMPACT
@@ -203,6 +203,21 @@ def _text_lines(text: str, yaml: bool) -> list[str]:
     return lines
 
 
+class _ListState:
+    """Bracket depth and quote state of one open wrapped list, as ``annotate_lines`` sees it."""
+
+    def __init__(self, indent: int) -> None:
+        self.indent, self.depth, self.in_quote = indent, 1, False
+
+    def update(self, line: str) -> bool:
+        """Feed one list line; True once the list has closed."""
+        text = _strip_inline_comment(line, self.in_quote)
+        if not text.strip():
+            return False
+        self.depth, self.in_quote, close = _scan_brackets(text, self.depth, self.in_quote)
+        return close is not None
+
+
 def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
     """Yield ``(block_name | None, line)`` for every line of ``text``.
 
@@ -219,6 +234,7 @@ def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
     block: str | None = None
     header_indent = 0
     in_fence = False
+    open_list: _ListState | None = None
     for index, line in enumerate(_text_lines(text, yaml)):
         if yaml:
             if index == 0:
@@ -231,6 +247,16 @@ def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
             if not in_fence:
                 yield None, line
                 continue
+        if not yaml and open_list is not None:
+            # Inside an open wrapped list a line is list text, not a block header, when it
+            # sits inside an open quote or is indented deeper than the opener (the same rule
+            # as ``_is_list_break``); the reader and the block scan must agree on that.
+            if open_list.in_quote or _indent_of(line) > open_list.indent:
+                if open_list.update(line):
+                    open_list = None
+                yield None, line
+                continue
+            open_list = None  # a break: ``read_octave_fields`` reports it as unterminated
         header = header_re.match(line)
         if header:
             block = header.group(2).upper()
@@ -239,6 +265,10 @@ def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
             continue
         if block is not None and line.strip() and len(line) - len(line.lstrip()) <= header_indent:
             block = None
+        if not yaml and block is None:
+            field = _FIELD_LINE_RE.match(line)
+            if field and field.group(2).strip() == "[":
+                open_list = _ListState(_indent_of(line))
         yield (block if line.strip() else None), line
 
 
@@ -374,9 +404,9 @@ class _OpenList:
 
 
 def _indent_of(raw: str) -> int:
-    """Leading-whitespace width of ``raw`` with tabs expanded to width 4."""
-    expanded = raw.expandtabs(4)
-    return len(expanded) - len(expanded.lstrip())
+    """Leading-whitespace width of ``raw``: each tab counts as four spaces (not a tab stop)."""
+    lead = raw[: len(raw) - len(raw.lstrip())]
+    return len(lead.replace("\t", "    "))
 
 
 def _is_list_break(raw: str, in_quote: bool, opener_indent: int) -> bool:
