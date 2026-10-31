@@ -87,12 +87,19 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hestai_context_mcp.core.agent_readable_governance_parser import read_record
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    classify_record_text,
+    has_yaml_decision_header,
+    read_record,
+)
+from hestai_context_mcp.tools.governance.lexer import declares_token
 from hestai_context_mcp.tools.governance.manifest import write_manifest
+from hestai_context_mcp.tools.governance.topic_append import record_hash
 from hestai_context_mcp.tools.governance.type_checker import ValidationResult
 from hestai_context_mcp.tools.shared.github_auth import (
     resolve_github_token as _resolve_github_token,
@@ -161,6 +168,30 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
         return 1, "", "git command timed out"
     except (FileNotFoundError, OSError) as exc:
         return 1, "", str(exc)
+
+
+def _run_git_bytes(
+    args: list[str], cwd: Path, stdin: bytes | None = None
+) -> tuple[int, bytes, str]:
+    """Run a git command with optional stdin; stdout is returned as raw bytes.
+
+    Used where exact blob bytes matter (the append_ruling base read hashes
+    them): text mode would decode and translate newlines. Same failure mapping
+    as ``_run_git``: a timeout or OSError is a non-zero exit.
+    """
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            input=stdin,
+            capture_output=True,
+            timeout=_GIT_TIMEOUT,
+            cwd=str(cwd),
+        )
+        return result.returncode, result.stdout, result.stderr.decode("utf-8", "replace").strip()
+    except subprocess.TimeoutExpired:
+        return 1, b"", "git command timed out"
+    except (FileNotFoundError, OSError) as exc:
+        return 1, b"", str(exc)
 
 
 # The base ref every governance branch is cut from. The PR also targets ``main``
@@ -450,7 +481,7 @@ def _fetch_origin(working_dir: Path) -> str | None:
 
 
 def _list_remote_governance_candidates_for_slug(
-    working_dir: Path, slug: str
+    working_dir: Path, slug: str, *, include_append_branches: bool = False
 ) -> tuple[list[tuple[str, str]], str | None]:
     """List origin governance branches matching ``slug`` (ANY date prefix),
     EACH PAIRED WITH ITS OID, via ONE
@@ -470,6 +501,10 @@ def _list_remote_governance_candidates_for_slug(
     remote-tracking prefix. This is the ONE place a candidate branch's ref is
     ever resolved to an OID -- no candidate ref is read again by name
     anywhere downstream (acceptance criterion (c), READ-ONCE).
+
+    ``include_append_branches`` (issue #203 S2) also matches the append_ruling
+    branch shape ``governance/<date>-<slug>-r<n>``, so a pending append to a
+    topic record counts as that record being in flight.
     """
     code, out, stderr = _run_git(
         ["for-each-ref", "--format=%(refname:short) %(objectname)", _GOVERNANCE_REMOTE_REF_PREFIX],
@@ -482,7 +517,8 @@ def _list_remote_governance_candidates_for_slug(
 
     # Full-name anchored: governance/<8 digits>-<exact slug>, nothing else --
     # a longer slug that merely ENDS with this slug must not match.
-    pattern = re.compile(rf"^origin/governance/\d{{8}}-{re.escape(slug)}$")
+    suffix = r"(?:-r\d+)?" if include_append_branches else ""
+    pattern = re.compile(rf"^origin/governance/\d{{8}}-{re.escape(slug)}{suffix}$")
     matches: list[tuple[str, str]] = []
     for line in out.splitlines():
         line = line.strip()
@@ -638,8 +674,21 @@ def find_in_flight_branches(
 
     # target_path is guaranteed non-None here (candidates is non-empty, and
     # the boundary check above already rejected target_path=None in that
-    # case). main's blob is resolved ONCE, shared across every candidate.
+    # case).
     assert target_path is not None
+    return _classify_in_flight_candidates(working_dir, candidates, main_oid, target_path)
+
+
+def _classify_in_flight_candidates(
+    working_dir: Path, candidates: list[tuple[str, str]], main_oid: str, target_path: str
+) -> tuple[list[str], str | None]:
+    """Return the candidates that are NOT merged into ``main_oid`` (OIDs only).
+
+    Shared by ``find_in_flight_branches`` and ``find_in_flight_branches_at_oid``
+    (issue #203 S2): main's blob is resolved ONCE, then each candidate is
+    classified by ancestry and by the per-branch content-match signal. Same
+    exit-0 contract: any non-zero exit returns ``([], error)``.
+    """
     main_blob_oid, main_blob_err = _ls_tree_blob(working_dir, main_oid, target_path)
     if main_blob_err:
         return [], main_blob_err
@@ -780,6 +829,56 @@ def check_in_flight_token(
             "error": fetch_error,
         }
 
+    pr_urls, pr_lookup_error = (
+        _resolve_open_pr_urls(working_dir, branches, gh_token) if branches else ({}, None)
+    )
+    return {
+        "in_flight": bool(branches),
+        "branches": branches,
+        "pr_urls": pr_urls,
+        "pr_lookup_error": pr_lookup_error,
+        "error": None,
+    }
+
+
+def find_in_flight_branches_at_oid(
+    working_dir: Path, token: str, target_path: str, main_oid: str
+) -> tuple[list[str], str | None]:
+    """In-flight detection against an ALREADY-resolved ``main_oid`` (issue #203 S2).
+
+    The append_ruling path fetches and resolves ``origin/main`` exactly once
+    (``read_append_base``); this check reuses that OID, so it neither fetches
+    nor reads ``origin/main`` by name. Candidates are the token's creation
+    branches AND its append branches (``governance/<date>-<slug>-r<n>``); the
+    merged classification is ``find_in_flight_branches``' own, shared.
+    """
+    candidates, list_err = _list_remote_governance_candidates_for_slug(
+        working_dir, _token_to_slug(token), include_append_branches=True
+    )
+    if list_err:
+        return [], list_err
+    if not candidates:
+        return [], None
+    return _classify_in_flight_candidates(working_dir, candidates, main_oid, target_path)
+
+
+def check_in_flight_at_oid(
+    working_dir: Path,
+    token: str,
+    target_path: str,
+    main_oid: str,
+    gh_token: str | None = None,
+) -> dict[str, Any]:
+    """``check_in_flight_token``'s structured shape, evaluated at ``main_oid``."""
+    branches, error = find_in_flight_branches_at_oid(working_dir, token, target_path, main_oid)
+    if error:
+        return {
+            "in_flight": None,
+            "branches": [],
+            "pr_urls": {},
+            "pr_lookup_error": None,
+            "error": error,
+        }
     pr_urls, pr_lookup_error = (
         _resolve_open_pr_urls(working_dir, branches, gh_token) if branches else ({}, None)
     )
@@ -1043,6 +1142,16 @@ def _open_pr(
         "Closes/References: RFC #53\n"
     )
 
+    return _gh_pr_create(working_dir, title, body, gh_token)
+
+
+def _gh_pr_create(
+    working_dir: Path, title: str, body: str, gh_token: str | None
+) -> tuple[str | None, str | None]:
+    """Run ``gh pr create`` against the pinned ``main`` base (never caller-chosen).
+
+    Returns (pr_url, error_message). One of the two is always None.
+    """
     env = dict(os.environ)
     if gh_token:
         env["GH_TOKEN"] = gh_token
@@ -1443,3 +1552,340 @@ def run_linker(
         "error": error_str,
         "dry_run": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# append_ruling on merged topic records (issue #203 S2)
+#
+# The #173 slice-1 OID shape, applied to the append broker (ADR-RFC-ARCH-004
+# §3.5, narrowed): fetch ONCE, resolve ``origin/main`` to an OID ONCE, then
+# every read -- locating the record, reading its blob, the in-flight check, and
+# the worktree the branch is cut from -- takes that OID, never a ref name.
+# Every git call here is one whose valid answers all exit 0 (``fetch``,
+# ``rev-parse --verify <ref>^{commit}``, ``ls-tree -r -z <oid>``,
+# ``cat-file --batch``), so ANY non-zero exit means "undetermined" and the
+# read refuses. stderr content never decides a branch of the code.
+#
+# The linker only locates, reads and writes bytes: whether the record is a YAML
+# topic record, and the rendering, belong to ``topic_append`` (the caller).
+# ---------------------------------------------------------------------------
+
+_BASE_UNDETERMINED_PREFIX = "BASE_UNDETERMINED: "
+_DECISIONS_DIR = ".hestai/decisions"
+
+
+@dataclass(frozen=True)
+class AppendBase:
+    """The record as it stands at the ``origin/main`` OID.
+
+    On success ``error_code`` is None, ``data`` holds the blob's exact bytes and
+    ``from_record_hash`` their ``sha256:<hex>`` (ADR-RFC-ARCH-004 §1.1: the hash
+    of the whole file). On failure ``error_code`` names the refusal
+    (``BASE_UNDETERMINED``, ``TOKEN_NOT_FOUND_AT_MAIN``, ``TOKEN_AMBIGUOUS_AT_MAIN``)
+    and the record fields are None; ``main_oid`` is kept whenever it was resolved.
+    """
+
+    main_oid: str | None = None
+    path: str | None = None
+    data: bytes | None = None
+    from_record_hash: str | None = None
+    error_code: str | None = None
+    error: str | None = None
+
+
+def _undetermined(message: str, main_oid: str | None = None) -> AppendBase:
+    return AppendBase(
+        main_oid=main_oid,
+        error_code="BASE_UNDETERMINED",
+        error=f"{_BASE_UNDETERMINED_PREFIX}{message}",
+    )
+
+
+def _list_decision_blobs(working_dir: Path, oid: str) -> tuple[list[tuple[str, str]], str | None]:
+    """``(blob_oid, path)`` for every ``*.md`` (``.oct.md`` included) under the
+    decisions dir at ``oid``; which of them are records is decided on content."""
+    code, out, stderr = _run_git_bytes(
+        ["ls-tree", "-r", "-z", oid, "--", _DECISIONS_DIR], working_dir
+    )
+    if code != 0:
+        return [], f"git ls-tree -r -z {oid} -- {_DECISIONS_DIR} failed (exit {code}): {stderr}"
+    blobs: list[tuple[str, str]] = []
+    for raw in out.split(b"\0"):
+        if not raw:
+            continue
+        meta, _, path_bytes = raw.partition(b"\t")
+        parts = meta.split()
+        if len(parts) != 3 or not path_bytes:
+            return [], f"git ls-tree -r -z {oid} produced an unparseable entry: {raw!r}"
+        path = path_bytes.decode("utf-8", "replace")
+        if parts[1] == b"blob" and path.endswith(".md"):
+            blobs.append((parts[2].decode("ascii", "replace"), path))
+    return blobs, None
+
+
+def _read_blobs(working_dir: Path, blob_oids: list[str]) -> tuple[list[bytes], str | None]:
+    """Read every blob in ONE ``git cat-file --batch`` call, as exact bytes."""
+    if not blob_oids:
+        return [], None
+    stdin = "".join(f"{oid}\n" for oid in blob_oids).encode("ascii")
+    code, out, stderr = _run_git_bytes(["cat-file", "--batch"], working_dir, stdin)
+    if code != 0:
+        return [], f"git cat-file --batch failed (exit {code}): {stderr}"
+    contents: list[bytes] = []
+    pos = 0
+    for oid in blob_oids:
+        eol = out.find(b"\n", pos)
+        if eol < 0:
+            return [], f"git cat-file --batch output ended before blob {oid}"
+        header = out[pos:eol].split()
+        if len(header) != 3 or header[1] != b"blob" or not header[2].isdigit():
+            return [], f"git cat-file --batch could not read blob {oid}: {out[pos:eol]!r}"
+        size = int(header[2])
+        start = eol + 1
+        if len(out) < start + size:
+            return [], f"git cat-file --batch output truncated for blob {oid}"
+        contents.append(out[start : start + size])
+        pos = start + size + 1  # skip the LF that terminates each object
+    return contents, None
+
+
+def _declares_at_main(path: str, data: bytes, token: str) -> bool:
+    """True iff the blob at ``path`` is a record that declares ``token`` (strict pairing).
+
+    Mirrors the readers (ADR-RFC-ARCH-004 §1.1): a ``.oct.md`` is read only as OCTAVE
+    (YAML front matter in one is not a record) and any other ``.md`` only as a YAML
+    record carrying the ``type:`` DECISION_RECORD header, so READMEs and ADR prose
+    never count. A YAML record that does not parse is still located by its ``token:``
+    line, so the caller can refuse it loudly instead of reporting it missing.
+    """
+    record = classify_record_text(data)
+    if path.endswith(".oct.md"):
+        return record.syntax == "octave" and declares_token(record.text, token)
+    return (
+        record.syntax == "yaml"
+        and has_yaml_decision_header(record.text)
+        and declares_token(record.text, token)
+    )
+
+
+def read_append_base(working_dir: Path, token: str) -> AppendBase:
+    """Fetch, resolve ``origin/main`` ONCE, and read ``token``'s record at that OID.
+
+    The record is located by its TOP-LEVEL TOKEN declaration among the decision
+    blobs in the main tree -- never the caller's local tree -- with the readers'
+    strict extension pairing (``_declares_at_main``), and its blob bytes are
+    hashed for the ADR-RFC-ARCH-004 §1.1/§3.5 CAS.
+    """
+    fetch_err = _fetch_origin(working_dir)
+    if fetch_err:
+        return _undetermined(fetch_err.removeprefix(_IN_FLIGHT_UNDETERMINED_PREFIX))
+    main_oid, oid_err = _resolve_oid(working_dir, _BASE_REF)
+    if oid_err or main_oid is None:
+        return _undetermined((oid_err or "").removeprefix(_IN_FLIGHT_UNDETERMINED_PREFIX))
+
+    blobs, list_err = _list_decision_blobs(working_dir, main_oid)
+    if list_err:
+        return _undetermined(list_err, main_oid)
+    contents, read_err = _read_blobs(working_dir, [blob for blob, _ in blobs])
+    if read_err:
+        return _undetermined(read_err, main_oid)
+
+    matches = [
+        (path, data)
+        for (_, path), data in zip(blobs, contents, strict=True)
+        if _declares_at_main(path, data, token)
+    ]
+    if not matches:
+        return AppendBase(
+            main_oid=main_oid,
+            error_code="TOKEN_NOT_FOUND_AT_MAIN",
+            error=(
+                f"TOKEN '{token}' is not declared by any record under {_DECISIONS_DIR} "
+                f"at origin/main ({main_oid}); append_ruling amends merged records only."
+            ),
+        )
+    if len(matches) > 1:
+        return AppendBase(
+            main_oid=main_oid,
+            error_code="TOKEN_AMBIGUOUS_AT_MAIN",
+            error=(
+                f"TOKEN '{token}' is declared by {len(matches)} records at origin/main "
+                f"({', '.join(path for path, _ in matches)}); refusing to guess which to amend."
+            ),
+        )
+    path, data = matches[0]
+    return AppendBase(main_oid=main_oid, path=path, data=data, from_record_hash=record_hash(data))
+
+
+def compute_append_branch_name(token: str, first_new_n: int) -> str:
+    """``governance/<UTC-date>-<token-slug>-r<first-new-n>`` (issue #203 S2)."""
+    date_str = datetime.now(UTC).strftime("%Y%m%d")
+    return f"governance/{date_str}-{_token_to_slug(token)}-r{first_new_n}"
+
+
+def build_append_pr_body(
+    *,
+    token: str,
+    pairs: list[dict[str, str]],
+    replaced_ids: list[str],
+    from_record_hash: str,
+    to_record_hash: str,
+    base_oid: str,
+) -> str:
+    """PR body for an append: each RULE plus its VERBATIM quoted line by line."""
+    lines = [
+        "## Governance append -- append_ruling (#203 S2)",
+        "",
+        f"- **Token**: `{token}`",
+        f"- **Base**: origin/main @ `{base_oid}`",
+        f"- **from_record_hash**: `{from_record_hash}`",
+        f"- **to_record_hash**: `{to_record_hash}`",
+        f"- **Appended**: {', '.join(p['id'] for p in pairs)}",
+        f"- **Replaced**: {', '.join(replaced_ids) if replaced_ids else 'none'}",
+        "",
+    ]
+    for pair in pairs:
+        lines += [f"### {pair['id']}", "", f"**RULE**: {pair['rule']}", "", "**VERBATIM**:", ""]
+        lines += [f"> {ln}" if ln else ">" for ln in pair["verbatim"].splitlines() or [""]]
+        lines.append("")
+    lines += [
+        "Rendered deterministically through the canonical YAML emitter (the content-mode "
+        "write path): no LLM, no compiler, and each VERBATIM reads back byte-exact. "
+        "In-flight append is slice S3; the merge-time staleness recheck is slice S4.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _create_worktree_at_oid(
+    working_dir: Path, branch_name: str, oid: str
+) -> tuple[Path | None, str | None]:
+    """Throwaway worktree on a fresh ``branch_name`` cut from ``oid`` (no fetch).
+
+    Unlike ``_create_worktree`` this neither fetches nor names ``origin/main``:
+    the append was rendered against ``oid``, so the branch must start there
+    even if the remote-tracking ref has since moved.
+    """
+    parent = Path(tempfile.mkdtemp(prefix="hestai-governance-"))
+    worktree_path = parent / "worktree"
+    code, _, stderr = _run_git(
+        ["worktree", "add", "-b", branch_name, str(worktree_path), oid], working_dir
+    )
+    if code != 0:
+        shutil.rmtree(parent, ignore_errors=True)
+        return None, f"Failed to create governance worktree for '{branch_name}': {stderr}"
+    return worktree_path, None
+
+
+def _read_back_error(written: Path, target_path: str) -> str | None:
+    """Re-read the written file as RAW bytes; an error unless the reader accepts it.
+
+    The same read-back ``run_linker`` applies to a YAML target (EPIC4 PR-5), so an
+    append can never commit a record the reader would reject.
+    """
+    try:
+        record = read_record(written)
+    except OSError as exc:
+        return f"read-back of {target_path} failed: {exc}"
+    if record.syntax == "yaml" and record.diagnostic is None:
+        return None
+    reject = record.diagnostic
+    detail = f"line {reject['line']}: {reject['construct']}" if reject else "not a YAML record"
+    return f"read-back of {target_path} rejected by the reader ({detail})"
+
+
+def _open_append_pr(
+    working_dir: Path, title: str, body: str, gh_token: str | None
+) -> tuple[str | None, str | None]:
+    """Open the append PR against the pinned ``main`` base."""
+    return _gh_pr_create(working_dir, title, body, gh_token)
+
+
+def run_append_linker(
+    working_dir: Path,
+    *,
+    token: str,
+    target_path: str,
+    main_oid: str,
+    record_text: str,
+    branch_name: str,
+    appended_ids: list[str],
+    pr_body: str,
+    gh_token: str | None = None,
+) -> dict[str, Any]:
+    """Commit ``record_text`` at ``target_path`` on a branch cut from ``main_oid``; open one PR.
+
+    Mirrors ``run_linker``'s hermetic worktree discipline: the operator's tree
+    and HEAD are never touched, the worktree is always removed, and a branch
+    that never reached origin is rolled back. MANIFEST is not rewritten (the
+    TOKEN already exists). Returns ``{token, target_path, branch, pr_url,
+    head_sha, error}``; ``branch`` is non-None only once the push succeeded.
+    """
+    result: dict[str, Any] = {
+        "token": token,
+        "target_path": target_path,
+        "branch": None,
+        "pr_url": None,
+        "head_sha": None,
+        "error": None,
+    }
+    try:
+        rel = (working_dir / target_path).resolve().relative_to(working_dir.resolve())
+    except (ValueError, RuntimeError, OSError):
+        rel = None
+    if rel is None or Path(target_path).is_absolute():
+        result["error"] = (
+            f"target_path {target_path} is outside working_dir {working_dir} "
+            "-- path traversal rejected"
+        )
+        return result
+
+    worktree_path, err = _create_worktree_at_oid(working_dir, branch_name, main_oid)
+    if err:
+        result["error"] = err
+        return result
+    assert worktree_path is not None
+    _link_caller_venv_into_worktree(working_dir, worktree_path)
+
+    pushed_ok = False
+    try:
+        target_in_wt = worktree_path / rel
+        try:
+            target_in_wt.write_bytes(record_text.encode("utf-8"))
+        except OSError as exc:
+            result["error"] = f"Failed to write {target_in_wt}: {exc}"
+            return result
+        err = _read_back_error(target_in_wt, target_path)
+        if err:
+            result["error"] = err
+            return result
+
+        commit_message = f"chore(governance): append ruling(s) {', '.join(appended_ids)} to {token}"
+        err = _git_add_and_commit(
+            worktree_path,
+            target_in_wt,
+            worktree_path / ".hestai" / "MANIFEST.md",
+            commit_message,
+        )
+        if err:
+            result["error"] = err
+            return result
+        result["head_sha"], _ = _resolve_oid(worktree_path, "HEAD")
+
+        err = _push_branch(worktree_path, branch_name)
+        if err:
+            result["error"] = err
+            return result
+        pushed_ok = True
+        result["branch"] = branch_name
+
+        pr_url, pr_err = _open_append_pr(
+            worktree_path, f"feat(governance): append ruling(s) to {token}", pr_body, gh_token
+        )
+        result["pr_url"] = pr_url
+        result["error"] = pr_err
+        return result
+    finally:
+        _remove_worktree(working_dir, worktree_path)
+        if not pushed_ok:
+            _delete_branch(working_dir, branch_name)
