@@ -49,8 +49,8 @@ ONE grammar serves every list field, edge fields (``SUPERSEDES``, ``SUPERSEDED_B
 ``KEY::[`` (the value is ``[`` after trimming; what ``octave_write`` emits) opens list
 mode and runs until the bracket that closes it, counting brackets outside
 double-quoted strings. Any other value that starts ``[`` without closing it on its line
-(``NOTE::[see below``, ``KEY::[A,``) is read as a single line, exactly as before #224. Blank lines and ``//`` comment lines inside the list are
-ignored. Regex and indent only, no AST.
+(``NOTE::[see below``, ``KEY::[A,``) is read as a single line, exactly as before #224. Blank lines and ``//`` comments (a whole line, or after whitespace
+following an item) inside the list are ignored. Regex and indent only, no AST.
 
 Representation in ``fields`` (PROD I4): a wrapped list is stored as the COMPACT
 single-line form ``[A,B]``: every item trimmed (its own quotes kept, so an item with a
@@ -291,6 +291,27 @@ def _scan_brackets(text: str, depth: int, in_quote: bool) -> tuple[int, bool, in
     return depth, in_quote, None
 
 
+def _strip_inline_comment(line: str, in_quote: bool) -> str:
+    """``line`` without a ``//`` comment (outside quotes, at line start or after whitespace).
+
+    ``https://x`` is not a comment: the ``//`` must open the line or follow whitespace.
+    """
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if in_quote:
+            if char == "\\":
+                i += 1
+            elif char == '"':
+                in_quote = False
+        elif char == '"':
+            in_quote = True
+        elif line.startswith("//", i) and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+        i += 1
+    return line
+
+
 def _split_list_items(inner: str) -> list[str]:
     """Split the text between a list's outer brackets on commas outside quotes/brackets.
 
@@ -344,10 +365,10 @@ class _OpenList:
 
 def _is_list_break(raw: str, in_quote: bool) -> bool:
     """True if ``raw`` (a line met while a list is open) can only start something new."""
-    if raw.lstrip().startswith("==="):
-        return True
     if in_quote:
         return False
+    if raw.lstrip().startswith("==="):
+        return True
     return bool(_FIELD_LINE_RE.match(raw) or _BLOCK_HEADER_RE.match(raw))
 
 
@@ -365,19 +386,19 @@ def read_octave_fields(text: str) -> tuple[list[OctaveField], YamlReject | None]
         if pending is not None:
             if block is not None or _is_list_break(raw, pending.in_quote):
                 return fields, {"line": pending.line, "construct": "unterminated_list"}
-            body = raw.strip()
-            if not body or (body.startswith("//") and not pending.in_quote):
+            line = _strip_inline_comment(raw, pending.in_quote)
+            body = line.strip()
+            if not body:
                 continue
             pending.depth, pending.in_quote, close = _scan_brackets(
-                raw, pending.depth, pending.in_quote
+                line, pending.depth, pending.in_quote
             )
             if close is None:
                 pending.parts.append(body)
                 continue
-            tail = raw[close + 1 :].strip()
-            if tail and not tail.startswith("//"):
+            if line[close + 1 :].strip():
                 return fields, {"line": pending.line, "construct": "text_after_list"}
-            pending.parts.append(raw[: close + 1].strip())
+            pending.parts.append(line[: close + 1].strip())
             joined = "\n".join(pending.parts)
             items = _split_list_items(joined[joined.index("[") + 1 : joined.rindex("]")])
             fields.append(OctaveField(pending.key, "[" + ",".join(items) + "]", pending.line, True))
