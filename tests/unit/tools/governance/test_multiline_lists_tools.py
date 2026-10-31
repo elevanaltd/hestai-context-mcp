@@ -12,7 +12,10 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+import pytest
 
 from hestai_context_mcp.tools.governance.type_checker import validate_octave_content
 from hestai_context_mcp.tools.list_decisions import list_decisions
@@ -21,6 +24,8 @@ from hestai_context_mcp.tools.trace_supersedure import trace_supersedure
 
 from ._agr_fixtures import TOKEN_NEW, TOKEN_OLD, write_record, write_yaml_record
 
+_ABSENT = "HO-ESCAPES-20261029"
+_OTHER = "HO-CUBIC-T-20260301"
 _WRAPPED_SUCCESSOR = [f"  SUPERSEDED_BY::[\n    {TOKEN_NEW}\n  ]"]
 _UNTERMINATED = ["  AFFECTS::[", "    A,", "    B", "  SCOPE::PROD"]
 
@@ -69,13 +74,13 @@ def test_wrapped_and_single_line_edges_give_identical_chains(tmp_path: Path) -> 
 
 def test_two_wrapped_successors_are_a_fork_not_a_pick(tmp_path: Path) -> None:
     write_record(tmp_path, token=TOKEN_NEW, authored_at="2026-03-01T00:00:00Z")
-    write_record(tmp_path, token="HO-CUBIC-T-20260301", authored_at="2026-03-01T00:00:00Z")
+    write_record(tmp_path, token=_OTHER, authored_at="2026-03-01T00:00:00Z")
     write_record(
         tmp_path,
         token=TOKEN_OLD,
         status="SUPERSEDED",
         authored_at="2026-01-01T00:00:00Z",
-        extra_lines=["  SUPERSEDED_BY::[", f"    {TOKEN_NEW},", "    HO-CUBIC-T-20260301", "  ]"],
+        extra_lines=["  SUPERSEDED_BY::[", f"    {TOKEN_NEW},", f"    {_OTHER}", "  ]"],
     )
     result = trace_supersedure(str(tmp_path), TOKEN_OLD)
     assert result["ok"] is False
@@ -203,7 +208,7 @@ def test_single_line_one_item_superseded_by_resolves_to_its_token(tmp_path: Path
 
 
 def test_single_line_two_item_superseded_by_is_a_fork(tmp_path: Path) -> None:
-    other = "HO-CUBIC-T-20260301"
+    other = _OTHER
     write_record(tmp_path, token=TOKEN_NEW, authored_at="2026-03-01T00:00:00Z")
     write_record(tmp_path, token=other, authored_at="2026-03-01T00:00:00Z")
     write_record(
@@ -296,9 +301,6 @@ def test_gate_a_reports_only_the_list_error_for_an_unterminated_superseded_by(
 
 
 # --- #229 rework round 1 (cubic) -------------------------------------------------------------
-
-_ABSENT = "HO-ESCAPES-20261029"
-_OTHER = "HO-CUBIC-T-20260301"
 
 
 def _superseded_record(body: str) -> str:
@@ -411,3 +413,30 @@ def test_gate_a_accepts_duplicate_superseded_by_items_as_one(tmp_path: Path) -> 
 # The reader still reports a fork on read for a record that arrived other than through
 # Gate A: see test_two_wrapped_successors_are_a_fork_not_a_pick and
 # test_single_line_two_item_superseded_by_is_a_fork above.
+
+
+# --- M1 (cubic P2): an unclosed single-line value keeps its pre-#229 Gate A behaviour -------------
+
+# Frozen copy of the pre-#229 SUPERSEDED_BY extractor (main 4dcd3f0a): the oracle.
+_LEGACY_SUPERSEDED_BY_RE = re.compile(r'(?m)^\s*SUPERSEDED_BY::(?:"([^"]+)"|([^"\s]+))\s*$')
+
+
+@pytest.mark.parametrize("status", ["SUPERSEDED", "PROPOSED"])
+@pytest.mark.parametrize("value", ["[A, B", "[A,B", "[A, B] trailing", "[A,B] trailing"])
+def test_gate_a_treats_unclosed_or_trailing_bracket_values_as_before(
+    tmp_path: Path, status: str, value: str
+) -> None:
+    line = f"  SUPERSEDED_BY::{value}\n"
+    match = _LEGACY_SUPERSEDED_BY_RE.search(line)
+    legacy_present = match is not None
+    legacy_target = (match.group(1) or match.group(2)) if match else None
+    content = _GATE_A_HEAD.replace("STATUS::PROPOSED", f"STATUS::{status}") + line + "===END===\n"
+    result = validate_octave_content(tmp_path, content)
+    errors = " | ".join(result.errors)
+    assert ("SUPERSEDED_BY is absent" in errors) == (status == "SUPERSEDED" and not legacy_present)
+    assert ("SUPERSEDED_BY is present but" in errors) == (status != "SUPERSEDED" and legacy_present)
+    if legacy_target is not None:
+        assert f"target '{legacy_target}' not found" in errors
+    else:
+        assert "target" not in errors
+    assert "empty list" not in errors and "distinct" not in errors
