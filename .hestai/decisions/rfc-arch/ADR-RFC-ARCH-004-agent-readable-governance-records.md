@@ -105,7 +105,7 @@ because: "<…>"
 | `STATUS` | enum | One of `PROPOSED`, `RATIFIED`, `SUPERSEDED`, `VOID` (see §1.4) |
 | `TIER` | enum | One of `STRATEGIC`, `TACTICAL`, `OPERATIONAL`. Semantic gravity per the cited research brief. |
 | `DECISION` | string | One-sentence statement of what is binding. Mandatory even on `PROPOSED`. **v1.1 flat-line form**: a single double-quoted flat line. §4.1 #13 **machine-enforces** AT MOST 40 words and NO embedded newline (per HO-AGR-BYTECODE-FORMAT-TWO-BIRDS-20260620). **v1.8 plain words** (per HO-AGR-PLAIN-WORDS-REASONING-20261031): write relations in plain words, never arrows or symbols; this is authoring guidance, not machine-checked. Nested custom keys are excluded by the flat-string grammar (the structural parse), not by #13. |
-| `BECAUSE` | string | One-sentence rationale. Mandatory even on `PROPOSED`. **v1.1 flat-line form**: same as `DECISION` — §4.1 #13 machine-enforces ≤40 words + no-newline; relations in plain words, never arrows or symbols, is authoring guidance (v1.8), not enforced. |
+| `BECAUSE` | string | One-sentence rationale. Mandatory even on `PROPOSED`. **v1.1 flat-line form**: same as `DECISION` — §4.1 #13 machine-enforces ≤40 words + no-newline; the plain-words rule (relations in words, never arrows or symbols) is authoring guidance (v1.8), not enforced. |
 | `AUTHORED_AT` | ISO-8601 timestamp | UTC. Set once at record creation; never edited. |
 
 #### Optional (any record, any lifecycle state)
