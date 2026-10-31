@@ -17,7 +17,7 @@ META:
   DECISION::"ADR-RFC-ARCH-004 moves from version 1.7 to 1.8 in place: DECISION and BECAUSE write relations in plain words, never arrows or symbols, replacing the operator recommendation; the forty-word, one-line limits stay and Gate A does not reject symbols."
   BECAUSE::"The operator ratified the plain-words rule for records and ordered the follow-up that brings the ADR into line; the density limits alone keep reasoning short, so no new machine check is needed."
   AUTHORITY::"HO-AGR-PLAIN-WORDS-REASONING-20261031 (RATIFIED by the operator; its FOLLOW_UP); the HW-PROGRAMME split ruling, option c, under HW-PROGRAMME-WEEKEND-AUTHORITY-20261031; the HC control room concurrence under HO-HC-WEEKEND-DELEGATION-20261031"
-  SCOPE::"ADR-RFC-ARCH-004 v1.7 to v1.8 in-place amendment (PR #235): section 1.2 DECISION and BECAUSE rows, section 1.5 v1.1 paragraph plus the new v1.8 paragraph and the version, section 4.1 #13 wording. Gate A does not machine-reject symbols, and existing records are not rewritten. Ordering note: ordered after S2 (#234/#231), which takes v1.7. Deliberate extension, checked in intake_context.py at origin/ho-records-followup: the prose-mode _COMPRESSION_CONTRACT now applies the plain-words rule to all four reasoning fields, DECISION, BECAUSE, RATIONALE and WHY, while the forty-word, no-newline limit is stated only for DECISION and BECAUSE. The ADR text names only DECISION and BECAUSE, so applying plain words to RATIONALE and WHY in prose-mode authoring is a deliberate extension of the ratified rule, not an ADR requirement"
+  SCOPE::"ADR-RFC-ARCH-004 v1.7 to v1.8 in-place amendment (PR #235): section 1.2 DECISION and BECAUSE rows, section 1.5 v1.1 paragraph plus the new v1.8 paragraph and the version, section 4.1 #13 wording. Gate A does not machine-reject symbols, and existing records are not rewritten. Ordering note: ordered after S2 (#234/#231), which takes v1.7. The intake compression contract applies plain words to the same four reasoning fields its old operator clause covered (DECISION, BECAUSE, RATIONALE, WHY), a deliberate like-for-like extension to RATIONALE and WHY; the Gate A guidance and the ADR rows change for DECISION and BECAUSE only. Checked in intake_context.py and type_checker.py at origin/ho-records-followup: the old operator clause and the new plain-words clause sit in the same sentence naming all four fields, and the forty-word, no-newline limit is stated only for DECISION and BECAUSE"
   AMENDED_ARTEFACTS::"(1) .hestai/decisions/rfc-arch/ADR-RFC-ARCH-004-agent-readable-governance-records.md v1.7 to v1.8 in place (PR #235); TOKEN-less, so no AMENDS edge per ADR-RFC-ARCH-004 section 1.6. (2) .hestai/decisions/HO-RECORDS-YAML-DEFAULT-20261031.oct.md, SEQUENCING and RE_REVIEW_TRIGGER corrected in place on the same branch, because the cited #195 guard did not exist yet"
   RELATED_DECISIONS::[
     HO-AGR-PLAIN-WORDS-REASONING-20261031,
@@ -30,7 +30,7 @@ META:
     "DECISION and BECAUSE authoring",
     "prose-mode _COMPRESSION_CONTRACT",
     "ADR-RFC-ARCH-004 sections 1.2, 1.5, 4.1",
-    "HO-RECORDS-YAML-DEFAULT-20261031",
+    HO-RECORDS-YAML-DEFAULT-20261031,
     "hestai-context-mcp#235"
   ]
 ===END===
