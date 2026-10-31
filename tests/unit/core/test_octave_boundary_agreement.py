@@ -65,7 +65,7 @@ _LAYOUTS = [
     ),
     (
         "meta-list-col0-comment-then-quoted-header",
-        '  NOTES::[\n// c\n    "x\nRULINGS:\n  R1:\n    RULE::"phantom",\n    B\n  ]\n',
+        '  NOTES::[\n// c\n    "x\nRULINGS:\n  R1:\n    RULE::phantom",\n    B\n  ]\n',
         [],
         [],
     ),
@@ -78,7 +78,7 @@ _LAYOUTS = [
     ),
     (
         "current-list-quoted-rulings-header",
-        'CURRENT:\n  R1::"real"\n  NOTES::[\n    "x\nRULINGS:\n  R2:\n    RULE::"phantom",\n  ]\n',
+        'CURRENT:\n  R1::"real"\n  NOTES::[\n    "x\nRULINGS:\n  R2:\n    RULE::phantom",\n  ]\n',
         ["real"],
         [],
     ),
@@ -181,3 +181,111 @@ def test_gate_a_accepts_every_layout_without_phantom_errors(
 ) -> None:
     result = validate_octave_content(tmp_path, _text(body))
     assert result.valid, (name, result.errors)
+
+
+# --- the combinatorial corpus: context x gap line x header-shaped line inside a quote ----------
+
+_GAPS = {
+    "none": "",
+    "blank": "\n",
+    "spaces": "   \n",
+    "comment-col0": "// c\n",
+    "comment-deep": "      // c\n",
+    "crlf-blank": "\r\n",
+}
+_HEADERS = {
+    "current": "CURRENT:",
+    "rulings": "RULINGS:",
+    "envelope": "===END===",
+    "indented-header": "  CURRENT:",
+    "key-value": "NOTE::val",
+}
+_CONTEXTS = {
+    "meta": (
+        '  NOTES::[\n    A,\n{gap}    "x\n{hdr}\n  R9::p",\n    B\n  ]\n',
+        [],
+        [],
+    ),
+    "rulings": (
+        'RULINGS:\n  R1:\n    RULE::"real"\n    NOTES::[\n      A,\n{gap}      "x\n{hdr}\n'
+        '  R9::p",\n      B\n    ]\n',
+        [],
+        ["R1"],
+    ),
+    "current": (
+        'CURRENT:\n  R1::"real"\n  NOTES::[\n    A,\n{gap}    "x\n{hdr}\n  R9::p",\n    B\n  ]\n',
+        ["real"],
+        [],
+    ),
+}
+_COMBOS = [(ctx, gap, hdr) for ctx in _CONTEXTS for gap in _GAPS for hdr in _HEADERS]
+
+
+def _combo_text(ctx: str, gap: str, hdr: str) -> str:
+    template, _, _ = _CONTEXTS[ctx]
+    return _text(template.format(gap=_GAPS[gap], hdr=_HEADERS[hdr]))
+
+
+@pytest.mark.parametrize(("ctx", "gap", "hdr"), _COMBOS)
+def test_every_consumer_agrees_on_the_combinatorial_corpus(
+    tmp_path: Path, ctx: str, gap: str, hdr: str
+) -> None:
+    text = _combo_text(ctx, gap, hdr)
+    _, current, rulings = _CONTEXTS[ctx]
+    # collect_topic_blocks: only the real entries.
+    blocks = collect_topic_blocks(text)
+    assert [e["rule"] for e in blocks["current"]] == current
+    assert [e["id"] for e in blocks["rulings"]] == rulings
+    # exactly one wrapped list, every interior line inherits the opener's block.
+    spans = wrapped_list_spans(text)
+    assert len(spans) == 1, spans
+    annotated = list(annotate_lines(text))
+    opener, closer = spans[0]
+    for number in range(opener + 1, closer + 1):
+        assert annotated[number - 1][0] in (None, annotated[opener - 1][0])
+    # the META scan, the collapsed view and Gate A's interior set agree with the spans.
+    in_meta = annotated[opener - 1][0] is None
+    scanned = [(f.line, f.end_line) for f in read_octave_fields(text)[0] if f.wrapped]
+    assert scanned == (spans if in_meta else [])
+    removed = (closer - opener) if in_meta else 0
+    assert len(collapse_wrapped_lists(text).splitlines()) == len(text.splitlines()) - removed
+    assert _list_interior_lines(text) == set(range(opener + 1, closer + 1))
+    # Gate A and the reader read one record.
+    assert validate_octave_content(tmp_path, text).valid
+
+
+# --- malformed lists: every consumer agrees on the rejection ----------------------------------
+
+_BAD = [
+    # (id, body, construct)
+    (
+        "col0-header-outside-quote",
+        '  NOTES::[\n    "a",\nCURRENT:\n  R1::"b"\n  ]\n',
+        "unterminated_list",
+    ),
+    ("envelope-outside-quote", "  NOTES::[\n    A,\n===END===\n", "unterminated_list"),
+    ("sibling-at-opener-indent", "  NOTES::[\n    A,\n  SCOPE::PROD\n  ]\n", "unterminated_list"),
+    ("text-after-bracket", "  NOTES::[\n    A\n  ] stray\n", "text_after_list"),
+    ("eof-unterminated", "  NOTES::[\n    A,\n", "unterminated_list"),
+]
+
+
+@pytest.mark.parametrize(("name", "body", "construct"), _BAD, ids=[b[0] for b in _BAD])
+def test_a_malformed_list_is_rejected_the_same_way_by_every_consumer(
+    tmp_path: Path, name: str, body: str, construct: str
+) -> None:
+    text = _HEAD + body + ("" if "===END===" in body else _END)
+    reject = read_octave_fields(text)[1]
+    assert reject is not None and reject["construct"] == construct
+    assert wrapped_list_spans(text) == []
+    result = validate_octave_content(tmp_path, text)
+    assert result.valid is False
+    assert construct in result.errors[0]
+
+
+def test_a_non_exact_opener_never_starts_list_mode_in_any_consumer(tmp_path: Path) -> None:
+    """``KEY::[A,`` keeps its single-line read, so the header after it is a real header."""
+    text = _text('  NOTES::[A,\nCURRENT:\n  R1::"real"\n')
+    assert wrapped_list_spans(text) == []
+    assert [e["rule"] for e in collect_topic_blocks(text)["current"]] == ["real"]
+    assert read_octave_fields(text)[1] is None

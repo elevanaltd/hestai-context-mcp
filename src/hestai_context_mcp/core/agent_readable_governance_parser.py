@@ -101,6 +101,7 @@ in a block) yields the empty (unparseable) record, never a half-read one;
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import re
 from collections.abc import Iterator, Mapping
@@ -240,37 +241,28 @@ def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
     syntaxes: OCTAVE uses the uppercase ``CURRENT:`` / ``RULINGS:`` headers over
     the whole text; a YAML front-matter record (first line ``---``) uses the
     lowercase headers INSIDE its fences only, so the markdown body can never open
-    a block. OCTAVE behaviour is unchanged.
+    a block. An OCTAVE record is annotated by :func:`_walk_octave`, the one pass
+    that also decides every wrapped-list span, so a list interior is never a block
+    header, anywhere.
     """
-    yaml = is_yaml_front_matter(text)
-    header_re = _YAML_BLOCK_HEADER_RE if yaml else _BLOCK_HEADER_RE
+    if not is_yaml_front_matter(text):
+        yield from _walk_octave(text)[0]
+        return
     block: str | None = None
     header_indent = 0
     in_fence = False
-    open_list: _ListState | None = None
-    for index, line in enumerate(_text_lines(text, yaml)):
-        if yaml:
-            if index == 0:
-                in_fence = True
-                yield None, line
-                continue
-            if in_fence and _is_fence_line(line):
-                in_fence = False
-                block = None
-            if not in_fence:
-                yield None, line
-                continue
-        if not yaml and open_list is not None:
-            # Inside an open wrapped list a line is list text, not a block header, unless
-            # the shared rule says it breaks the list (``_ListState.is_break``): blank lines,
-            # comments, items and anything inside an open quote never do.
-            if not open_list.is_break(line):
-                if open_list.feed(line)[1] is not None:
-                    open_list = None
-                yield None, line
-                continue
-            open_list = None  # a break: ``read_octave_fields`` reports it as unterminated
-        header = header_re.match(line)
+    for index, line in enumerate(_text_lines(text, True)):
+        if index == 0:
+            in_fence = True
+            yield None, line
+            continue
+        if in_fence and _is_fence_line(line):
+            in_fence = False
+            block = None
+        if not in_fence:
+            yield None, line
+            continue
+        header = _YAML_BLOCK_HEADER_RE.match(line)
         if header:
             block = header.group(2).upper()
             header_indent = len(header.group(1))
@@ -278,10 +270,6 @@ def annotate_lines(text: str) -> Iterator[tuple[str | None, str]]:
             continue
         if block is not None and line.strip() and len(line) - len(line.lstrip()) <= header_indent:
             block = None
-        if not yaml and block is None:
-            field = _FIELD_LINE_RE.match(line)
-            if field and field.group(2).strip() == "[":
-                open_list = _ListState(_indent_of(line))
         yield (block if line.strip() else None), line
 
 
@@ -406,12 +394,23 @@ def list_items(value: str) -> list[str]:
 
 
 class _OpenList(_ListState):
-    """A list the field scan has not seen close yet: the shared state plus its text."""
+    """A list the walk has not seen close yet: the shared state plus its text."""
 
-    def __init__(self, key: str, line: int, value: str, indent: int) -> None:
+    def __init__(self, key: str, line: int, value: str, indent: int, block: str | None) -> None:
         super().__init__(indent)
-        self.key, self.line = key, line
+        self.key, self.line, self.block = key, line, block
         self.parts = [value.strip()]
+
+
+class _Span(NamedTuple):
+    """One wrapped list as the single walk decided it (1-based lines)."""
+
+    key: str
+    opener: int
+    closer: int | None
+    parts: tuple[str, ...]
+    status: str  # "closed", "unterminated_list" or "text_after_list"
+    block: str | None  # the block the opener sits in (None = META)
 
 
 def _indent_of(raw: str) -> int:
@@ -435,62 +434,158 @@ def _is_list_break(raw: str, in_quote: bool, opener_indent: int) -> bool:
     return bool(_FIELD_LINE_RE.match(raw) or _BLOCK_HEADER_RE.match(raw))
 
 
+@functools.lru_cache(maxsize=64)
+def _walk_octave(
+    text: str,
+) -> tuple[tuple[tuple[str | None, str], ...], tuple[_Span, ...]]:
+    """The ONE pass that decides every block AND every wrapped-list boundary of an OCTAVE text.
+
+    Returns ``(annotated lines, spans)``. ``annotated lines`` is exactly what
+    :func:`annotate_lines` yields; ``spans`` has one :class:`_Span` per list opened by an
+    exact ``KEY::[`` line, in every context (META and CURRENT / RULINGS blocks alike).
+    Everything else (``annotate_lines``, ``read_octave_fields``, ``wrapped_list_spans``,
+    ``collapse_wrapped_lists``, ``collect_topic_blocks``, Gate A's #14/#15 scans) READS
+    this result and tracks no list or quote state of its own, so they cannot disagree.
+    """
+    out: list[tuple[str | None, str]] = []
+    spans: list[_Span] = []
+    block: str | None = None
+    header_indent = 0
+    pending: _OpenList | None = None
+    for number, line in enumerate(_text_lines(text, False), start=1):
+        if pending is not None:
+            if not pending.is_break(line):
+                # List text (an item, a blank or comment line, anything inside an open quote).
+                body, close = pending.feed(line)
+                if close is not None:
+                    tail = body[close + 1 :].strip()
+                    pending.parts.append(body[: close + 1].strip())
+                    status = "text_after_list" if tail else "closed"
+                    spans.append(
+                        _Span(
+                            pending.key,
+                            pending.line,
+                            number,
+                            tuple(pending.parts),
+                            status,
+                            pending.block,
+                        )
+                    )
+                    pending = None
+                elif body.strip():
+                    pending.parts.append(body.strip())
+                out.append((block if line.strip() else None, line))
+                continue
+            spans.append(
+                _Span(
+                    pending.key,
+                    pending.line,
+                    None,
+                    tuple(pending.parts),
+                    "unterminated_list",
+                    pending.block,
+                )
+            )
+            pending = None  # a break: reported as unterminated, the line is read normally
+        header = _BLOCK_HEADER_RE.match(line)
+        if header:
+            block = header.group(2).upper()
+            header_indent = len(header.group(1))
+            out.append((None, line))
+            continue
+        if block is not None and line.strip() and len(line) - len(line.lstrip()) <= header_indent:
+            block = None
+        field = _FIELD_LINE_RE.match(line)
+        if field and field.group(2).strip() == "[":
+            # Only ``KEY::[`` alone (what octave_write emits) opens list mode. Any other
+            # value that opens ``[`` without closing it keeps the pre-#224 single-line read.
+            pending = _OpenList(field.group(1), number, field.group(2), _indent_of(line), block)
+        out.append((block if line.strip() else None, line))
+    if pending is not None:
+        spans.append(
+            _Span(
+                pending.key,
+                pending.line,
+                None,
+                tuple(pending.parts),
+                "unterminated_list",
+                pending.block,
+            )
+        )
+    return tuple(out), tuple(spans)
+
+
+def _compact_list(parts: tuple[str, ...]) -> str:
+    """The compact ``[A,B]`` form of a wrapped list's collected text."""
+    joined = "\n".join(parts)
+    items = _split_list_items(joined[joined.index("[") + 1 : joined.rindex("]")])
+    return "[" + ",".join(items) + "]"
+
+
+def _closed_interior(text: str) -> set[int]:
+    """1-based lines strictly inside well-formed wrapped lists (closing line included)."""
+    if is_yaml_front_matter(text):
+        return set()
+    return {
+        n
+        for span in _walk_octave(text)[1]
+        if span.closer is not None and span.status == "closed"
+        for n in range(span.opener + 1, span.closer + 1)
+    }
+
+
 def _scan_octave_fields(
     text: str, within_blocks: bool
 ) -> tuple[list[OctaveField], YamlReject | None]:
-    """The ONE OCTAVE field/list scan behind every public reader below.
+    """Read the ``KEY::value`` fields of an OCTAVE text from the walk's spans.
 
-    ``within_blocks`` False skips (and breaks lists at) CURRENT / RULINGS block lines, as the
-    META reader does; True scans them too, so a list INSIDE a block is also recognised.
+    ``within_blocks`` False skips CURRENT / RULINGS block lines (the META reader);
+    True reads them too.
     """
+    lines, spans = _walk_octave(text)
+    by_opener = {span.opener: span for span in spans}
+    interior = {
+        n
+        for span in spans
+        if span.closer is not None
+        for n in range(span.opener + 1, span.closer + 1)
+    }
     fields: list[OctaveField] = []
-    pending: _OpenList | None = None
-    for number, (block, raw) in enumerate(annotate_lines(text), start=1):
-        if block is not None and not within_blocks:
-            block = "skip"
-        if pending is not None:
-            if block == "skip" or pending.is_break(raw):
-                return fields, {"line": pending.line, "construct": "unterminated_list"}
-            line, close = pending.feed(raw)
-            body = line.strip()
-            if not body:
-                continue
-            if close is None:
-                pending.parts.append(body)
-                continue
-            if line[close + 1 :].strip():
-                return fields, {"line": pending.line, "construct": "text_after_list"}
-            pending.parts.append(line[: close + 1].strip())
-            joined = "\n".join(pending.parts)
-            items = _split_list_items(joined[joined.index("[") + 1 : joined.rindex("]")])
-            value = "[" + ",".join(items) + "]"
-            fields.append(OctaveField(pending.key, value, pending.line, True, number))
-            pending = None
+    for number, (block, raw) in enumerate(lines, start=1):
+        if number in interior:
             continue
-        if block == "skip":
+        span = by_opener.get(number)
+        if span is not None:
+            if span.block is not None and not within_blocks:
+                continue
+            if span.status != "closed":
+                return fields, {"line": span.opener, "construct": span.status}
+            assert span.closer is not None
+            fields.append(
+                OctaveField(span.key, _compact_list(span.parts), span.opener, True, span.closer)
+            )
+            continue
+        if block is not None and not within_blocks:
             continue
         match = _FIELD_LINE_RE.match(raw)
-        if not match:
-            continue
-        key, value = match.group(1), match.group(2)
-        if value.strip() == "[":
-            # Only ``KEY::[`` alone (what octave_write emits) opens list mode. Any other
-            # value that opens ``[`` without closing it keeps the pre-#224 single-line read.
-            pending = _OpenList(key, number, value, _indent_of(raw))
-            continue
-        fields.append(OctaveField(key, value, number, False, number))
-    if pending is not None:
-        return fields, {"line": pending.line, "construct": "unterminated_list"}
+        if match:
+            fields.append(OctaveField(match.group(1), match.group(2), number, False, number))
     return fields, None
 
 
 def wrapped_list_spans(text: str) -> list[tuple[int, int]]:
     """``(opener_line, closing_line)`` of every well-formed wrapped list, blocks included.
 
-    1-based, from the same scan as :func:`read_octave_fields`: the lines strictly between
-    the two are list INTERIOR (never fields). Unterminated lists have no span.
+    1-based, read from :func:`_walk_octave`: the lines strictly between the two are list
+    INTERIOR (never fields, never block headers). Unterminated lists have no span.
     """
-    return [(f.line, f.end_line) for f in _scan_octave_fields(text, True)[0] if f.wrapped]
+    if is_yaml_front_matter(text):
+        return []
+    return [
+        (span.opener, span.closer)
+        for span in _walk_octave(text)[1]
+        if span.closer is not None and span.status == "closed"
+    ]
 
 
 def collapse_wrapped_lists(text: str) -> str:
@@ -585,7 +680,10 @@ def collect_topic_blocks(text: str | None) -> TopicBlocks:
 
     yaml = is_yaml_front_matter(text)
     entry: RulingEntry | None = None
-    for block, line in iter_block_lines(text):
+    interior = _closed_interior(text)  # list text inside a block is never an entry
+    for number, (block, line) in enumerate(annotate_lines(text), start=1):
+        if block is None or number in interior:
+            continue
         if block == "CURRENT":
             cur = _match_current(line, yaml)
             if cur:
