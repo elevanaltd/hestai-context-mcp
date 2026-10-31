@@ -33,7 +33,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hestai_context_mcp.core.context_steward import ContextSteward
+from hestai_context_mcp.core.context_steward import ContextSteward, WorkflowParseError
 from hestai_context_mcp.core.git_state import get_git_state
 from hestai_context_mcp.core.session import SessionManager
 
@@ -85,7 +85,10 @@ def get_context(working_dir: str) -> dict[str, Any]:
                 project_context: str | None,
                 phase_constraints: dict | None,
                 git_state: {branch, ahead, behind, modified_files},
-                active_sessions: [str]
+                active_sessions: [str],
+                phase_constraints_error: {code, file, line, construct}  # optional: only
+                    # when the workflow document has a malformed list (phase_constraints
+                    # is then None); file is relative to working_dir
             }
         }
 
@@ -124,28 +127,34 @@ def get_context(working_dir: str) -> dict[str, Any]:
     active_sessions = mgr.get_active_session_focuses()
 
     # Phase constraints (read-only, graceful fallback)
-    phase_constraints = _get_phase_constraints(working_dir_path)
+    phase_constraints, phase_constraints_error = _get_phase_constraints(working_dir_path)
 
-    return {
-        "working_dir": str(working_dir_path),
-        "context": {
-            "product_north_star": product_north_star,
-            "project_context": project_context,
-            "phase_constraints": phase_constraints,
-            "git_state": git_state,
-            "active_sessions": active_sessions,
-        },
+    context: dict[str, Any] = {
+        "product_north_star": product_north_star,
+        "project_context": project_context,
+        "phase_constraints": phase_constraints,
+        "git_state": git_state,
+        "active_sessions": active_sessions,
     }
+    if phase_constraints_error is not None:
+        # Optional key: present ONLY when the workflow document is malformed (#196).
+        context["phase_constraints_error"] = phase_constraints_error
+
+    return {"working_dir": str(working_dir_path), "context": context}
 
 
-def _get_phase_constraints(working_dir_path: Path) -> dict[str, Any] | None:
+def _get_phase_constraints(
+    working_dir_path: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Attempt to read phase constraints from workflow files.
 
     Args:
         working_dir_path: Resolved project directory path.
 
     Returns:
-        Phase constraints dict or None if not available.
+        ``(phase_constraints, error)``. ``phase_constraints`` is the dict or None if not
+        available; ``error`` is the structured ``WORKFLOW_PARSE_FAILED`` dict (repo-relative
+        file) when the workflow document has a malformed list, else None.
     """
     try:
         for workflow_candidate in [
@@ -159,8 +168,11 @@ def _get_phase_constraints(working_dir_path: Path) -> dict[str, Any] | None:
             if workflow_candidate.exists():
                 steward = ContextSteward(workflow_path=workflow_candidate)
                 constraints = steward.synthesize_active_state("B1")
-                return constraints.to_dict()
+                return constraints.to_dict(), None
+    except WorkflowParseError as e:
+        logger.warning(f"Workflow document malformed: {e}")
+        return None, e.to_error(working_dir_path)
     except (FileNotFoundError, ValueError) as e:
         logger.debug(f"Phase constraints not available: {e}")
 
-    return None
+    return None, None

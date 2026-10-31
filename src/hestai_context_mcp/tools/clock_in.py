@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hestai_context_mcp.core.context_steward import ContextSteward
+from hestai_context_mcp.core.context_steward import ContextSteward, WorkflowParseError
 from hestai_context_mcp.core.focus import resolve_focus
 from hestai_context_mcp.core.git_state import (
     check_context_freshness,
@@ -106,7 +106,8 @@ def clock_in(
             context_paths, context: {
                 product_north_star, product_north_star_constraints,
                 project_context, phase_constraints, git_state,
-                active_sessions, conflicts
+                active_sessions, conflicts,
+                [phase_constraints_error]  # optional: only on a malformed workflow list
             }
         }
 
@@ -204,6 +205,7 @@ def clock_in(
     # prefix markers (B1_BUILD_PLAN, etc.), so pass the prefix — not the
     # full form — to ContextSteward.
     phase_constraints = None
+    phase_constraints_error: dict[str, Any] | None = None
     try:
         # Look for workflow files in common locations
         for workflow_candidate in [
@@ -219,8 +221,24 @@ def clock_in(
                 constraints = steward.synthesize_active_state(phase_prefix(phase))
                 phase_constraints = constraints.to_dict()
                 break
+    except WorkflowParseError as e:
+        logger.warning(f"Workflow document malformed: {e}")
+        phase_constraints_error = e.to_error(working_dir_path)
     except (FileNotFoundError, ValueError) as e:
         logger.debug(f"Phase constraints not available: {e}")
+
+    context: dict[str, Any] = {
+        "product_north_star": product_north_star,
+        "product_north_star_constraints": product_north_star_constraints,
+        "project_context": project_context,
+        "phase_constraints": phase_constraints,
+        "git_state": git_state,
+        "active_sessions": active_sessions,
+        "conflicts": conflicts,
+    }
+    if phase_constraints_error is not None:
+        # Optional key: present ONLY when the workflow document is malformed (#196).
+        context["phase_constraints_error"] = phase_constraints_error
 
     # Build AI synthesis via the provider-agnostic seam (issue #5 replaces
     # the body of synthesize_ai_context with a real provider call). The
@@ -258,15 +276,7 @@ def clock_in(
         "phase": phase,
         "context_paths": context_paths,
         "ai_synthesis": ai_synthesis,
-        "context": {
-            "product_north_star": product_north_star,
-            "product_north_star_constraints": product_north_star_constraints,
-            "project_context": project_context,
-            "phase_constraints": phase_constraints,
-            "git_state": git_state,
-            "active_sessions": active_sessions,
-            "conflicts": conflicts,
-        },
+        "context": context,
         "portable_state": portable_state,
     }
 
