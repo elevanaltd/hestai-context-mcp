@@ -324,3 +324,15 @@ def test_every_emitted_record_is_accepted_by_the_reader() -> None:
             [OLD_A],
         )
         assert diagnose_yaml_record(text) is None, value
+
+
+@pytest.mark.parametrize("bad_id", ["R1\n", "R1 ", "r1", "R", "R1\r"])
+def test_block_entry_id_must_fully_match_r_digits(bad_id: str) -> None:
+    """``$`` matches before a trailing newline, so the id check must be a full match."""
+    _rejects(
+        "invalid_block_entry",
+        _fields(),
+        {"current": [{"id": bad_id, "rule": "r"}], "rulings": []},
+        None,
+    )
+    _rejects("invalid_block_entry", _fields(), {"current": [], "rulings": [{"id": bad_id}]}, None)  # type: ignore[list-item]
