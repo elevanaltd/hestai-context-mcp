@@ -9,9 +9,9 @@ META:
   LOSS_PROFILE::"[preserve:decision,authority,scope,amended_artefact,IDs;drop:discussion]"
   AUTHORED_AT::"2026-10-31T00:00:00Z"
   RATIFIED_BY::"agent:holistic-orchestrator@hc-control-room (HO-HC-WEEKEND-DELEGATION-20261031)"
-  RATIFIED_AT::"2026-10-31T00:00:00Z"
+  RATIFIED_AT::"2026-10-31T03:28:38Z"
   ISSUE_REF::"repo:hestai-context-mcp#203"
-  CEREMONY_REF::"c52da839-8daf-4bbc-90f1-a3e5b5bc13c0"
+  CEREMONY_REF::c52da839-8daf-4bbc-90f1-a3e5b5bc13c0
   AUTHORING_SESSION::"holistic-orchestrator:read-topic-records"
   RECORD_CLASS::"applies ratified decisions; makes no new decision"
   DECISION::"ADR-RFC-ARCH-004 moves from version 1.6 to 1.7 in place: section 3.5 records submit_governance append_ruling as delivered for quoted-YAML topic records, read at the origin/main commit, checked against the whole-file hash, and filed as one pull request."
@@ -32,4 +32,5 @@ META:
     "ADR-RFC-ARCH-004 sections 1.1, 1.2, 1.5, 1.7, 3.5",
     "hestai-context-mcp#203"
   ]
+  REVISION::"2026-10-31: RATIFIED_AT set to the measured in-window time; the date-precision value preceded the HO-HC-WEEKEND-DELEGATION-20261031 window"
 ===END===
