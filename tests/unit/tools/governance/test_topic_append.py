@@ -50,7 +50,7 @@ _BODY = (
     "\n# Client access topic\n\n"
     'Body prose keeps "quotes", a backslash \\ and a current: line verbatim.\r\n'
     "rulings:\n"
-    "  R99: \"not a block: the body is never read as record content\"\n"
+    '  R99: "not a block: the body is never read as record content"\n'
 )
 
 # Canonical front matter (fixed key order, canonical indentation) plus a body.
