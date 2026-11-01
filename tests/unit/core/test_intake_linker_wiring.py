@@ -268,7 +268,10 @@ class TestTwoBirdsStampRevalidationAbort:
             }
         )
 
-        async def _compile(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        prompts: list[str] = []
+
+        async def _compile(ctx: IntakeContext, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            prompts.append(ctx.prompt)
             return {
                 "ok": True,
                 "octave": record,
@@ -286,6 +289,11 @@ class TestTwoBirdsStampRevalidationAbort:
 
         # Structured abort (PROD I4), not a raise, not a silent write.
         assert result["success"] is False
+        # The stamp failure is fed to the INFORMED retry from the shared budget:
+        # exactly two compiles, and the second prompt carries the stamp error.
+        assert len(prompts) == 2
+        assert "HUMAN_ADR_REF stamp failed re-validation" not in prompts[0]
+        assert "HUMAN_ADR_REF stamp failed re-validation" in prompts[1]
         # The error names the stamp re-validation failure.
         joined = " ".join(result["validation_errors"]).lower()
         assert "human_adr_ref" in joined and "re-validation" in joined
