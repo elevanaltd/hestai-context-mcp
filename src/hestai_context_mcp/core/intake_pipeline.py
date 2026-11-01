@@ -265,10 +265,17 @@ def _fidelity_errors(record: str, prose: str) -> list[str]:
                 "byte-exact substring of the prose."
             )
         elif name == "OPERATOR_RULING" or name.endswith("_VERBATIM"):
+            spans = [span for span in _quoted_spans(value) if span]
+            if not spans:  # HC ruling R2 on #246: no framing-only verbatim field
+                errors.append(
+                    f"FIDELITY field_lacks_quote: {label} carries no quoted span; quote "
+                    "the operator's words exactly from the prose, or omit the field when "
+                    "the prose has none."
+                )
             errors += [
                 f'FIDELITY quote_not_in_prose: {label} quotes "{span}", which is not a '
                 "byte-exact substring of the prose."
-                for span in _quoted_spans(value)
+                for span in spans
                 if span not in prose
             ]
     return errors
