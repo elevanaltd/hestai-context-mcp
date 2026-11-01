@@ -132,6 +132,8 @@ _ALWAYS_ALLOWED_SCRIPTS = frozenset(
         "KATAKANA-HIRAGANA",
     }
 )
+# A two-digit elision ('90s, '24) is an apostrophe, never an opening quote.
+_ELISION_RE = re.compile(r"\d\d s? (?![\w'’])", re.X)
 _WIDTH_WORDS = frozenset({"HALFWIDTH", "FULLWIDTH"})
 _PROSE_YAML_ERROR = (
     "PROSE_MODE_YAML: prose mode writes a DECISION_RECORD as quoted YAML (first line ---), "
@@ -157,13 +159,23 @@ def _quoted_spans(text: str) -> list[str]:
             continue
         before = text[i - 1] if i else " "
         after = text[i + 1] if i + 1 < len(text) else " "
-        closes = not (after.isalnum() or unicodedata.category(after)[0] == "M")
-        if opened is not None and char in "'’" and i > opened + 1 and closes:
-            spans.append(text[opened + 1 : i])
+        if opened is not None and char in "'’" and not before.isspace() and _delimits(after):
+            if i > opened + 1:  # '' is an empty span, never the opener of the next one
+                spans.append(text[opened + 1 : i])
             opened = None
-        elif char in "'‘" and not (before.isalnum() or unicodedata.category(before)[0] == "M"):
+        elif (
+            char in "'‘"
+            and _delimits(before)
+            and not after.isspace()
+            and not _ELISION_RE.match(text, i + 1)
+        ):
             opened = i
     return spans
+
+
+def _delimits(char: str) -> bool:
+    """True unless ``char`` is a letter, digit or combining mark (part of a word)."""
+    return not (char.isalnum() or unicodedata.category(char)[0] == "M")
 
 
 def _script(char: str) -> str:
