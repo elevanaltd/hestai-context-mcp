@@ -512,3 +512,63 @@ class TestProseModeWritesYaml:
         written = call["octave_content"]
         assert written == emit_yaml_record({**_CORE, "HUMAN_ADR_REF": RECORD_ID})
         assert call["adr_prose"] == prose
+
+
+# ---------------------------------------------------------------------------
+# Pre-review fixes
+# ---------------------------------------------------------------------------
+
+
+class TestPreReviewFixes:
+    def test_a_gate_a_failure_on_an_octave_decision_record_also_names_the_yaml_form(
+        self, tmp_path: Path
+    ) -> None:
+        # The retry must learn about the YAML form even when Gate A already failed,
+        # or a 2-attempt budget can be spent before the model is told.
+        verbose = _OCTAVE_RECORD.replace(
+            "Keep the review gate strict for governance records.",
+            " ".join(f"word{i}" for i in range(60)),
+        )
+        passed, errors = _gate(verbose, "record a decision", tmp_path)
+        assert passed is False
+        assert _has(errors, "40"), errors
+        assert _has(errors, "quoted YAML"), errors
+
+    def test_a_word_initial_apostrophe_does_not_hijack_a_real_span(self, tmp_path: Path) -> None:
+        prose = "Back in the '90s the team's 'fast path plan' won."
+        assert mod._quoted_spans(prose) == ["fast path plan"]
+        kept = _yaml(EVIDENCE="Plan: fast path plan")
+        assert _gate(kept, prose, tmp_path)[0] is True
+
+    def test_span_scan_is_linear_on_a_long_line_of_unclosed_openers(self) -> None:
+        import time
+
+        line = " 'x" * 60_000
+        start = time.perf_counter()
+        assert mod._quoted_spans(line) == []
+        assert time.perf_counter() - start < 2.0
+
+    @pytest.mark.parametrize("letters", ["時々", "ｱｲｳ"])
+    def test_iteration_mark_and_halfwidth_kana_match_their_scripts(
+        self, tmp_path: Path, letters: str
+    ) -> None:
+        prose = "時間 アイウ について"
+        passed, errors = _gate(_yaml(NOTE=letters), prose, tmp_path)
+        assert passed is True, errors
+
+
+class TestYamlProseSkipsGateBFailClosed:
+    async def test_yaml_record_links_when_real_validation_is_required_but_absent(
+        self, tmp_path: Path, scripted, writing_linker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Gate B never runs on YAML, so the fail-closed policy for a missing Gate B
+        # does not apply to it, as in content mode.
+        from hestai_context_mcp.ports.octave_validator import UnavailableOctaveValidator
+
+        monkeypatch.setattr(mod, "get_octave_validator", lambda: UnavailableOctaveValidator())
+        monkeypatch.setattr(mod, "resolve_require_real_validation", lambda **kw: True)
+        scripted(_yaml())
+        result = await run_intake_to_pr(tmp_path, _ctx("keep the gate strict"), dry_run=False)
+        assert result["success"] is True, result["validation_errors"]
+        assert result["real_validation_available"] is False
+        assert len(writing_linker) == 1
