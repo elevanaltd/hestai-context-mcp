@@ -415,9 +415,10 @@ async def submit_governance(
     OctaveValidator + path placement + PR creation. Byte-stable vs post-#70 main.
 
     ``prose_input`` mode (Gate C): Stage 1 (context assembler) + Stage 2
-    (prose->OCTAVE backend over the provider-agnostic AIClient port) author the
-    OCTAVE, then the call REJOINS the same Stage-3 validator + Stage-4 linker
-    tail. The return dict additionally carries a ``metrics`` field
+    (prose backend over the provider-agnostic AIClient port) author the record --
+    a DECISION_RECORD as quoted YAML, a facet card as OCTAVE (PR-B #195) -- then
+    the call REJOINS the same Stage-3 validator + Stage-4 linker tail, with the
+    prose fidelity guard checking the record against the prose after Gate A. The return dict additionally carries a ``metrics`` field
     {tokens, cost, model}. Output is gated by the validator + human PR review
     (no auto-merge); cost caps abort runaway calls with a structured error.
 
@@ -540,8 +541,8 @@ async def _submit_prose_input(
     Validates working_dir first (PROD I4 structured failure on bad path), then
     assembles the Stage-1 context and delegates to the Stage 2->4 composition,
     which rejoins the same validate->link tail as the octave_content path. On a
-    successful real PR, Stage 5 reviews the GENERATED OCTAVE threaded out of
-    ``run_intake_to_pr`` (issue #77).
+    successful real PR, Stage 5 reviews the GENERATED record threaded out of
+    ``run_intake_to_pr`` (issue #77): for a quoted-YAML record, its canonical bytes.
 
     ``write_adr`` (#112) is forwarded to ``run_intake_to_pr`` so the two-birds
     path dumb-writes the verbatim ADR doc + stamps the AGR's HUMAN_ADR_REF.

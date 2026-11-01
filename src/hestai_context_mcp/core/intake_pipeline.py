@@ -1,5 +1,9 @@
 """Stage-3 GATE: validate -> retry-once -> abort pipeline (RFC #53 Gate C, T3).
 
+Prose mode writes a DECISION_RECORD as quoted YAML (HO-RECORDS-YAML-DEFAULT-20261031)
+through the content-mode YAML seam, and every compiled record passes the prose
+fidelity guard (issue #195, HO-PROSE-FIDELITY-GUARD-195-20261101) after Gate A.
+
 Drives the Stage-2 prose->OCTAVE compiler through the EXISTING Stage-3 gate and
 enforces the retry/abort contract:
 
@@ -27,10 +31,19 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import re
+import unicodedata
 from functools import partial
 from pathlib import Path
 from typing import Any, TypedDict
 
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    collect_topic_blocks,
+    encode_yaml_scalar,
+    is_yaml_front_matter,
+    parse_decision_record,
+    read_octave_fields,
+)
 from hestai_context_mcp.core.intake_compiler import (
     CompileMetrics,
     compile_prose_to_octave,
@@ -45,6 +58,7 @@ from hestai_context_mcp.tools.governance.linker import _stamp_human_adr_ref, run
 from hestai_context_mcp.tools.governance.type_checker import (
     ValidationResult,
     validate_octave_content,
+    validate_record_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,13 +112,139 @@ class PipelineResult(TypedDict):
     real_validation_available: bool
 
 
-def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[str], bool]:
-    """Run the existing two-stage gate.
+# --- Prose-mode fidelity guard (issue #195, HO-PROSE-FIDELITY-GUARD-195-20261101) ---
+# Compares the compiled record with the SOURCE prose. Regex/scan only (North Star §4),
+# stdlib only (PROD::I6), fail-loud, never auto-fix: a failure is an informed-retry
+# error like any Gate A error, and aborts once the shared budget is spent.
+_MIN_QUOTE_CHARS = 8
+_DOUBLE_SPAN_RE = re.compile(r'"([^"\n]*)"|“([^”\n]*)”')
+# stdlib ``unicodedata`` has no Script property, so a letter's script is read from the
+# first word of its Unicode name ("ARABIC LETTER BEH" -> ARABIC; any name containing
+# LATIN -> LATIN). Always allowed: Latin, and the name words of Common letters
+# (letterlike and mathematical letters, modifier letters). Inherited characters are
+# combining marks, not letters, so they are never checked.
+_ALWAYS_ALLOWED_SCRIPTS = frozenset(
+    {
+        "LATIN",
+        *("MATHEMATICAL", "MODIFIER", "DOUBLE-STRUCK", "SCRIPT", "BLACK-LETTER", "PLANCK"),
+        *("TURNED", "FEMININE", "MASCULINE", "MICRO", "CARON", "EULER", "KELVIN"),
+        *("ANGSTROM", "INFORMATION", "ROMAN", "VERTICAL", "ALEF", "BET", "GIMEL", "DALET"),
+        "KATAKANA-HIRAGANA",
+    }
+)
+_PROSE_YAML_ERROR = (
+    "PROSE_MODE_YAML: prose mode writes a DECISION_RECORD as quoted YAML (first line ---), "
+    "never OCTAVE (HO-RECORDS-YAML-DEFAULT-20261031)."
+)
+
+
+def _quoted_spans(text: str) -> list[str]:
+    """Text between double quotes (straight or curly) and between DELIMITING single quotes.
+
+    A single quote opens a span only after whitespace, a line start or opening
+    punctuation, and closes it only before whitespace, a line end or punctuation, so an
+    apostrophe (``don't``, ``the team's``) never opens or closes one. Spans never cross
+    a newline.
+    """
+    spans = [m.group(1) or m.group(2) or "" for m in _DOUBLE_SPAN_RE.finditer(text)]
+    i, end = 0, len(text)
+    while i < end:
+        before = text[i - 1] if i else " "
+        if text[i] in "'‘" and (before.isspace() or unicodedata.category(before) in ("Ps", "Pi")):
+            for j in range(i + 2, end):
+                if text[j] == "\n":
+                    break
+                after = text[j + 1] if j + 1 < end else " "
+                if text[j] in "'’" and (after.isspace() or unicodedata.category(after)[0] == "P"):
+                    spans.append(text[i + 1 : j])
+                    i = j
+                    break
+        i += 1
+    return spans
+
+
+def _script(char: str) -> str:
+    words = unicodedata.name(char, "").split()
+    return "LATIN" if "LATIN" in words else (words[0] if words else "UNNAMED")
+
+
+def _record_values(record: str) -> list[tuple[str, str]]:
+    """Every decoded field value of a compiled record as ``(label, value)``, blocks included."""
+    pairs: list[tuple[str, str]] = []
+    if is_yaml_front_matter(record):
+        parsed = parse_decision_record(record)
+        pairs += [(k.upper(), v) for k, v in parsed.items() if isinstance(v, str)]
+        pairs += list(parsed["fields"].items())
+    else:
+        fields, _reject = read_octave_fields(record)
+        for field in fields:
+            value = field.value
+            quoted = len(value) >= 2 and value[0] == value[-1] == '"'
+            pairs.append((field.key, value[1:-1] if quoted else value))
+    blocks = collect_topic_blocks(record)
+    for block, entries in (("CURRENT", blocks["current"]), ("RULINGS", blocks["rulings"])):
+        for entry in entries:
+            pairs += [
+                (f"{block} {entry['id']} {key.upper()}", value)
+                for key, value in entry.items()
+                if key != "id" and isinstance(value, str)
+            ]
+    return pairs
+
+
+def _fidelity_errors(record: str, prose: str) -> list[str]:
+    """The four-rule fidelity guard's rules (1)-(3); rule (4) is the caller's retry loop."""
+    errors: list[str] = []
+    values = _record_values(record)
+    # (1) every quoted span of 8+ characters in the prose survives byte-identical.
+    for span in dict.fromkeys(_quoted_spans(prose)):
+        if len(span) >= _MIN_QUOTE_CHARS and not any(span in value for _, value in values):
+            errors.append(
+                f'FIDELITY quote_not_preserved: the prose quotes "{span}" but no field value '
+                "carries it byte-identical; copy quoted text exactly."
+            )
+    # (2) letters only from the prose's scripts, or Latin / Common / Inherited.
+    allowed = _ALWAYS_ALLOWED_SCRIPTS | {_script(c) for c in prose if c.isalpha()}
+    for number, line in enumerate(record.split("\n"), start=1):
+        foreign = [c for c in line if c.isalpha() and _script(c) not in allowed]
+        if foreign:
+            scripts = ", ".join(sorted({_script(c) for c in foreign}))
+            errors.append(
+                f'FIDELITY non_source_script: line {number} has {scripts} letters "'
+                f'{"".join(foreign)}" that the prose never uses; write only in its scripts.'
+            )
+    # (3) VERBATIM whole value; OPERATOR_RULING and *_VERBATIM quoted spans (any length).
+    for label, value in values:
+        name = label.rsplit(" ", 1)[-1]
+        if name == "VERBATIM" and value not in prose:
+            errors.append(
+                f'FIDELITY verbatim_not_in_prose: {label} "{value}" is not a byte-exact '
+                "substring of the prose."
+            )
+        elif name == "OPERATOR_RULING" or name.endswith("_VERBATIM"):
+            errors += [
+                f'FIDELITY quote_not_in_prose: {label} quotes "{span}", which is not a '
+                "byte-exact substring of the prose."
+                for span in _quoted_spans(value)
+                if span not in prose
+            ]
+    return errors
+
+
+def _gate(
+    working_dir: Path, record: str, prose: str
+) -> tuple[bool, ValidationResult, list[str], bool]:
+    """Run Gate A, then the prose fidelity guard, then Gate B (OCTAVE only).
 
     Returns ``(passed, regex_result, errors, real_validation_available)``. The
     last element (#108.4) reports whether Gate B's real validator is actually
     available. A regex-fail short-circuit still reports backend availability
     accurately without running full validation.
+
+    A quoted-YAML record (first line ``---``) is judged by the Gate A YAML branch
+    through the same seam content mode uses (``validate_record_content``); Gate B is
+    OCTAVE-only and is not applied to it (ADR-RFC-ARCH-004 §1.1). A DECISION_RECORD
+    compiled as OCTAVE is rejected: prose mode writes decision records as quoted YAML.
     """
     # Gate A (regex) carries the §4.1 #13 reasoning-density guard (≤40 words,
     # no newline on DECISION/BECAUSE), so the verbosity rule is enforced HERE,
@@ -112,7 +252,11 @@ def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[
     # truth across all submission paths (#108-item-2 unification). A verbose
     # record therefore fails Gate A directly; the failure flows through the same
     # informed-retry/abort path as any schema failure (no separate Gate-C lint).
-    regex_result = validate_octave_content(working_dir, octave)
+    is_yaml = is_yaml_front_matter(record)
+    if is_yaml:
+        regex_result = validate_record_content(working_dir, record)
+    else:
+        regex_result = validate_octave_content(working_dir, record)
     octave_validator = get_octave_validator()
     real_validation_available = not isinstance(
         octave_validator,
@@ -121,7 +265,14 @@ def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[
     if not regex_result.valid:
         return False, regex_result, list(regex_result.errors), real_validation_available
 
-    octave_result = octave_validator.validate(octave)
+    # Third check (#195): the fidelity guard, after Gate A, against the source prose.
+    errors = _fidelity_errors(record, prose)
+    if not is_yaml and regex_result.card_type == "DECISION_RECORD":
+        errors.insert(0, _PROSE_YAML_ERROR)
+    if errors or is_yaml:
+        return not errors, regex_result, errors, real_validation_available
+
+    octave_result = octave_validator.validate(record)
     if not octave_result.ok:
         errors = [
             f"[{e.get('code', '')}] {e.get('message', '')}".strip() for e in octave_result.errors
@@ -141,8 +292,8 @@ def _augment_prompt_with_errors(ctx: IntakeContext, errors: list[str]) -> Intake
     augmented = (
         f"{ctx.prompt}\n"
         "BEGIN_VALIDATION_FEEDBACK\n"
-        "The previous attempt FAILED OCTAVE validation with these errors. "
-        "Produce a corrected single OCTAVE block that resolves ALL of them:\n"
+        "The previous attempt FAILED validation with these errors. "
+        "Produce a corrected single record that resolves ALL of them:\n"
         f"{error_block}\n"
         "END_VALIDATION_FEEDBACK\n"
     )
@@ -207,11 +358,15 @@ async def run_intake_pipeline(
             }
 
         octave = compiled["octave"]
-        passed, regex_result, errors, last_available = _gate(working_dir, octave)
+        passed, regex_result, errors, last_available = _gate(
+            working_dir, octave, intake_context.prose_input
+        )
         if passed:
             return {
                 "ok": True,
-                "octave": octave,
+                # A YAML record continues as its canonical bytes (the content-mode
+                # write path, ADR-RFC-ARCH-004 §1.1); OCTAVE continues unchanged.
+                "octave": regex_result.canonical_content or octave,
                 "validation": regex_result,
                 "validation_errors": [],
                 "metrics": last_metrics,
@@ -224,7 +379,12 @@ async def run_intake_pipeline(
             # Informed retry: append the validation errors to the prompt.
             ctx = _augment_prompt_with_errors(ctx, errors)
 
-    # Exhausted attempts: ABORT. No write, no linker (structural invariant).
+    # Exhausted attempts: ABORT loudly. No write, no linker (structural invariant).
+    logger.warning(
+        "Prose intake aborted after %d attempts; last errors: %s",
+        _MAX_ATTEMPTS,
+        "; ".join(last_errors),
+    )
     return {
         "ok": False,
         "octave": None,
@@ -282,6 +442,23 @@ def _fail_closed_result(pipeline: PipelineResult, dry_run: bool) -> dict[str, An
         "metrics": pipeline["metrics"],
         "dry_run": dry_run,
     }
+
+
+def _stamp_yaml_human_adr_ref(record: str, token: str) -> str:
+    """Return a canonical YAML ``record`` with ``human_adr_ref`` set to ``token`` (#112).
+
+    The YAML counterpart of the linker's OCTAVE stamp: any existing top-level
+    ``human_adr_ref`` line is dropped and one is inserted after the opening fence;
+    the caller re-validates, and Gate A re-emits the canonical bytes (key order).
+    Unchanged when there is no closing fence (Gate A then rejects it).
+    """
+    lines = record.split("\n")
+    close = next((i for i in range(1, len(lines)) if lines[i] == "---"), None)
+    if close is None:
+        return record
+    kept = [line for line in lines[1:close] if not line.startswith("human_adr_ref:")]
+    stamp = f"human_adr_ref: {encode_yaml_scalar(token)}"
+    return "\n".join([lines[0], stamp, *kept, *lines[close:]])
 
 
 async def run_intake_to_pr(
@@ -361,8 +538,13 @@ async def run_intake_to_pr(
     adr_prose: str | None = None
     if write_adr:
         token = pipeline["validation"].token or ""
-        stamped = _stamp_human_adr_ref(octave_to_link, token)
-        restamped_validation = validate_octave_content(working_dir, stamped)
+        if pipeline["validation"].syntax == "yaml":
+            stamped = _stamp_yaml_human_adr_ref(octave_to_link, token)
+            restamped_validation = validate_record_content(working_dir, stamped)
+            stamped = restamped_validation.canonical_content or stamped
+        else:
+            stamped = _stamp_human_adr_ref(octave_to_link, token)
+            restamped_validation = validate_octave_content(working_dir, stamped)
         if not restamped_validation.valid:
             # The stamp broke Gate A (should be impossible for token-form #11):
             # abort BEFORE the linker — no write, no PR. Hallucination immunity.

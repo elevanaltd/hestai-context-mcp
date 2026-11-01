@@ -39,6 +39,7 @@ import logging
 import os
 from typing import TypedDict
 
+from hestai_context_mcp.core.agent_readable_governance_parser import is_yaml_front_matter
 from hestai_context_mcp.ports.ai_client import (
     AIClient,
     AIClientAuthError,
@@ -161,14 +162,22 @@ def _ceil_div(numerator: int, denominator: int) -> int:
 
 
 def _clip_at_end_terminator(text: str) -> str:
-    """Clip compiled OCTAVE at the last ===END=== marker (inclusive).
+    """Clip compiled output at its document terminator, dropping anything after it.
 
     A model may continue generating past the document terminator (observed in
-    elevana-studio PR #1423: boilerplate appended after ===END===). This guard
-    ensures the compiled output is deterministically truncated at the last
-    ===END===, regardless of model behaviour.  When ===END=== is absent the
-    text is returned unchanged so Stage 3 can reject it for a missing terminator.
+    elevana-studio PR #1423: boilerplate appended after ===END===). For OCTAVE the
+    output is clipped at the last ===END=== (inclusive). For a quoted-YAML record
+    (prose mode's DECISION_RECORD form, HO-RECORDS-YAML-DEFAULT-20261031) it is clipped
+    after the closing ``---`` fence, so trailing text never becomes the record's
+    verbatim markdown body. Without a terminator the text is returned unchanged so
+    Stage 3 rejects it.
     """
+    if is_yaml_front_matter(text):
+        lines = text.split("\n")
+        for index in range(1, len(lines)):
+            if lines[index].removesuffix("\r") == "---":
+                return "\n".join(lines[: index + 1]) + "\n"
+        return text
     pos = text.rfind(_END_TERMINATOR)
     if pos == -1:
         return text
