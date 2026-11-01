@@ -356,3 +356,33 @@ class TestVerifySupersessionTarget:
     def test_missing_target_returns_false(self, tmp_path: Path) -> None:
         _seed_repo(tmp_path)
         assert verify_supersession_target(tmp_path, "HO-DOES-NOT-EXIST-20260101") is False
+
+
+class TestQuotedTextAndYamlOutputContract:
+    """PR-B (#195): the contract states that quoted text is never compressed, and that
+    a DECISION_RECORD is written as quoted YAML (HO-RECORDS-YAML-DEFAULT-20261031).
+
+    The fidelity guard (intake_pipeline) enforces both; the contract asks for them so a
+    first attempt usually passes without spending the retry budget.
+    """
+
+    def test_contract_says_quoted_text_is_never_compressed(self) -> None:
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        lower = _COMPRESSION_CONTRACT.lower()
+        assert "quoted text is never compressed" in lower
+        assert "byte for byte" in lower
+        assert "only unquoted text is compressed" in lower
+
+    def test_contract_names_the_verbatim_fields(self) -> None:
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        for name in ("VERBATIM", "OPERATOR_RULING", "_VERBATIM"):
+            assert name in _COMPRESSION_CONTRACT, name
+
+    def test_contract_asks_for_a_quoted_yaml_decision_record(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        assert "quoted YAML" in ctx.prompt
+        assert "never OCTAVE" in ctx.prompt
+        assert "facet card stays one OCTAVE block" in ctx.prompt

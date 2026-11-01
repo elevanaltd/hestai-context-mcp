@@ -4,8 +4,8 @@ The record arrives in the existing ``octave_content`` parameter (the tool signat
 unchanged). The Gate A syntax seam (``type_checker.validate_record_content``) decides
 the syntax; a YAML record is written to ``.hestai/decisions/{token}.md``, never
 reaches the OCTAVE Gate B validator, and a rejected record returns the reader's
-line/construct as structured ``validation_errors``. PROSE mode stays OCTAVE and never
-touches the YAML seam.
+line/construct as structured ``validation_errors``. PROSE mode reaches the same Gate A
+seam inside the intake pipeline (PR-B #195), never through content mode's own call.
 """
 
 from __future__ import annotations
@@ -230,10 +230,12 @@ def test_stage5_review_runs_unchanged_on_the_yaml_text(
     assert review.await_args.args[0] == canonicalize_yaml_record(submitted)
 
 
-# --- PIN (passes today): prose mode is unchanged and still OCTAVE -----------------
+# --- PIN: prose mode delegates to the intake pipeline, never to content mode's seam --
+# Since PR-B (#195) prose mode writes quoted YAML through the SAME Gate A seam, called
+# inside ``intake_pipeline`` (tests/unit/core/test_intake_fidelity_guard.py).
 
 
-def test_prose_mode_still_uses_the_octave_pipeline_and_never_the_yaml_seam(
+def test_prose_mode_delegates_to_the_intake_pipeline_not_the_content_mode_seam(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pipeline = AsyncMock(return_value={"success": True, "octave": OCTAVE_RECORD})
