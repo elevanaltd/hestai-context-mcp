@@ -143,23 +143,24 @@ def _quoted_spans(text: str) -> list[str]:
 
     A single quote opens a span only after whitespace, a line start or opening
     punctuation, and closes it only before whitespace, a line end or punctuation, so an
-    apostrophe (``don't``, ``the team's``) never opens or closes one. Spans never cross
-    a newline.
+    apostrophe (``don't``, ``the team's``) never opens or closes one. A later opener
+    restarts the span, so a word-initial apostrophe (``'90s``) cannot swallow a real
+    quote. Spans never cross a newline. One linear pass.
     """
     spans = [m.group(1) or m.group(2) or "" for m in _DOUBLE_SPAN_RE.finditer(text)]
-    i, end = 0, len(text)
-    while i < end:
+    opened: int | None = None
+    for i, char in enumerate(text):
+        if char == "\n":
+            opened = None
+            continue
         before = text[i - 1] if i else " "
-        if text[i] in "'‘" and (before.isspace() or unicodedata.category(before) in ("Ps", "Pi")):
-            for j in range(i + 2, end):
-                if text[j] == "\n":
-                    break
-                after = text[j + 1] if j + 1 < end else " "
-                if text[j] in "'’" and (after.isspace() or unicodedata.category(after)[0] == "P"):
-                    spans.append(text[i + 1 : j])
-                    i = j
-                    break
-        i += 1
+        after = text[i + 1] if i + 1 < len(text) else " "
+        closes = after.isspace() or unicodedata.category(after)[0] == "P"
+        if opened is not None and char in "'’" and i > opened + 1 and closes:
+            spans.append(text[opened + 1 : i])
+            opened = None
+        elif char in "'‘" and (before.isspace() or unicodedata.category(before) in ("Ps", "Pi")):
+            opened = i
     return spans
 
 
