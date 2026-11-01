@@ -165,7 +165,7 @@ def _relevant_tokens(working_dir: Path, prose_input: str, corpus: str) -> tuple[
 # RATIFIED / RATIFIED_BY / ISSUE_REF / dates straight out of the exemplar corpus,
 # auto-asserting a human ratification that never happened. The corpus is a SHAPE
 # reference, not provenance to clone — ratification is the human PR merge, so a
-# freshly-authored record defaults to STATUS::PROPOSED and omits ratification fields.
+# freshly-authored record defaults to status: "PROPOSED" and omits ratification fields.
 #
 # OUTPUT DISCIPLINE: "emit ONLY the OCTAVE block, no reasoning" curbs the
 # reasoning-token spend that truncated large inputs at the output cap (finish_reason
@@ -204,21 +204,22 @@ _COMPRESSION_CONTRACT = (
     "copy this content:\n"
     "  BEFORE (verbose, REJECTED - >40-word multi-sentence prose value, fails the "
     "Gate-A 40-word guard):\n"
-    '    DECISION::"We have decided that the archive write path should always redact '
+    '    decision: "We have decided that the archive write path should always redact '
     "credentials in a strictly fail-closed manner, which means that whenever the "
     "redaction regex does not match the expected pattern we will drop the entire "
     "record rather than take any risk of persisting a secret, because we believe that "
     'losing data is far more acceptable than ever exposing a credential."\n'
     "  AFTER (flat string, ACCEPTED - plain words, one line, at most 40 words):\n"
-    '    DECISION::"Redact credentials on archive write and fail closed: drop the record '
+    '    decision: "Redact credentials on archive write and fail closed: drop the record '
     'when the regex misses, so data loss is preferred over credential exposure."\n'
-    '    BECAUSE::"A single leaked credential is a security incident with unacceptable '
+    '    because: "A single leaked credential is a security incident with unacceptable '
     'reach, so redaction runs before persistence, not after."\n'
     "METADATA FIDELITY — never fabricate governance provenance:\n"
     "- STATUS reflects the ACTUAL lifecycle. A newly authored record defaults to "
-    "STATUS::PROPOSED. NEVER assert STATUS::RATIFIED — ratification is the human PR "
+    'status: "PROPOSED". NEVER assert status: "RATIFIED" — ratification is the human PR '
     "merge, not yours to claim.\n"
-    "- Do NOT emit RATIFIED_BY or RATIFIED_AT. Omit ISSUE_REF unless the operator's "
+    "- Do NOT emit RATIFIED_BY or RATIFIED_AT (ratified_by, ratified_at). Omit ISSUE_REF "
+    "unless the operator's "
     "prose actually supplies an issue URL/reference.\n"
     "- The exemplar corpus is a SHAPE reference, not data to clone: do NOT copy its "
     "dates (AUTHORED_AT, RATIFIED_AT), ISSUE_REF values, or RATIFIED_BY attributions. "
