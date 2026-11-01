@@ -607,3 +607,41 @@ class TestSingleQuoteOpenerAfterPunctuation:
     )
     def test_a_quote_after_a_letter_or_digit_is_an_apostrophe(self, prose: str) -> None:
         assert mod._quoted_spans(prose) == []
+
+
+# ---------------------------------------------------------------------------
+# PR #246 round 1 (CE / CRS / HC rulings)
+# ---------------------------------------------------------------------------
+
+# Another existing non-secret fixture identifier (see test_intake_context.py).
+OTHER_ID = "HO-CONTEXT-MCP-ALPHA-20260101"
+
+
+class TestGuardRunsOnTheFinalStampedBytes:
+    """CE on #246 (HC-clarified): the guard judges the EXACT bytes written, after every
+    stamp, inside the shared retry budget, before the linker."""
+
+    _PROSE = f'Link this decision to "{OTHER_ID}" as its ADR.'
+
+    async def test_a_quote_only_in_human_adr_ref_is_not_stamped_away(
+        self, tmp_path: Path, scripted, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(**kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("linker reached with a stamped-away quote")
+
+        monkeypatch.setattr(mod, "run_linker", _boom, raising=True)
+        carried = _yaml(HUMAN_ADR_REF=OTHER_ID)
+        assert _gate(carried, self._PROSE, tmp_path)[0] is True  # pre-stamp passes
+        client = scripted(carried, carried)
+        result = await run_intake_to_pr(tmp_path, _ctx(self._PROSE), dry_run=False, write_adr=True)
+        assert result["success"] is False
+        assert _has(result["validation_errors"], "quote_not_preserved", OTHER_ID)
+        assert len(client.requests) == 2  # inside the shared budget
+        assert not (tmp_path / ".hestai").exists()
+
+    async def test_without_write_adr_the_same_record_links(
+        self, tmp_path: Path, scripted, writing_linker
+    ) -> None:
+        scripted(_yaml(HUMAN_ADR_REF=OTHER_ID))
+        result = await run_intake_to_pr(tmp_path, _ctx(self._PROSE), dry_run=False)
+        assert result["success"] is True, result["validation_errors"]

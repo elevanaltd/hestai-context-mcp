@@ -233,18 +233,19 @@ class TestTwoBirdsStampRevalidationAbort:
     BEFORE the linker -- no write, no PR, no ADR doc. CRS/CIV verified this at
     runtime; this pins the production abort branch against regression.
 
-    The test drives the REAL ``run_intake_to_pr`` abort branch (only the seams
-    around it are stubbed): the pipeline returns a clean success, but the
-    post-stamp ``validate_octave_content`` is forced to return an invalid
-    result, and the linker is monkeypatched to RAISE so any call is a hard
-    failure. RED-if-bypassed: were the abort removed, control would reach the
-    raising linker and the test would error instead of asserting the structured
-    abort.
+    Since cubic/CE on PR #246 the stamp runs INSIDE the guarded attempt of
+    ``run_intake_pipeline`` (the guard must judge the exact bytes written), so the
+    test drives the REAL pipeline: the compiler returns a valid record, the stamp is
+    forced to corrupt it, the stamped bytes fail the gate, the informed retry fails
+    the same way, and the call aborts. The linker is monkeypatched to RAISE so any
+    call is a hard failure (RED-if-bypassed).
     """
 
     async def test_stamp_revalidation_failure_aborts_before_linker(
-        self, tmp_path: Path, stub_pipeline, monkeypatch
+        self, tmp_path: Path, monkeypatch
     ) -> None:
+        from hestai_context_mcp.core.agent_readable_governance_parser import emit_yaml_record
+
         # Linker MUST NOT be reached: make any invocation an explicit failure.
         def _boom_linker(**kwargs: Any) -> dict[str, Any]:
             raise AssertionError(
@@ -254,21 +255,33 @@ class TestTwoBirdsStampRevalidationAbort:
 
         monkeypatch.setattr(mod, "run_linker", _boom_linker, raising=True)
 
-        # Force the POST-STAMP Gate-A re-validation to FAIL. stub_pipeline has
-        # already replaced run_intake_pipeline, so this is the ONLY call to
-        # validate_octave_content on this path -- the stamped-record check.
-        def _invalid_revalidation(working_dir: Path, content: str) -> ValidationResult:
-            return ValidationResult(
-                valid=False,
-                errors=["forced stamp re-validation failure (test)"],
-                token=RECORD_TOKEN,
-                card_type="DECISION_RECORD",
-                target_path=None,
-            )
+        record = emit_yaml_record(
+            {
+                "TYPE": "DECISION_RECORD",
+                "VERSION": "1.0",
+                "TOKEN": RECORD_TOKEN,
+                "STATUS": "PROPOSED",
+                "TIER": "OPERATIONAL",
+                "AUTHORED_AT": "2026-06-01T00:00:00Z",
+                "DECISION": "Record a decision for the linker wiring test.",
+                "BECAUSE": "Exercises the stamp abort.",
+            }
+        )
 
-        monkeypatch.setattr(mod, "validate_octave_content", _invalid_revalidation, raising=True)
+        async def _compile(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "octave": record,
+                "metrics": {"tokens": 1, "cost": 0.0, "model": "m"},
+                "error": None,
+            }
 
-        stub_pipeline(_pipeline_ok())
+        monkeypatch.setattr(mod, "compile_prose_to_octave", _compile, raising=True)
+        # Force the stamp to produce bytes that fail re-validation.
+        monkeypatch.setattr(
+            mod, "_stamp_yaml_human_adr_ref", lambda text, token: "not a record", raising=True
+        )
+
         result = await run_intake_to_pr(tmp_path, _ctx(), dry_run=False, write_adr=True)
 
         # Structured abort (PROD I4), not a raise, not a silent write.
