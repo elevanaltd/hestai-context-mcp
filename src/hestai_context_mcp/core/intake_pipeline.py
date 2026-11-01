@@ -132,6 +132,7 @@ _ALWAYS_ALLOWED_SCRIPTS = frozenset(
         "KATAKANA-HIRAGANA",
     }
 )
+_WIDTH_WORDS = frozenset({"HALFWIDTH", "FULLWIDTH"})
 _PROSE_YAML_ERROR = (
     "PROSE_MODE_YAML: prose mode writes a DECISION_RECORD as quoted YAML (first line ---), "
     "never OCTAVE (HO-RECORDS-YAML-DEFAULT-20261031)."
@@ -165,8 +166,12 @@ def _quoted_spans(text: str) -> list[str]:
 
 
 def _script(char: str) -> str:
-    words = unicodedata.name(char, "").split()
-    return "LATIN" if "LATIN" in words else (words[0] if words else "UNNAMED")
+    """A letter's script key: its Unicode name's first word, width prefixes dropped."""
+    words = [w for w in unicodedata.name(char, "").split() if w not in _WIDTH_WORDS]
+    if "LATIN" in words:
+        return "LATIN"
+    key = words[0] if words else "UNNAMED"
+    return "CJK" if key == "IDEOGRAPHIC" else key  # 々 and 〆 are Han
 
 
 def _record_values(record: str) -> list[tuple[str, str]]:
