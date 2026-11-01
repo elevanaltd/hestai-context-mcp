@@ -645,3 +645,23 @@ class TestGuardRunsOnTheFinalStampedBytes:
         scripted(_yaml(HUMAN_ADR_REF=OTHER_ID))
         result = await run_intake_to_pr(tmp_path, _ctx(self._PROSE), dry_run=False)
         assert result["success"] is True, result["validation_errors"]
+
+
+class TestSingleQuoteCloserSymmetry:
+    """CRS B1b on #246: a closer is followed by whitespace, end of text, or any
+    non-letter, non-digit, non-mark character, mirroring the opener."""
+
+    @pytest.mark.parametrize(
+        ("prose", "spans"),
+        [
+            ("Write `'keep the gate strict'` in the doc.", ["keep the gate strict"]),
+            ("Pass <'keep the gate strict'> to the parser.", ["keep the gate strict"]),
+            ("Check 'keep the gate strict'==true in the test.", ["keep the gate strict"]),
+            (
+                "Either 'option_alpha_one'|'option_beta_two' is allowed.",
+                ["option_alpha_one", "option_beta_two"],
+            ),
+        ],
+    )
+    def test_a_closer_before_a_symbol_closes_the_span(self, prose: str, spans: list[str]) -> None:
+        assert mod._quoted_spans(prose) == spans
