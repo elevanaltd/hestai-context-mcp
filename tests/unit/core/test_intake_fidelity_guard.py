@@ -693,3 +693,28 @@ class TestEmptyQuoteAndUnclosedApostrophe:
         passed, errors = _gate(_yaml(EVIDENCE="We used (consult TMG)."), prose, tmp_path)
         assert passed is False
         assert _has(errors, "quote_not_preserved", "(consult Test Guardian)"), errors
+
+
+class TestNoRestartInsideAnOpenSpan:
+    """CRS B1a on #246: inside an open single-quoted span, a word-initial apostrophe
+    or a nested quote never restarts the span and never drops its prefix."""
+
+    @pytest.mark.parametrize(
+        ("prose", "span"),
+        [
+            ("The rule is 'never use '90s crypto' in prod.", "never use '90s crypto"),
+            (
+                "The rule is 'use flag --mode='strict' always' in prod.",
+                "use flag --mode='strict' always",
+            ),
+        ],
+    )
+    def test_the_whole_quote_is_one_span(self, prose: str, span: str) -> None:
+        assert mod._quoted_spans(prose) == [span]
+
+    def test_altering_the_prefix_of_a_nested_quote_fails(self, tmp_path: Path) -> None:
+        prose = "The rule is 'use flag --mode='strict' always' in prod."
+        record = _yaml(EVIDENCE="use flag --mode='strict' sometimes")
+        passed, errors = _gate(record, prose, tmp_path)
+        assert passed is False
+        assert _has(errors, "quote_not_preserved", "use flag --mode='strict' always"), errors
