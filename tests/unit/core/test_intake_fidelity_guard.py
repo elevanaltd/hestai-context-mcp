@@ -188,7 +188,8 @@ class TestRuleTwoScripts:
         # punctuation, a Latin modifier letter and Common letters (double-struck N,
         # mathematical bold A, micro sign).
         record = _yaml(
-            NOTE="caf\u00e9 na\u00efve e\u0301 \u2014 42 \u201cok\u201d \u02b0 \u2115 \U0001d400 \u00b5"
+            NOTE="caf\u00e9 na\u00efve e\u0301 \u2014 42 \u201cok\u201d "
+            "\u02b0 \u2115 \U0001d400 \u00b5"
         )
         passed, errors = _gate(record, prose, tmp_path)
         assert passed is True, errors

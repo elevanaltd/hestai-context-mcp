@@ -418,7 +418,8 @@ async def submit_governance(
     (prose backend over the provider-agnostic AIClient port) author the record --
     a DECISION_RECORD as quoted YAML, a facet card as OCTAVE (PR-B #195) -- then
     the call REJOINS the same Stage-3 validator + Stage-4 linker tail, with the
-    prose fidelity guard checking the record against the prose after Gate A. The return dict additionally carries a ``metrics`` field
+    prose fidelity guard checking the record against the prose after Gate A.
+    The return dict additionally carries a ``metrics`` field
     {tokens, cost, model}. Output is gated by the validator + human PR review
     (no auto-merge); cost caps abort runaway calls with a structured error.
 
