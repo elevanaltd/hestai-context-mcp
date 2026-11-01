@@ -257,11 +257,17 @@ def test_a_wrapped_list_inside_a_block_does_not_leak_into_meta_fields() -> None:
     assert parsed["fields"]["TOPIC"] == "t"
 
 
-def test_an_unclosed_list_inside_a_block_is_not_a_meta_reject() -> None:
-    """Block lines are not META: a never-closed list in a block is out of this reader's scope."""
+def test_an_unclosed_list_inside_a_block_is_a_record_reject() -> None:
+    """A never-closed list in a CURRENT / RULINGS block rejects the whole record (#239).
+
+    Malformed list handling is total across contexts: the block context is no exception.
+    The reject names the line where the list opens; the record parses to the empty record.
+    """
     text = _record("  TOPIC::t\nRULINGS:\n  R1:\n    AFFECTS::[\n      A,\n")
-    assert parse_decision_record(text)["token"] == "HO-CUBIC-A-20260101"
-    assert agr_read.parse_failure_detail(text) is None
+    assert agr_read.parse_failure_detail(text) == {"line": 12, "construct": "unterminated_list"}
+    parsed = parse_decision_record(text)
+    assert parsed["token"] is None
+    assert parsed["fields"] == {}
 
 
 def test_a_meta_wrapped_list_before_a_block_still_reads_and_the_block_is_untouched() -> None:
