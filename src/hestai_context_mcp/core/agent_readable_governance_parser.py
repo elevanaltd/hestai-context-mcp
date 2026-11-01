@@ -556,10 +556,13 @@ def _scan_octave_fields(
             continue
         span = by_opener.get(number)
         if span is not None:
+            if span.status != "closed":
+                # A malformed span rejects the record in EVERY context, blocks included,
+                # BEFORE any block-context skip: a broken list in RULINGS / CURRENT is as
+                # unparseable as one in META.
+                return fields, {"line": span.opener, "construct": span.status}
             if span.block is not None and not within_blocks:
                 continue
-            if span.status != "closed":
-                return fields, {"line": span.opener, "construct": span.status}
             assert span.closer is not None
             fields.append(
                 OctaveField(span.key, _compact_list(span.parts), span.opener, True, span.closer)
@@ -681,7 +684,13 @@ def collect_topic_blocks(text: str | None) -> TopicBlocks:
     yaml = is_yaml_front_matter(text)
     entry: RulingEntry | None = None
     interior = _closed_interior(text)  # list text inside a block is never an entry
+    # A malformed list (any context) makes the record unparseable: nothing from the line
+    # where it opens onward is read, so no entry is ever taken from past the break.
+    reject = None if yaml else _scan_octave_fields(text, True)[1]
+    stop = None if reject is None else reject["line"]
     for number, (block, line) in enumerate(annotate_lines(text), start=1):
+        if stop is not None and number >= stop:
+            break
         if block is None or number in interior:
             continue
         if block == "CURRENT":
