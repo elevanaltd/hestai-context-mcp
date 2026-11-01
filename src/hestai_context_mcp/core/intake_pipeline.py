@@ -317,8 +317,12 @@ async def run_intake_pipeline(
     *,
     max_output_tokens: int | None = None,
     max_cost_usd: float | None = None,
+    write_adr: bool = False,
 ) -> PipelineResult:
-    """Compile prose to OCTAVE, validate, retry once, or abort.
+    """Compile prose to a record, validate, retry once, or abort.
+
+    ``write_adr`` (#112) stamps ``human_adr_ref`` INSIDE the guarded attempt, so the
+    gate and the fidelity guard judge the exact bytes the linker writes (CE on #246).
 
     Args:
         working_dir: Project root (for token lookups in the gate).
@@ -369,15 +373,26 @@ async def run_intake_pipeline(
             }
 
         octave = compiled["octave"]
-        passed, regex_result, errors, last_available = _gate(
-            working_dir, octave, intake_context.prose_input
-        )
+        prose = intake_context.prose_input
+        passed, regex_result, errors, last_available = _gate(working_dir, octave, prose)
+        if passed and write_adr:
+            # Critical-Engineer: consulted for fidelity and corruption risk (CE on #246).
+            # The deterministic stamp can replace a field that carried a guarded quote,
+            # so the stamped record goes through the whole gate again.
+            octave = _stamp_record(regex_result.canonical_content or octave, regex_result)
+            passed, regex_result, errors, last_available = _gate(working_dir, octave, prose)
+            errors = [f"HUMAN_ADR_REF stamp failed re-validation: {e}" for e in errors]
+        if passed:
+            # A YAML record continues as its canonical bytes (the content-mode write
+            # path, ADR-RFC-ARCH-004 §1.1); OCTAVE continues unchanged. The guard runs
+            # once more on exactly these bytes, the ones the linker writes.
+            octave = regex_result.canonical_content or octave
+            errors = _fidelity_errors(octave, prose)
+            passed = not errors
         if passed:
             return {
                 "ok": True,
-                # A YAML record continues as its canonical bytes (the content-mode
-                # write path, ADR-RFC-ARCH-004 §1.1); OCTAVE continues unchanged.
-                "octave": regex_result.canonical_content or octave,
+                "octave": octave,
                 "validation": regex_result,
                 "validation_errors": [],
                 "metrics": last_metrics,
@@ -420,6 +435,7 @@ def _intake_failure_result(pipeline: PipelineResult, dry_run: bool) -> dict[str,
         "in_flight_branches": [],
         "in_flight_pr_urls": {},
         "in_flight_pr_lookup_error": None,
+        "adr_target_path": None,
         "validation_errors": pipeline["validation_errors"],
         "octave_validation": None,
         "real_validation_available": pipeline["real_validation_available"],
@@ -453,6 +469,14 @@ def _fail_closed_result(pipeline: PipelineResult, dry_run: bool) -> dict[str, An
         "metrics": pipeline["metrics"],
         "dry_run": dry_run,
     }
+
+
+def _stamp_record(record: str, validation: ValidationResult) -> str:
+    """Stamp ``human_adr_ref`` with the record's own TOKEN in its own syntax (#112)."""
+    token = validation.token or ""
+    if validation.syntax == "yaml":
+        return _stamp_yaml_human_adr_ref(record, token)
+    return _stamp_human_adr_ref(record, token)
 
 
 def _stamp_yaml_human_adr_ref(record: str, token: str) -> str:
@@ -514,6 +538,7 @@ async def run_intake_to_pr(
         intake_context,
         max_output_tokens=max_output_tokens,
         max_cost_usd=max_cost_usd,
+        write_adr=write_adr,
     )
 
     if not pipeline["ok"] or pipeline["octave"] is None or pipeline["validation"] is None:
@@ -541,50 +566,11 @@ async def run_intake_to_pr(
         if require_real_validation:
             return _fail_closed_result(pipeline, dry_run)
 
-    # --- Two-birds (#112): deterministic HUMAN_ADR_REF stamp + ADR prose ---
-    # The validated OCTAVE and TOKEN are known here. When write_adr is set we
-    # stamp the AGR with HUMAN_ADR_REF::<token> (engine-side, NOT AI-echoed) and
-    # RE-VALIDATE that the stamped record still passes Gate A before the linker
-    # writes it — so a stamp can never smuggle an invalid record to disk. The
-    # verbatim prose becomes the ADR doc the linker dumb-writes alongside.
+    # --- Two-birds (#112): the HUMAN_ADR_REF stamp already ran inside the guarded
+    # attempt (run_intake_pipeline), so the validated bytes ARE the bytes to write.
+    # The verbatim prose becomes the ADR doc the linker dumb-writes alongside.
     octave_to_link = pipeline["octave"]
-    adr_prose: str | None = None
-    if write_adr:
-        token = pipeline["validation"].token or ""
-        if pipeline["validation"].syntax == "yaml":
-            stamped = _stamp_yaml_human_adr_ref(octave_to_link, token)
-            restamped_validation = validate_record_content(working_dir, stamped)
-            stamped = restamped_validation.canonical_content or stamped
-        else:
-            stamped = _stamp_human_adr_ref(octave_to_link, token)
-            restamped_validation = validate_octave_content(working_dir, stamped)
-        if not restamped_validation.valid:
-            # The stamp broke Gate A (should be impossible for token-form #11):
-            # abort BEFORE the linker — no write, no PR. Hallucination immunity.
-            return {
-                "success": False,
-                "token": token,
-                "card_type": pipeline["validation"].card_type,
-                "target_path": None,
-                "adr_target_path": None,
-                "branch": None,
-                "pr_url": None,
-                "in_flight": None,
-                "in_flight_branches": [],
-                "in_flight_pr_urls": {},
-                "in_flight_pr_lookup_error": None,
-                "validation_errors": [
-                    "HUMAN_ADR_REF stamp failed Gate-A re-validation: "
-                    + "; ".join(restamped_validation.errors)
-                ],
-                "octave_validation": None,
-                "real_validation_available": real_validation_available,
-                "octave": stamped,
-                "metrics": pipeline["metrics"],
-                "dry_run": dry_run,
-            }
-        octave_to_link = stamped
-        adr_prose = intake_context.prose_input
+    adr_prose = intake_context.prose_input if write_adr else None
 
     loop = asyncio.get_running_loop()
     linker_fn = partial(
