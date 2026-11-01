@@ -1,5 +1,9 @@
 """Stage-3 GATE: validate -> retry-once -> abort pipeline (RFC #53 Gate C, T3).
 
+Prose mode writes a DECISION_RECORD as quoted YAML (HO-RECORDS-YAML-DEFAULT-20261031)
+through the content-mode YAML seam, and every compiled record passes the prose
+fidelity guard (issue #195, HO-PROSE-FIDELITY-GUARD-195-20261101) after Gate A.
+
 Drives the Stage-2 prose->OCTAVE compiler through the EXISTING Stage-3 gate and
 enforces the retry/abort contract:
 
@@ -27,10 +31,19 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import re
+import unicodedata
 from functools import partial
 from pathlib import Path
 from typing import Any, TypedDict
 
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    collect_topic_blocks,
+    encode_yaml_scalar,
+    is_yaml_front_matter,
+    parse_decision_record,
+    read_octave_fields,
+)
 from hestai_context_mcp.core.intake_compiler import (
     CompileMetrics,
     compile_prose_to_octave,
@@ -45,6 +58,7 @@ from hestai_context_mcp.tools.governance.linker import _stamp_human_adr_ref, run
 from hestai_context_mcp.tools.governance.type_checker import (
     ValidationResult,
     validate_octave_content,
+    validate_record_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,13 +112,189 @@ class PipelineResult(TypedDict):
     real_validation_available: bool
 
 
-def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[str], bool]:
-    """Run the existing two-stage gate.
+# --- Prose-mode fidelity guard (issue #195, HO-PROSE-FIDELITY-GUARD-195-20261101) ---
+# Compares the compiled record with the SOURCE prose. Regex/scan only (North Star §4),
+# stdlib only (PROD::I6), fail-loud, never auto-fix: a failure is an informed-retry
+# error like any Gate A error, and aborts once the shared budget is spent.
+_MIN_QUOTE_CHARS = 8
+_DOUBLE_SPAN_RE = re.compile(r'"([^"\n]*)"|“([^”\n]*)”')
+# stdlib ``unicodedata`` has no Script property, so a letter's script is read from the
+# first word of its Unicode name ("ARABIC LETTER BEH" -> ARABIC; any name containing
+# LATIN -> LATIN). Always allowed: Latin, and the name words of Common letters
+# (letterlike and mathematical letters, modifier letters). Inherited characters are
+# combining marks, not letters, so they are never checked.
+_ALWAYS_ALLOWED_SCRIPTS = frozenset(
+    {
+        "LATIN",
+        *("MATHEMATICAL", "MODIFIER", "DOUBLE-STRUCK", "SCRIPT", "BLACK-LETTER", "PLANCK"),
+        *("TURNED", "FEMININE", "MASCULINE", "MICRO", "CARON", "EULER", "KELVIN"),
+        *("ANGSTROM", "INFORMATION", "ROMAN", "VERTICAL", "ALEF", "BET", "GIMEL", "DALET"),
+        "KATAKANA-HIRAGANA",
+    }
+)
+# A two-digit elision ('90s, '24) is an apostrophe, never an opening quote.
+_ELISION_RE = re.compile(r"\d\d s? (?![\w'’])", re.X)
+_WIDTH_WORDS = frozenset({"HALFWIDTH", "FULLWIDTH"})
+_PROSE_YAML_ERROR = (
+    "PROSE_MODE_YAML: prose mode writes a DECISION_RECORD as quoted YAML (first line ---), "
+    "never OCTAVE (HO-RECORDS-YAML-DEFAULT-20261031)."
+)
+
+
+def _quoted_spans(text: str) -> list[str]:
+    """Text between double quotes (straight or curly) and between DELIMITING single quotes.
+
+    A single quote opens a span only when it does not follow a letter, digit or
+    combining mark (so after whitespace, a line start, punctuation or a symbol such as
+    ``:`` ``=`` ``(``), is followed by non-whitespace, and is not a two-digit elision
+    (``'90s``). It closes a span only when it follows non-whitespace and is followed by
+    whitespace, the end of the text, or anything but a letter, digit or mark. So an
+    apostrophe (``don't``, ``the team's``, ``rock'n'roll``) never opens or closes one.
+    ``''`` is an empty span. Spans nest: a quote opened inside an open span closes
+    before it and never restarts it. A later plausible closer on the same line, with no
+    opener in between, extends the span just closed (``'the operators' ruling must
+    stand'``): every reading is guarded (HC ruling R1 on #246). Only maximal spans are
+    returned, since each contains the shorter readings and inner spans. Spans never
+    cross a newline. One linear pass.
+    """
+    spans = [m.group(1) or m.group(2) or "" for m in _DOUBLE_SPAN_RE.finditer(text)]
+    stack: list[int] = []  # positions of the open single quotes, innermost last
+    closed: list[tuple[int, int]] = []  # maximal closed spans, ordered by start
+    extend: tuple[int, int] | None = None  # (start, depth) of the span just closed
+
+    def _close(start: int, end: int) -> None:
+        while closed and closed[-1][0] >= start:
+            closed.pop()  # a shorter reading or an inner span, contained in this one
+        closed.append((start, end))
+
+    for i, char in enumerate(text):
+        if char == "\n":
+            stack.clear()
+            extend = None
+            continue
+        before = text[i - 1] if i else " "
+        after = text[i + 1] if i + 1 < len(text) else " "
+        closes = char in "'’" and not before.isspace() and _delimits(after)
+        if closes and extend is not None and extend[1] == len(stack):
+            _close(extend[0], i)  # a later plausible closer of the span just closed
+            if not stack:
+                continue
+        if closes and stack:
+            start = stack.pop()
+            extend = None
+            if i > start + 1:  # '' is an empty span, never the opener of the next one
+                _close(start, i)
+                extend = (start, len(stack))
+        elif (
+            char in "'‘"
+            and _delimits(before)
+            and not after.isspace()
+            and not _ELISION_RE.match(text, i + 1)
+        ):
+            stack.append(i)
+            extend = None
+    return spans + [text[start + 1 : end] for start, end in closed]
+
+
+def _delimits(char: str) -> bool:
+    """True unless ``char`` is a letter, digit or combining mark (part of a word)."""
+    return not (char.isalnum() or unicodedata.category(char)[0] == "M")
+
+
+def _script(char: str) -> str:
+    """A letter's script key: its Unicode name's first word, width prefixes dropped."""
+    words = [w for w in unicodedata.name(char, "").split() if w not in _WIDTH_WORDS]
+    if "LATIN" in words:
+        return "LATIN"
+    key = words[0] if words else "UNNAMED"
+    return "CJK" if key == "IDEOGRAPHIC" else key  # 々 and 〆 are Han
+
+
+def _record_values(record: str) -> list[tuple[str, str]]:
+    """Every decoded field value of a compiled record as ``(label, value)``, blocks included."""
+    pairs: list[tuple[str, str]] = []
+    if is_yaml_front_matter(record):
+        parsed = parse_decision_record(record)
+        pairs += [(k.upper(), v) for k, v in parsed.items() if isinstance(v, str)]
+        pairs += list(parsed["fields"].items())
+    else:
+        fields, _reject = read_octave_fields(record)
+        for field in fields:
+            value = field.value
+            quoted = len(value) >= 2 and value[0] == value[-1] == '"'
+            pairs.append((field.key, value[1:-1] if quoted else value))
+    blocks = collect_topic_blocks(record)
+    for block, entries in (("CURRENT", blocks["current"]), ("RULINGS", blocks["rulings"])):
+        for entry in entries:
+            pairs += [
+                (f"{block} {entry['id']} {key.upper()}", value)
+                for key, value in entry.items()
+                if key != "id" and isinstance(value, str)
+            ]
+    return pairs
+
+
+def _fidelity_errors(record: str, prose: str) -> list[str]:
+    """The four-rule fidelity guard's rules (1)-(3); rule (4) is the caller's retry loop."""
+    errors: list[str] = []
+    values = _record_values(record)
+    # (1) every quoted span of 8+ characters in the prose survives byte-identical.
+    for span in dict.fromkeys(_quoted_spans(prose)):
+        if len(span) >= _MIN_QUOTE_CHARS and not any(span in value for _, value in values):
+            errors.append(
+                f'FIDELITY quote_not_preserved: the prose quotes "{span}" but no field value '
+                "carries it byte-identical; copy quoted text exactly."
+            )
+    # (2) letters only from the prose's scripts, or Latin / Common / Inherited.
+    allowed = _ALWAYS_ALLOWED_SCRIPTS | {_script(c) for c in prose if c.isalpha()}
+    for number, line in enumerate(record.split("\n"), start=1):
+        foreign = [c for c in line if c.isalpha() and _script(c) not in allowed]
+        if foreign:
+            scripts = ", ".join(sorted({_script(c) for c in foreign}))
+            errors.append(
+                f'FIDELITY non_source_script: line {number} has {scripts} letters "'
+                f'{"".join(foreign)}" that the prose never uses; write only in its scripts.'
+            )
+    # (3) VERBATIM whole value; OPERATOR_RULING and *_VERBATIM quoted spans (any length).
+    for label, value in values:
+        name = label.rsplit(" ", 1)[-1]
+        if name == "VERBATIM" and (not value or value not in prose):
+            # An empty value is a substring of any prose; it never counts as verbatim.
+            errors.append(
+                f'FIDELITY verbatim_not_in_prose: {label} "{value}" is empty or not a '
+                "byte-exact substring of the prose."
+            )
+        elif name == "OPERATOR_RULING" or name.endswith("_VERBATIM"):
+            spans = [span for span in _quoted_spans(value) if span]
+            if not spans:  # HC ruling R2 on #246: no framing-only verbatim field
+                errors.append(
+                    f"FIDELITY field_lacks_quote: {label} carries no quoted span; quote "
+                    "the operator's words exactly from the prose, or omit the field when "
+                    "the prose has none."
+                )
+            errors += [
+                f'FIDELITY quote_not_in_prose: {label} quotes "{span}", which is not a '
+                "byte-exact substring of the prose."
+                for span in spans
+                if span not in prose
+            ]
+    return errors
+
+
+def _gate(
+    working_dir: Path, record: str, prose: str
+) -> tuple[bool, ValidationResult, list[str], bool]:
+    """Run Gate A, then the prose fidelity guard, then Gate B (OCTAVE only).
 
     Returns ``(passed, regex_result, errors, real_validation_available)``. The
     last element (#108.4) reports whether Gate B's real validator is actually
     available. A regex-fail short-circuit still reports backend availability
     accurately without running full validation.
+
+    A quoted-YAML record (first line ``---``) is judged by the Gate A YAML branch
+    through the same seam content mode uses (``validate_record_content``); Gate B is
+    OCTAVE-only and is not applied to it (ADR-RFC-ARCH-004 §1.1). A DECISION_RECORD
+    compiled as OCTAVE is rejected: prose mode writes decision records as quoted YAML.
     """
     # Gate A (regex) carries the §4.1 #13 reasoning-density guard (≤40 words,
     # no newline on DECISION/BECAUSE), so the verbosity rule is enforced HERE,
@@ -112,16 +302,31 @@ def _gate(working_dir: Path, octave: str) -> tuple[bool, ValidationResult, list[
     # truth across all submission paths (#108-item-2 unification). A verbose
     # record therefore fails Gate A directly; the failure flows through the same
     # informed-retry/abort path as any schema failure (no separate Gate-C lint).
-    regex_result = validate_octave_content(working_dir, octave)
+    is_yaml = is_yaml_front_matter(record)
+    if is_yaml:
+        regex_result = validate_record_content(working_dir, record)
+    else:
+        regex_result = validate_octave_content(working_dir, record)
     octave_validator = get_octave_validator()
     real_validation_available = not isinstance(
         octave_validator,
         UnavailableOctaveValidator,
     )
+    # The YAML form is named even beside Gate A errors, so the one informed retry
+    # learns it before the shared budget is spent.
+    form_errors = (
+        [_PROSE_YAML_ERROR] if not is_yaml and regex_result.card_type == "DECISION_RECORD" else []
+    )
     if not regex_result.valid:
-        return False, regex_result, list(regex_result.errors), real_validation_available
+        errors = [*regex_result.errors, *form_errors]
+        return False, regex_result, errors, real_validation_available
 
-    octave_result = octave_validator.validate(octave)
+    # Third check (#195): the fidelity guard, after Gate A, against the source prose.
+    errors = [*form_errors, *_fidelity_errors(record, prose)]
+    if errors or is_yaml:
+        return not errors, regex_result, errors, real_validation_available
+
+    octave_result = octave_validator.validate(record)
     if not octave_result.ok:
         errors = [
             f"[{e.get('code', '')}] {e.get('message', '')}".strip() for e in octave_result.errors
@@ -141,8 +346,8 @@ def _augment_prompt_with_errors(ctx: IntakeContext, errors: list[str]) -> Intake
     augmented = (
         f"{ctx.prompt}\n"
         "BEGIN_VALIDATION_FEEDBACK\n"
-        "The previous attempt FAILED OCTAVE validation with these errors. "
-        "Produce a corrected single OCTAVE block that resolves ALL of them:\n"
+        "The previous attempt FAILED validation with these errors. "
+        "Produce a corrected single record that resolves ALL of them:\n"
         f"{error_block}\n"
         "END_VALIDATION_FEEDBACK\n"
     )
@@ -155,8 +360,12 @@ async def run_intake_pipeline(
     *,
     max_output_tokens: int | None = None,
     max_cost_usd: float | None = None,
+    write_adr: bool = False,
 ) -> PipelineResult:
-    """Compile prose to OCTAVE, validate, retry once, or abort.
+    """Compile prose to a record, validate, retry once, or abort.
+
+    ``write_adr`` (#112) stamps ``human_adr_ref`` INSIDE the guarded attempt, so the
+    gate and the fidelity guard judge the exact bytes the linker writes (CE on #246).
 
     Args:
         working_dir: Project root (for token lookups in the gate).
@@ -207,7 +416,22 @@ async def run_intake_pipeline(
             }
 
         octave = compiled["octave"]
-        passed, regex_result, errors, last_available = _gate(working_dir, octave)
+        prose = intake_context.prose_input
+        passed, regex_result, errors, last_available = _gate(working_dir, octave, prose)
+        if passed and write_adr:
+            # Critical-Engineer: consulted for fidelity and corruption risk (CE on #246).
+            # The deterministic stamp can replace a field that carried a guarded quote,
+            # so the stamped record goes through the whole gate again.
+            octave = _stamp_record(regex_result.canonical_content or octave, regex_result)
+            passed, regex_result, errors, last_available = _gate(working_dir, octave, prose)
+            errors = [f"HUMAN_ADR_REF stamp failed re-validation: {e}" for e in errors]
+        if passed:
+            # A YAML record continues as its canonical bytes (the content-mode write
+            # path, ADR-RFC-ARCH-004 §1.1); OCTAVE continues unchanged. The guard runs
+            # once more on exactly these bytes, the ones the linker writes.
+            octave = regex_result.canonical_content or octave
+            errors = _fidelity_errors(octave, prose)
+            passed = not errors
         if passed:
             return {
                 "ok": True,
@@ -224,7 +448,12 @@ async def run_intake_pipeline(
             # Informed retry: append the validation errors to the prompt.
             ctx = _augment_prompt_with_errors(ctx, errors)
 
-    # Exhausted attempts: ABORT. No write, no linker (structural invariant).
+    # Exhausted attempts: ABORT loudly. No write, no linker (structural invariant).
+    logger.warning(
+        "Prose intake aborted after %d attempts; last errors: %s",
+        _MAX_ATTEMPTS,
+        "; ".join(last_errors),
+    )
     return {
         "ok": False,
         "octave": None,
@@ -249,6 +478,7 @@ def _intake_failure_result(pipeline: PipelineResult, dry_run: bool) -> dict[str,
         "in_flight_branches": [],
         "in_flight_pr_urls": {},
         "in_flight_pr_lookup_error": None,
+        "adr_target_path": None,
         "validation_errors": pipeline["validation_errors"],
         "octave_validation": None,
         "real_validation_available": pipeline["real_validation_available"],
@@ -282,6 +512,31 @@ def _fail_closed_result(pipeline: PipelineResult, dry_run: bool) -> dict[str, An
         "metrics": pipeline["metrics"],
         "dry_run": dry_run,
     }
+
+
+def _stamp_record(record: str, validation: ValidationResult) -> str:
+    """Stamp ``human_adr_ref`` with the record's own TOKEN in its own syntax (#112)."""
+    token = validation.token or ""
+    if validation.syntax == "yaml":
+        return _stamp_yaml_human_adr_ref(record, token)
+    return _stamp_human_adr_ref(record, token)
+
+
+def _stamp_yaml_human_adr_ref(record: str, token: str) -> str:
+    """Return a canonical YAML ``record`` with ``human_adr_ref`` set to ``token`` (#112).
+
+    The YAML counterpart of the linker's OCTAVE stamp: any existing top-level
+    ``human_adr_ref`` line is dropped and one is inserted after the opening fence;
+    the caller re-validates, and Gate A re-emits the canonical bytes (key order).
+    Unchanged when there is no closing fence (Gate A then rejects it).
+    """
+    lines = record.split("\n")
+    close = next((i for i in range(1, len(lines)) if lines[i] == "---"), None)
+    if close is None:
+        return record
+    kept = [line for line in lines[1:close] if not line.startswith("human_adr_ref:")]
+    stamp = f"human_adr_ref: {encode_yaml_scalar(token)}"
+    return "\n".join([lines[0], stamp, *kept, *lines[close:]])
 
 
 async def run_intake_to_pr(
@@ -326,6 +581,7 @@ async def run_intake_to_pr(
         intake_context,
         max_output_tokens=max_output_tokens,
         max_cost_usd=max_cost_usd,
+        write_adr=write_adr,
     )
 
     if not pipeline["ok"] or pipeline["octave"] is None or pipeline["validation"] is None:
@@ -337,7 +593,9 @@ async def run_intake_to_pr(
     # when real validation is REQUIRED but Gate B was unavailable, hard-block
     # BEFORE the linker (no branch, no PR), mirroring the octave_content path.
     real_validation_available = pipeline["real_validation_available"]
-    if not real_validation_available:
+    # Gate B never runs on a quoted-YAML record, so its absence cannot block one; the
+    # signal is still surfaced, as in content mode (ADR-RFC-ARCH-004 §1.1).
+    if not real_validation_available and pipeline["validation"].syntax != "yaml":
         logger.warning(
             "Gate B real OCTAVE validation unavailable (the 'validation' extra is "
             "not installed); proceeding on regex Gate A only unless fail-closed is "
@@ -351,45 +609,11 @@ async def run_intake_to_pr(
         if require_real_validation:
             return _fail_closed_result(pipeline, dry_run)
 
-    # --- Two-birds (#112): deterministic HUMAN_ADR_REF stamp + ADR prose ---
-    # The validated OCTAVE and TOKEN are known here. When write_adr is set we
-    # stamp the AGR with HUMAN_ADR_REF::<token> (engine-side, NOT AI-echoed) and
-    # RE-VALIDATE that the stamped record still passes Gate A before the linker
-    # writes it — so a stamp can never smuggle an invalid record to disk. The
-    # verbatim prose becomes the ADR doc the linker dumb-writes alongside.
+    # --- Two-birds (#112): the HUMAN_ADR_REF stamp already ran inside the guarded
+    # attempt (run_intake_pipeline), so the validated bytes ARE the bytes to write.
+    # The verbatim prose becomes the ADR doc the linker dumb-writes alongside.
     octave_to_link = pipeline["octave"]
-    adr_prose: str | None = None
-    if write_adr:
-        token = pipeline["validation"].token or ""
-        stamped = _stamp_human_adr_ref(octave_to_link, token)
-        restamped_validation = validate_octave_content(working_dir, stamped)
-        if not restamped_validation.valid:
-            # The stamp broke Gate A (should be impossible for token-form #11):
-            # abort BEFORE the linker — no write, no PR. Hallucination immunity.
-            return {
-                "success": False,
-                "token": token,
-                "card_type": pipeline["validation"].card_type,
-                "target_path": None,
-                "adr_target_path": None,
-                "branch": None,
-                "pr_url": None,
-                "in_flight": None,
-                "in_flight_branches": [],
-                "in_flight_pr_urls": {},
-                "in_flight_pr_lookup_error": None,
-                "validation_errors": [
-                    "HUMAN_ADR_REF stamp failed Gate-A re-validation: "
-                    + "; ".join(restamped_validation.errors)
-                ],
-                "octave_validation": None,
-                "real_validation_available": real_validation_available,
-                "octave": stamped,
-                "metrics": pipeline["metrics"],
-                "dry_run": dry_run,
-            }
-        octave_to_link = stamped
-        adr_prose = intake_context.prose_input
+    adr_prose = intake_context.prose_input if write_adr else None
 
     loop = asyncio.get_running_loop()
     linker_fn = partial(

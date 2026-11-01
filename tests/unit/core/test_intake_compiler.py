@@ -547,6 +547,37 @@ class TestEndTerminatorGuard:
         assert result["octave"] == no_terminator
 
 
+class TestYamlFrontMatterClip:
+    """Prose mode emits a DECISION_RECORD as quoted YAML (HO-RECORDS-YAML-DEFAULT-20261031).
+
+    The YAML counterpart of the ===END=== guard: anything after the closing ``---``
+    fence would otherwise become the record's verbatim markdown body, so the compiled
+    output is clipped at the closing fence.
+    """
+
+    async def test_trailing_content_after_the_closing_fence_is_stripped(self, patch_client) -> None:
+        front_matter = '---\ntype: "DECISION_RECORD"\ndecision: "Keep it."\n---\n'
+        stub = _StubClient(text=front_matter + "\nThis record captures your intent.\n")
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["ok"] is True
+        assert result["octave"] == front_matter
+
+    async def test_crlf_closing_fence_is_recognised(self, patch_client) -> None:
+        front_matter = '---\r\ntype: "DECISION_RECORD"\r\n---\r\n'
+        stub = _StubClient(text=front_matter + "chatter")
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["octave"] == front_matter
+
+    async def test_unclosed_front_matter_passes_through(self, patch_client) -> None:
+        unclosed = '---\ntype: "DECISION_RECORD"\n'
+        stub = _StubClient(text=unclosed)
+        patch_client(stub)
+        result = await compile_prose_to_octave(_ctx())
+        assert result["octave"] == unclosed  # Gate A rejects it (missing_closing_fence)
+
+
 class TestTruncationMessageContract:
     async def test_truncation_error_message_is_actionable(self, patch_client, monkeypatch) -> None:
         monkeypatch.setenv("HESTAI_INTAKE_MAX_COST_USD", "1000000")

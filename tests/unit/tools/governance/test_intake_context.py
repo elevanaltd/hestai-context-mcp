@@ -247,67 +247,90 @@ class TestBytecodeFewShotAndOperators:
         assert "BEFORE" in ctx.prompt and "AFTER" in ctx.prompt
 
     @staticmethod
-    def _pole_field_line(prompt: str, pole: str, field_name: str) -> str | None:
-        """Return the ``field_name::`` line from one few-shot pole's segment.
+    def _pole_field_value(prompt: str, pole: str, field_name: str) -> str | None:
+        """Return the decoded value of the ``field_name: "..."`` line in one few-shot pole.
 
-        The prompt carries both poles; each ``DECISION::``/``BECAUSE::`` value is a
-        single physical line. We slice the prompt to the requested pole's segment
+        The prompt carries both poles; each quoted-YAML ``decision:``/``because:``
+        line is a single physical line (prose mode writes decision records as quoted
+        YAML, PR-B #195). We slice the prompt to the requested pole's segment
         (BEFORE = between the BEFORE and AFTER labels; AFTER = from the AFTER label
-        on) so the BEFORE and AFTER demonstration lines are never confused. The
-        returned line is fed to the guard exactly as ``_extract_meta_fields``
-        (``^\\s*KEY::value$``) would parse it.
+        on) so the BEFORE and AFTER demonstration lines are never confused, and
+        decode the scalar exactly as the YAML reader does.
         """
+        from hestai_context_mcp.core.agent_readable_governance_parser import (
+            decode_yaml_scalar,
+        )
+
         if pole == "BEFORE":
             segment = prompt.split("BEFORE", 1)[1].split("AFTER", 1)[0]
         else:
             segment = prompt.split("AFTER", 1)[1]
-        return next(
-            (ln for ln in segment.splitlines() if ln.lstrip().startswith(f"{field_name}::")),
+        prefix = f"{field_name.lower()}:"
+        line = next(
+            (ln.strip() for ln in segment.splitlines() if ln.lstrip().startswith(prefix)),
             None,
         )
+        return None if line is None else decode_yaml_scalar(line[len(prefix) :])
 
     def test_fewshot_after_lines_pass_the_gate_a_guard(self, tmp_path: Path) -> None:
         # The few-shot we TEACH must itself pass the guard it teaches: extract the
-        # AFTER DECISION::/BECAUSE:: lines from the assembled prompt and run them
+        # AFTER decision:/because: values from the assembled prompt and run them
         # through the real Gate-A reasoning-density guard. Pure, no AI call.
         from hestai_context_mcp.tools.governance.type_checker import (
             REASONING_FIELDS,
-            _check_reasoning_density,
+            _check_density_value,
         )
 
         _seed_repo(tmp_path)
         ctx = assemble_intake_context(tmp_path, "record a decision")
 
         for field_name in REASONING_FIELDS:
-            line = self._pole_field_line(ctx.prompt, "AFTER", field_name)
-            assert line is not None, f"few-shot AFTER must demonstrate a {field_name}:: line"
+            value = self._pole_field_value(ctx.prompt, "AFTER", field_name)
+            assert value is not None, f"few-shot AFTER must demonstrate a {field_name} line"
             errors: list[str] = []
-            _check_reasoning_density(line, errors)
+            _check_density_value(field_name, value, errors)
             assert errors == [], f"taught AFTER {field_name} example violates Gate-A: {errors}"
 
     def test_fewshot_before_decision_fails_the_gate_a_guard(self, tmp_path: Path) -> None:
-        # Both poles are now test-verified: the BEFORE DECISION value is genuinely
+        # Both poles are test-verified: the BEFORE decision value is genuinely
         # GUARD-FAILING (>40-word multi-sentence prose), so the "REJECTED" label is
         # literally true under the Gate-A ≤40-word guard — not merely a style claim.
         # Pure, no AI call.
         from hestai_context_mcp.tools.governance.type_checker import (
             MAX_REASONING_WORDS,
-            _check_reasoning_density,
+            _check_density_value,
         )
 
         _seed_repo(tmp_path)
         ctx = assemble_intake_context(tmp_path, "record a decision")
 
-        before_line = self._pole_field_line(ctx.prompt, "BEFORE", "DECISION")
-        assert before_line is not None, "few-shot BEFORE must demonstrate a DECISION:: line"
+        before = self._pole_field_value(ctx.prompt, "BEFORE", "DECISION")
+        assert before is not None, "few-shot BEFORE must demonstrate a decision line"
         errors: list[str] = []
-        _check_reasoning_density(before_line, errors)
+        _check_density_value("DECISION", before, errors)
         # The guard must reject the BEFORE pole, and specifically on word count so
         # the REJECTED label maps to the ≤40-word rule the example teaches.
-        assert errors, "few-shot BEFORE DECISION must FAIL the Gate-A guard (REJECTED pole)"
+        assert errors, "few-shot BEFORE decision must FAIL the Gate-A guard (REJECTED pole)"
         assert any(
             f"max {MAX_REASONING_WORDS}" in e for e in errors
         ), f"BEFORE must fail on the ≤{MAX_REASONING_WORDS}-word rule; got: {errors}"
+
+    def test_contract_shows_no_octave_decision_record_field_lines(self) -> None:
+        # cubic P2 on PR #246: an OCTAVE example teaches the shape prose mode must
+        # not emit (an OCTAVE decision record is rejected and burns the shared retry
+        # budget). No ``DECISION::``/``BECAUSE::``/``STATUS::`` anywhere in the contract.
+        import re
+
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        found = re.findall(r"\b(?:DECISION|BECAUSE|STATUS)::", _COMPRESSION_CONTRACT)
+        assert found == [], f"contract still shows OCTAVE decision-record fields: {found}"
+
+    def test_metadata_lines_show_the_yaml_status_form(self) -> None:
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        assert 'status: "PROPOSED"' in _COMPRESSION_CONTRACT
+        assert 'status: "RATIFIED"' in _COMPRESSION_CONTRACT  # named only to forbid it
 
 
 class TestMetadataFidelityContract:
@@ -356,3 +379,42 @@ class TestVerifySupersessionTarget:
     def test_missing_target_returns_false(self, tmp_path: Path) -> None:
         _seed_repo(tmp_path)
         assert verify_supersession_target(tmp_path, "HO-DOES-NOT-EXIST-20260101") is False
+
+
+class TestQuotedTextAndYamlOutputContract:
+    """PR-B (#195): the contract states that quoted text is never compressed, and that
+    a DECISION_RECORD is written as quoted YAML (HO-RECORDS-YAML-DEFAULT-20261031).
+
+    The fidelity guard (intake_pipeline) enforces both; the contract asks for them so a
+    first attempt usually passes without spending the retry budget.
+    """
+
+    def test_contract_says_quoted_text_is_never_compressed(self) -> None:
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        lower = _COMPRESSION_CONTRACT.lower()
+        assert "quoted text is never compressed" in lower
+        assert "byte for byte" in lower
+        assert "only unquoted text is compressed" in lower
+
+    def test_contract_names_the_verbatim_fields(self) -> None:
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        for name in ("VERBATIM", "OPERATOR_RULING", "_VERBATIM"):
+            assert name in _COMPRESSION_CONTRACT, name
+
+    def test_contract_asks_for_a_quoted_yaml_decision_record(self, tmp_path: Path) -> None:
+        _seed_repo(tmp_path)
+        ctx = assemble_intake_context(tmp_path, "record a decision")
+        assert "quoted YAML" in ctx.prompt
+        assert "never OCTAVE" in ctx.prompt
+        assert "facet card stays one OCTAVE block" in ctx.prompt
+
+    def test_contract_says_never_invent_a_verbatim_field(self) -> None:
+        # HC ruling R2 on #246: an OPERATOR_RULING or *_VERBATIM field is emitted only
+        # around the operator's quoted words, never invented.
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        lower = _COMPRESSION_CONTRACT.lower()
+        assert "only when the request quotes the operator's words" in lower
+        assert "never invent" in lower

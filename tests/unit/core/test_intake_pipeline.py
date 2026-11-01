@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 import hestai_context_mcp.core.intake_pipeline as mod
+from hestai_context_mcp.core.agent_readable_governance_parser import emit_yaml_record
 from hestai_context_mcp.core.intake_pipeline import run_intake_pipeline
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 
@@ -32,43 +33,30 @@ from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 # stays live on this file (no path-ignore).
 RECORD_TOKEN = "HO-CONTEXT-MCP-NEWREC-20260601"
 
-# A fully-formed DECISION_RECORD that passes the regex Gate A. Carries every
-# §1.2 required field (post-#88 Gate A enforces presence + TOKEN-date
-# consistency: the 20260601 suffix matches AUTHORED_AT's UTC date).
-_VALID_OCTAVE = (
-    "===DECISION_RECORD===\n"
-    "META:\n"
-    "  TYPE::DECISION_RECORD\n"
-    '  VERSION::"1.0"\n'
-    f'  TOKEN::"{RECORD_TOKEN}"\n'
-    "  STATUS::PROPOSED\n"
-    "  TIER::OPERATIONAL\n"
-    '  DECISION::"Record a decision for the intake pipeline test."\n'
-    '  BECAUSE::"Exercises the Stage-3 gate end to end."\n'
-    '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
-    "===END===\n"
-)
+# A fully-formed DECISION_RECORD that passes Gate A. Carries every §1.2 required
+# field (post-#88 Gate A enforces presence + TOKEN-date consistency: the 20260601
+# suffix matches AUTHORED_AT's UTC date). Prose mode writes a DECISION_RECORD as
+# quoted YAML (HO-RECORDS-YAML-DEFAULT-20261031, PR-B #195), so the fixture is the
+# canonical YAML the pipeline returns.
+_CORE = {
+    "TYPE": "DECISION_RECORD",
+    "VERSION": "1.0",
+    "TOKEN": RECORD_TOKEN,
+    "STATUS": "PROPOSED",
+    "TIER": "OPERATIONAL",
+    "DECISION": "Record a decision for the intake pipeline test.",
+    "BECAUSE": "Exercises the Stage-3 gate end to end.",
+    "AUTHORED_AT": "2026-06-01T00:00:00Z",
+}
+_VALID_RECORD = emit_yaml_record(_CORE)
 _INVALID_OCTAVE = "this is not octave at all"
 
 # Fully-formed but verbose: the DECISION value is far over the v1.1 ≤40-word
 # ceiling. Post-unification (#108-item-2) this is rejected by the SHARED Gate A
 # reasoning-density guard (ADR-RFC-ARCH-004 §4.1 #13) — the same rule the
-# octave_content path enforces — NOT a separate Gate C verbosity lint. The
-# verbose DECISION lives INSIDE the META block.
+# octave_content path enforces — NOT a separate Gate C verbosity lint.
 _VERBOSE_DECISION = " ".join(f"word{i}" for i in range(200))
-_VERBOSE_OCTAVE = (
-    "===DECISION_RECORD===\n"
-    "META:\n"
-    "  TYPE::DECISION_RECORD\n"
-    '  VERSION::"1.0"\n'
-    f'  TOKEN::"{RECORD_TOKEN}"\n'
-    "  STATUS::PROPOSED\n"
-    "  TIER::OPERATIONAL\n"
-    f'  DECISION::"{_VERBOSE_DECISION}"\n'
-    '  BECAUSE::"Exercises the verbosity density backstop."\n'
-    '  AUTHORED_AT::"2026-06-01T00:00:00Z"\n'
-    "===END===\n"
-)
+_VERBOSE_RECORD = emit_yaml_record({**_CORE, "DECISION": _VERBOSE_DECISION})
 
 
 def _ctx(prose: str = "record a decision") -> IntakeContext:
@@ -110,10 +98,10 @@ def stub_backend(monkeypatch: pytest.MonkeyPatch):
 
 class TestHappyPath:
     async def test_valid_first_try_returns_octave(self, tmp_path: Path, stub_backend) -> None:
-        stub_backend.script([_compile_result(_VALID_OCTAVE)])
+        stub_backend.script([_compile_result(_VALID_RECORD)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         assert result["ok"] is True
-        assert result["octave"] == _VALID_OCTAVE
+        assert result["octave"] == _VALID_RECORD
         assert result["validation"] is not None
         assert result["validation"].valid is True
         assert result["attempts"] == 1
@@ -126,7 +114,7 @@ class TestRealValidationAvailabilitySurfaced:
     async def test_available_true_when_validator_available(
         self, tmp_path: Path, stub_backend
     ) -> None:
-        stub_backend.script([_compile_result(_VALID_OCTAVE)])
+        stub_backend.script([_compile_result(_VALID_RECORD)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         assert result["ok"] is True
         assert result["real_validation_available"] is True
@@ -134,14 +122,14 @@ class TestRealValidationAvailabilitySurfaced:
     async def test_available_false_when_extra_absent(
         self, tmp_path: Path, stub_backend, monkeypatch
     ) -> None:
-        from hestai_context_mcp.ports.octave_validator import OctaveValidationResult
+        from hestai_context_mcp.ports.octave_validator import UnavailableOctaveValidator
 
-        class _Unavailable:
-            def validate(self, content: str) -> OctaveValidationResult:
-                return OctaveValidationResult(ok=True, errors=[], warnings=[], available=False)
-
-        monkeypatch.setattr(mod, "get_octave_validator", lambda: _Unavailable(), raising=True)
-        stub_backend.script([_compile_result(_VALID_OCTAVE)])
+        # A YAML record never runs Gate B; availability is the port's actual state,
+        # computed as content mode does (PR-B #195).
+        monkeypatch.setattr(
+            mod, "get_octave_validator", lambda: UnavailableOctaveValidator(), raising=True
+        )
+        stub_backend.script([_compile_result(_VALID_RECORD)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         # Regex Gate A still gated -> a valid doc passes; availability is surfaced.
         assert result["ok"] is True
@@ -158,7 +146,7 @@ class TestRealValidationAvailabilitySurfaced:
             lambda: UnavailableOctaveValidator(),
             raising=True,
         )
-        passed, _, _, available = mod._gate(tmp_path, _INVALID_OCTAVE)
+        passed, _, _, available = mod._gate(tmp_path, _INVALID_OCTAVE, "record a decision")
         assert passed is False
         assert available is False
 
@@ -170,24 +158,24 @@ class TestRealValidationAvailabilitySurfaced:
                 raise AssertionError("Gate B must not run on a Gate-A failure")
 
         monkeypatch.setattr(mod, "get_octave_validator", lambda: _Available(), raising=True)
-        passed, _, _, available = mod._gate(tmp_path, _INVALID_OCTAVE)
+        passed, _, _, available = mod._gate(tmp_path, _INVALID_OCTAVE, "record a decision")
         assert passed is False
         assert available is True
 
 
 class TestRetryOnce:
     async def test_invalid_then_valid_retries_once(self, tmp_path: Path, stub_backend) -> None:
-        stub_backend.script([_compile_result(_INVALID_OCTAVE), _compile_result(_VALID_OCTAVE)])
+        stub_backend.script([_compile_result(_INVALID_OCTAVE), _compile_result(_VALID_RECORD)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         assert result["ok"] is True
-        assert result["octave"] == _VALID_OCTAVE
+        assert result["octave"] == _VALID_RECORD
         assert result["attempts"] == 2
         assert len(stub_backend.calls) == 2
 
     async def test_retry_prompt_includes_first_attempt_errors(
         self, tmp_path: Path, stub_backend
     ) -> None:
-        stub_backend.script([_compile_result(_INVALID_OCTAVE), _compile_result(_VALID_OCTAVE)])
+        stub_backend.script([_compile_result(_INVALID_OCTAVE), _compile_result(_VALID_RECORD)])
         await run_intake_pipeline(tmp_path, _ctx())
         # Second call's intake_context carries the validation errors in its prompt.
         first_ctx = stub_backend.calls[0][0]
@@ -208,17 +196,17 @@ class TestVerbosityBackstop:
     async def test_verbose_then_compressed_retries_once(self, tmp_path: Path, stub_backend) -> None:
         # First attempt is verbose -> Gate A density guard fails the gate ->
         # informed retry -> second (compressed) attempt passes.
-        stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VALID_OCTAVE)])
+        stub_backend.script([_compile_result(_VERBOSE_RECORD), _compile_result(_VALID_RECORD)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         assert result["ok"] is True
-        assert result["octave"] == _VALID_OCTAVE
+        assert result["octave"] == _VALID_RECORD
         assert result["attempts"] == 2
         # The retry prompt must carry the density feedback so the 2nd attempt is informed.
         retry_ctx = stub_backend.calls[1][0]
         assert "DECISION" in retry_ctx.prompt and "40" in retry_ctx.prompt
 
     async def test_persistently_verbose_aborts(self, tmp_path: Path, stub_backend) -> None:
-        stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VERBOSE_OCTAVE)])
+        stub_backend.script([_compile_result(_VERBOSE_RECORD), _compile_result(_VERBOSE_RECORD)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         assert result["ok"] is False
         assert result["octave"] is None
@@ -254,7 +242,7 @@ class TestAbortImmunity:
         # density gate, so the pipeline aborts. Hallucination immunity must hold
         # on this path too -> ZERO filesystem writes.
         before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-        stub_backend.script([_compile_result(_VERBOSE_OCTAVE), _compile_result(_VERBOSE_OCTAVE)])
+        stub_backend.script([_compile_result(_VERBOSE_RECORD), _compile_result(_VERBOSE_RECORD)])
         result = await run_intake_pipeline(tmp_path, _ctx())
         # Precondition: this really is the density (Gate A) abort path.
         assert result["ok"] is False
