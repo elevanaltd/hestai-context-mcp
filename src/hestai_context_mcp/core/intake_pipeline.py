@@ -142,9 +142,10 @@ _PROSE_YAML_ERROR = (
 def _quoted_spans(text: str) -> list[str]:
     """Text between double quotes (straight or curly) and between DELIMITING single quotes.
 
-    A single quote opens a span only after whitespace, a line start or opening
-    punctuation, and closes it only before whitespace, a line end or punctuation, so an
-    apostrophe (``don't``, ``the team's``) never opens or closes one. A later opener
+    A single quote opens a span only when it does not follow a letter, digit or
+    combining mark (so after whitespace, a line start, punctuation such as ``:`` ``=``
+    ``(``), and closes it only before whitespace, a line end or punctuation, so an
+    apostrophe (``don't``, ``the team's``, ``rock'n'roll``) never opens or closes one. A later opener
     restarts the span, so a word-initial apostrophe (``'90s``) cannot swallow a real
     quote. Spans never cross a newline. One linear pass.
     """
@@ -160,7 +161,7 @@ def _quoted_spans(text: str) -> list[str]:
         if opened is not None and char in "'’" and i > opened + 1 and closes:
             spans.append(text[opened + 1 : i])
             opened = None
-        elif char in "'‘" and (before.isspace() or unicodedata.category(before) in ("Ps", "Pi")):
+        elif char in "'‘" and not (before.isalnum() or unicodedata.category(before)[0] == "M"):
             opened = i
     return spans
 
