@@ -262,13 +262,17 @@ def _gate(
         octave_validator,
         UnavailableOctaveValidator,
     )
+    # The YAML form is named even beside Gate A errors, so the one informed retry
+    # learns it before the shared budget is spent.
+    form_errors = (
+        [_PROSE_YAML_ERROR] if not is_yaml and regex_result.card_type == "DECISION_RECORD" else []
+    )
     if not regex_result.valid:
-        return False, regex_result, list(regex_result.errors), real_validation_available
+        errors = [*regex_result.errors, *form_errors]
+        return False, regex_result, errors, real_validation_available
 
     # Third check (#195): the fidelity guard, after Gate A, against the source prose.
-    errors = _fidelity_errors(record, prose)
-    if not is_yaml and regex_result.card_type == "DECISION_RECORD":
-        errors.insert(0, _PROSE_YAML_ERROR)
+    errors = [*form_errors, *_fidelity_errors(record, prose)]
     if errors or is_yaml:
         return not errors, regex_result, errors, real_validation_available
 
