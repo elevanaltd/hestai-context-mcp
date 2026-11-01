@@ -151,24 +151,40 @@ def _quoted_spans(text: str) -> list[str]:
     whitespace, the end of the text, or anything but a letter, digit or mark. So an
     apostrophe (``don't``, ``the team's``, ``rock'n'roll``) never opens or closes one.
     ``''`` is an empty span. Spans nest: a quote opened inside an open span closes
-    before it and never restarts it, and only the outermost closed span is returned
-    (it contains the inner ones). Spans never cross a newline. One linear pass.
+    before it and never restarts it. A later plausible closer on the same line, with no
+    opener in between, extends the span just closed (``'the operators' ruling must
+    stand'``): every reading is guarded (HC ruling R1 on #246). Only maximal spans are
+    returned, since each contains the shorter readings and inner spans. Spans never
+    cross a newline. One linear pass.
     """
     spans = [m.group(1) or m.group(2) or "" for m in _DOUBLE_SPAN_RE.finditer(text)]
     stack: list[int] = []  # positions of the open single quotes, innermost last
     closed: list[tuple[int, int]] = []  # maximal closed spans, ordered by start
+    extend: tuple[int, int] | None = None  # (start, depth) of the span just closed
+
+    def _close(start: int, end: int) -> None:
+        while closed and closed[-1][0] >= start:
+            closed.pop()  # a shorter reading or an inner span, contained in this one
+        closed.append((start, end))
+
     for i, char in enumerate(text):
         if char == "\n":
             stack.clear()
+            extend = None
             continue
         before = text[i - 1] if i else " "
         after = text[i + 1] if i + 1 < len(text) else " "
-        if stack and char in "'’" and not before.isspace() and _delimits(after):
+        closes = char in "'’" and not before.isspace() and _delimits(after)
+        if closes and extend is not None and extend[1] == len(stack):
+            _close(extend[0], i)  # a later plausible closer of the span just closed
+            if not stack:
+                continue
+        if closes and stack:
             start = stack.pop()
+            extend = None
             if i > start + 1:  # '' is an empty span, never the opener of the next one
-                while closed and closed[-1][0] > start:
-                    closed.pop()  # an inner span, contained in this one
-                closed.append((start, i))
+                _close(start, i)
+                extend = (start, len(stack))
         elif (
             char in "'‘"
             and _delimits(before)
@@ -176,6 +192,7 @@ def _quoted_spans(text: str) -> list[str]:
             and not _ELISION_RE.match(text, i + 1)
         ):
             stack.append(i)
+            extend = None
     return spans + [text[start + 1 : end] for start, end in closed]
 
 
