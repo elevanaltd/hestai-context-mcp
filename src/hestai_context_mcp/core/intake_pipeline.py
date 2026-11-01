@@ -524,7 +524,9 @@ async def run_intake_to_pr(
     # when real validation is REQUIRED but Gate B was unavailable, hard-block
     # BEFORE the linker (no branch, no PR), mirroring the octave_content path.
     real_validation_available = pipeline["real_validation_available"]
-    if not real_validation_available:
+    # Gate B never runs on a quoted-YAML record, so its absence cannot block one; the
+    # signal is still surfaced, as in content mode (ADR-RFC-ARCH-004 §1.1).
+    if not real_validation_available and pipeline["validation"].syntax != "yaml":
         logger.warning(
             "Gate B real OCTAVE validation unavailable (the 'validation' extra is "
             "not installed); proceeding on regex Gate A only unless fail-closed is "
