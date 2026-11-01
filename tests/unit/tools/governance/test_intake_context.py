@@ -409,3 +409,12 @@ class TestQuotedTextAndYamlOutputContract:
         assert "quoted YAML" in ctx.prompt
         assert "never OCTAVE" in ctx.prompt
         assert "facet card stays one OCTAVE block" in ctx.prompt
+
+    def test_contract_says_never_invent_a_verbatim_field(self) -> None:
+        # HC ruling R2 on #246: an OPERATOR_RULING or *_VERBATIM field is emitted only
+        # around the operator's quoted words, never invented.
+        from hestai_context_mcp.tools.governance.intake_context import _COMPRESSION_CONTRACT
+
+        lower = _COMPRESSION_CONTRACT.lower()
+        assert "only when the request quotes the operator's words" in lower
+        assert "never invent" in lower

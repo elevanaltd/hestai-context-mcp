@@ -761,3 +761,45 @@ class TestEveryPlausibleReadingIsGuarded:
     def test_an_opener_between_closers_ends_the_readings(self) -> None:
         prose = "Use 'alpha one value' and 'beta two value' here."
         assert mod._quoted_spans(prose) == ["alpha one value", "beta two value"]
+
+
+class TestVerbatimFieldsMustQuote:
+    """HC ruling R2 on #246: a present OPERATOR_RULING or *_VERBATIM field carries at
+    least one non-empty quoted span, each byte-exact in the prose; otherwise it is
+    field_lacks_quote. Absence is not an error."""
+
+    _PROSE = "Shaun ruled in the room today: I confirm this, keep the gate strict and proceed."
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {
+                "OPERATOR_RULING": (
+                    "Shaun Buswell, 2026-06-01, first-party, verbatim: 3. No, abort "
+                    "everything immediately."
+                )
+            },
+            {"RULING_VERBATIM": "He said drop the gate completely and auto-merge."},
+            {"OPERATOR_RULING": "Shaun Buswell, first-party, verbatim: ''"},
+        ],
+    )
+    def test_an_unquoted_or_empty_verbatim_field_fails(
+        self, tmp_path: Path, extra: dict[str, str]
+    ) -> None:
+        passed, errors = _gate(_yaml(**extra), self._PROSE, tmp_path)
+        assert passed is False
+        assert _has(errors, "field_lacks_quote", next(iter(extra))), errors
+
+    def test_a_field_framed_around_a_real_quote_passes(self, tmp_path: Path) -> None:
+        record = _yaml(
+            OPERATOR_RULING=(
+                "Shaun Buswell, 2026-06-01, first-party, verbatim: 'I confirm this, keep "
+                "the gate strict and proceed.'"
+            )
+        )
+        passed, errors = _gate(record, self._PROSE, tmp_path)
+        assert passed is True, errors
+
+    def test_a_record_without_such_a_field_passes(self, tmp_path: Path) -> None:
+        passed, errors = _gate(_yaml(), self._PROSE, tmp_path)
+        assert passed is True, errors
