@@ -157,7 +157,7 @@ def _quoted_spans(text: str) -> list[str]:
             continue
         before = text[i - 1] if i else " "
         after = text[i + 1] if i + 1 < len(text) else " "
-        closes = after.isspace() or unicodedata.category(after)[0] == "P"
+        closes = not (after.isalnum() or unicodedata.category(after)[0] == "M")
         if opened is not None and char in "'’" and i > opened + 1 and closes:
             spans.append(text[opened + 1 : i])
             opened = None
