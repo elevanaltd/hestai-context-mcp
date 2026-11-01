@@ -241,10 +241,11 @@ def _fidelity_errors(record: str, prose: str) -> list[str]:
     # (3) VERBATIM whole value; OPERATOR_RULING and *_VERBATIM quoted spans (any length).
     for label, value in values:
         name = label.rsplit(" ", 1)[-1]
-        if name == "VERBATIM" and value not in prose:
+        if name == "VERBATIM" and (not value or value not in prose):
+            # An empty value is a substring of any prose; it never counts as verbatim.
             errors.append(
-                f'FIDELITY verbatim_not_in_prose: {label} "{value}" is not a byte-exact '
-                "substring of the prose."
+                f'FIDELITY verbatim_not_in_prose: {label} "{value}" is empty or not a '
+                "byte-exact substring of the prose."
             )
         elif name == "OPERATOR_RULING" or name.endswith("_VERBATIM"):
             errors += [
