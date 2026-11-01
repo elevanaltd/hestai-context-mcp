@@ -728,3 +728,36 @@ class TestEmptyVerbatimFails:
         passed, errors = _gate(record, TestRuleThreeVerbatimFields._PROSE, tmp_path)
         assert passed is False
         assert _has(errors, "verbatim_not_in_prose", "VERBATIM"), errors
+
+
+class TestEveryPlausibleReadingIsGuarded:
+    """HC ruling R1 on #246: when an open single-quoted span has more than one
+    plausible closer on its line, every reading is guarded. The longest contains the
+    shortest, so a faithful copy of the whole quote satisfies all of them."""
+
+    _PROSE = "The rule is 'the operators' ruling must stand' for every record."
+
+    def test_the_longest_reading_is_returned(self) -> None:
+        assert mod._quoted_spans(self._PROSE) == ["the operators' ruling must stand"]
+
+    def test_a_faithful_copy_passes(self, tmp_path: Path) -> None:
+        record = _yaml(EVIDENCE="Rule: the operators' ruling must stand")
+        passed, errors = _gate(record, self._PROSE, tmp_path)
+        assert passed is True, errors
+
+    def test_an_altered_tail_fails(self, tmp_path: Path) -> None:
+        record = _yaml(EVIDENCE="Rule: the operators' ruling is optional")
+        passed, errors = _gate(record, self._PROSE, tmp_path)
+        assert passed is False
+        assert _has(errors, "quote_not_preserved", "the operators' ruling must stand"), errors
+
+    def test_a_record_value_span_is_checked_on_every_reading(self, tmp_path: Path) -> None:
+        prose = "Shaun said the users' data is kept and nothing is wiped."
+        record = _yaml(OPERATOR_RULING="Shaun, first-party, verbatim: 'users' data may be wiped'")
+        passed, errors = _gate(record, prose, tmp_path)
+        assert passed is False
+        assert _has(errors, "quote_not_in_prose", "users' data may be wiped"), errors
+
+    def test_an_opener_between_closers_ends_the_readings(self) -> None:
+        prose = "Use 'alpha one value' and 'beta two value' here."
+        assert mod._quoted_spans(prose) == ["alpha one value", "beta two value"]
