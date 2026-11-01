@@ -5,11 +5,10 @@ for agent context injection. Parsing goes through the repo's single OCTAVE
 list grammar (``read_octave_fields`` / ``list_items`` in
 ``agent_readable_governance_parser``), so a workflow written by hand (inline
 ``KEY::[a,b]`` lists) and the same workflow rewritten by ``octave_write``
-(wrapped ``KEY::[`` lists) read identically, for flat lists. Known limitation: a nested
-``KEY::`` line inside a wrapped list (octave_write's form of nested lists, e.g.
-SCOPE_MATRIX in the bundled workflow) is rejected by the shared grammar as
-``unterminated_list`` until the parser follow-up (ADR-004 v1.9, part of #196) lands, so such
-a document raises :class:`WorkflowParseError`. No octave-mcp import (PROD::I6).
+(wrapped ``KEY::[`` lists) read identically. From ADR-004 v1.9 (#196) the shared reader
+also reads nested keyed items inside wrapped lists (octave_write's form of nested lists,
+e.g. SCOPE_MATRIX in the bundled workflow), so the octave_write-canonical workflow reads
+the same as the inline form. No octave-mcp import (PROD::I6).
 
 Harvested from legacy hestai-mcp core/governance/state/context_steward.py.
 
