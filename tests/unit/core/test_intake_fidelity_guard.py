@@ -665,3 +665,31 @@ class TestSingleQuoteCloserSymmetry:
     )
     def test_a_closer_before_a_symbol_closes_the_span(self, prose: str, spans: list[str]) -> None:
         assert mod._quoted_spans(prose) == spans
+
+
+class TestEmptyQuoteAndUnclosedApostrophe:
+    """CRS on #246: '' is an empty span; an unclosed word-initial apostrophe ('90s)
+    never swallows a later real span or invents a phantom one."""
+
+    @pytest.mark.parametrize(
+        ("prose", "spans"),
+        [
+            (
+                "Set default='' and flag='--strict-validation' in the config.",
+                ["--strict-validation"],
+            ),
+            (
+                "In the '90s we used '(consult Test Guardian)' on every PR.",
+                ["(consult Test Guardian)"],
+            ),
+            ("Back in the '90s the teams' work won.", []),
+        ],
+    )
+    def test_no_phantom_or_swallowed_span(self, prose: str, spans: list[str]) -> None:
+        assert mod._quoted_spans(prose) == spans
+
+    def test_the_real_span_after_an_elision_is_guarded(self, tmp_path: Path) -> None:
+        prose = "In the '90s we used '(consult Test Guardian)' on every PR."
+        passed, errors = _gate(_yaml(EVIDENCE="We used (consult TMG)."), prose, tmp_path)
+        assert passed is False
+        assert _has(errors, "quote_not_preserved", "(consult Test Guardian)"), errors
