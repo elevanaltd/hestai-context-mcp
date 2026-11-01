@@ -22,6 +22,7 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
     annotate_lines,
     collapse_wrapped_lists,
     collect_topic_blocks,
+    diagnose_octave_record,
     read_octave_fields,
     wrapped_list_spans,
 )
@@ -289,3 +290,84 @@ def test_a_non_exact_opener_never_starts_list_mode_in_any_consumer(tmp_path: Pat
     assert wrapped_list_spans(text) == []
     assert [e["rule"] for e in collect_topic_blocks(text)["current"]] == ["real"]
     assert read_octave_fields(text)[1] is None
+
+
+# --- malformed lists in EVERY context (#239 round 4) -------------------------------------------
+#
+# CE/CRS reproduced: an unterminated list (or text after the ``]``) INSIDE a RULINGS / CURRENT
+# block was marked by the walk but dropped by the field scan, so Gate A accepted the record and
+# ``collect_topic_blocks`` read entries from after the break. Malformed handling is total:
+# context (META / RULINGS / CURRENT) x shape (header break, envelope, sibling break,
+# text after ``]``, EOF) x line ending. Every consumer must reject identically.
+
+# context -> (text before the list, the list opener + one item, entries read BEFORE the break)
+_BAD_CONTEXTS = {
+    "meta": ("", "  NOTES::[\n    A,\n", [], []),
+    "rulings": ('RULINGS:\n  R1:\n    RULE::"real"\n', "    NOTES::[\n      A,\n", [], ["R1"]),
+    "current": ('CURRENT:\n  R1::"real"\n', "  NOTES::[\n    A,\n", ["real"], []),
+}
+# shape -> (per-context text after the item, construct); "{after}" is a field-shaped entry
+# in the context's own syntax that sits AFTER the break and must never be read.
+_AFTER = {
+    "meta": 'CURRENT:\n  R8::"after"\n',
+    "rulings": '  R8:\n    RULE::"after"\n',
+    "current": '  R8::"after"\n',
+}
+_BAD_SHAPES = {
+    "header-break": ("{header}{after}", "unterminated_list"),
+    "envelope": ("===END===\n", "unterminated_list"),
+    "sibling-break": ("{sibling}{closer}{after}", "unterminated_list"),
+    "text-after-bracket": ("{closer_stray}{after}", "text_after_list"),
+    "eof": ("", "unterminated_list"),
+}
+_SIBLING = {
+    "meta": "  SCOPE::PROD\n",
+    "rulings": '    VERBATIM::"sib"\n',
+    "current": '  R7::"sib"\n',
+}
+_CLOSER = {"meta": "  ]\n", "rulings": "    ]\n", "current": "  ]\n"}
+_STRAY = {"meta": "  ] stray\n", "rulings": "    ] stray\n", "current": "  ] stray\n"}
+_HEADER = {"meta": "", "rulings": 'CURRENT:\n  R9::"hdr"\n', "current": "RULINGS:\n  R9:\n"}
+_EOLS = {"lf": "\n", "crlf": "\r\n"}
+_BAD_COMBOS = [(ctx, shape, eol) for ctx in _BAD_CONTEXTS for shape in _BAD_SHAPES for eol in _EOLS]
+
+
+def _bad_text(ctx: str, shape: str, eol: str) -> tuple[str, int, str]:
+    """``(record text, 1-based opener line, construct)`` for one malformed-list combination."""
+    before, opener, _cur, _rul = _BAD_CONTEXTS[ctx]
+    template, construct = _BAD_SHAPES[shape]
+    tail = template.format(
+        header=_HEADER[ctx],
+        after=_AFTER[ctx],
+        sibling=_SIBLING[ctx],
+        closer=_CLOSER[ctx],
+        closer_stray=_STRAY[ctx],
+    )
+    # META lists sit among META fields; block lists after the META block.
+    body = before + opener + tail
+    text = _HEAD + body + ("" if "===END===" in tail else _END)
+    opener_line = _HEAD.count("\n") + before.count("\n") + 1
+    return text.replace("\n", _EOLS[eol]), opener_line, construct
+
+
+@pytest.mark.parametrize(("ctx", "shape", "eol"), _BAD_COMBOS)
+def test_a_malformed_list_in_any_context_is_rejected_by_every_consumer(
+    tmp_path: Path, ctx: str, shape: str, eol: str
+) -> None:
+    text, opener_line, construct = _bad_text(ctx, shape, eol)
+    expected = {"line": opener_line, "construct": construct}
+    # the reader and its diagnosis
+    assert read_octave_fields(text)[1] == expected
+    assert diagnose_octave_record(text) == expected
+    # no malformed list is ever a well-formed span, so no interior is carved out anywhere
+    assert wrapped_list_spans(text) == []
+    assert _list_interior_lines(text) == set()
+    # Gate A rejects, naming the line and the construct, first
+    result = validate_octave_content(tmp_path, text)
+    assert result.valid is False
+    assert f"line {opener_line}: {construct}" in result.errors[0], result.errors
+    # topic extraction does not read past the break
+    blocks = collect_topic_blocks(text)
+    _, _, current, rulings = _BAD_CONTEXTS[ctx]
+    assert [e["rule"] for e in blocks["current"]] == current
+    assert [e["id"] for e in blocks["rulings"]] == rulings
