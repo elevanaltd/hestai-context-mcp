@@ -145,32 +145,38 @@ def _quoted_spans(text: str) -> list[str]:
     """Text between double quotes (straight or curly) and between DELIMITING single quotes.
 
     A single quote opens a span only when it does not follow a letter, digit or
-    combining mark (so after whitespace, a line start, punctuation such as ``:`` ``=``
-    ``(``), and closes it only before whitespace, a line end or punctuation, so an
-    apostrophe (``don't``, ``the team's``, ``rock'n'roll``) never opens or closes one. A later opener
-    restarts the span, so a word-initial apostrophe (``'90s``) cannot swallow a real
-    quote. Spans never cross a newline. One linear pass.
+    combining mark (so after whitespace, a line start, punctuation or a symbol such as
+    ``:`` ``=`` ``(``), is followed by non-whitespace, and is not a two-digit elision
+    (``'90s``). It closes a span only when it follows non-whitespace and is followed by
+    whitespace, the end of the text, or anything but a letter, digit or mark. So an
+    apostrophe (``don't``, ``the team's``, ``rock'n'roll``) never opens or closes one.
+    ``''`` is an empty span. Spans nest: a quote opened inside an open span closes
+    before it and never restarts it, and only the outermost closed span is returned
+    (it contains the inner ones). Spans never cross a newline. One linear pass.
     """
     spans = [m.group(1) or m.group(2) or "" for m in _DOUBLE_SPAN_RE.finditer(text)]
-    opened: int | None = None
+    stack: list[int] = []  # positions of the open single quotes, innermost last
+    closed: list[tuple[int, int]] = []  # maximal closed spans, ordered by start
     for i, char in enumerate(text):
         if char == "\n":
-            opened = None
+            stack.clear()
             continue
         before = text[i - 1] if i else " "
         after = text[i + 1] if i + 1 < len(text) else " "
-        if opened is not None and char in "'’" and not before.isspace() and _delimits(after):
-            if i > opened + 1:  # '' is an empty span, never the opener of the next one
-                spans.append(text[opened + 1 : i])
-            opened = None
+        if stack and char in "'’" and not before.isspace() and _delimits(after):
+            start = stack.pop()
+            if i > start + 1:  # '' is an empty span, never the opener of the next one
+                while closed and closed[-1][0] > start:
+                    closed.pop()  # an inner span, contained in this one
+                closed.append((start, i))
         elif (
             char in "'‘"
             and _delimits(before)
             and not after.isspace()
             and not _ELISION_RE.match(text, i + 1)
         ):
-            opened = i
-    return spans
+            stack.append(i)
+    return spans + [text[start + 1 : end] for start, end in closed]
 
 
 def _delimits(char: str) -> bool:
