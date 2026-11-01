@@ -718,3 +718,13 @@ class TestNoRestartInsideAnOpenSpan:
         passed, errors = _gate(record, prose, tmp_path)
         assert passed is False
         assert _has(errors, "quote_not_preserved", "use flag --mode='strict' always"), errors
+
+
+class TestEmptyVerbatimFails:
+    """#246: "" is a substring of every prose, so an empty VERBATIM passed vacuously."""
+
+    def test_an_empty_verbatim_is_a_fidelity_failure(self, tmp_path: Path) -> None:
+        record = _yaml(_rulings(""), TOPIC="gate")
+        passed, errors = _gate(record, TestRuleThreeVerbatimFields._PROSE, tmp_path)
+        assert passed is False
+        assert _has(errors, "verbatim_not_in_prose", "VERBATIM"), errors
