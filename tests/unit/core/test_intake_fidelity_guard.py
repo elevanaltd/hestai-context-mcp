@@ -573,3 +573,37 @@ class TestYamlProseSkipsGateBFailClosed:
         assert result["success"] is True, result["validation_errors"]
         assert result["real_validation_available"] is False
         assert len(writing_linker) == 1
+
+
+class TestSingleQuoteOpenerAfterPunctuation:
+    """cubic P2 on PR #246: a single quote after non-letter, non-digit punctuation
+    delimits (``scope:'x'``, ``key='x'``); after a letter or digit it is an
+    apostrophe. HC ruling 1: spans count only when the marks delimit."""
+
+    @pytest.mark.parametrize(
+        ("prose", "span"),
+        [
+            ("Set scope:'sensitive data' for this record.", "sensitive data"),
+            ("Use key='quoted value here' in the config.", "quoted value here"),
+            ("Call key=('quoted value here') once.", "quoted value here"),
+            ("Tags ['restricted scope'] apply.", "restricted scope"),
+        ],
+    )
+    def test_a_span_after_punctuation_is_guarded(
+        self, tmp_path: Path, prose: str, span: str
+    ) -> None:
+        assert mod._quoted_spans(prose) == [span]
+        passed, errors = _gate(_yaml(), prose, tmp_path)
+        assert passed is False
+        assert _has(errors, "quote_not_preserved", span), errors
+
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "They played rock'n'roll all night long at the venue.",
+            "We said don't' and then left the meeting for the day.",
+            "He is 5'11 tall and the 90's records were archived.",
+        ],
+    )
+    def test_a_quote_after_a_letter_or_digit_is_an_apostrophe(self, prose: str) -> None:
+        assert mod._quoted_spans(prose) == []
