@@ -1,9 +1,10 @@
-"""Seeded planted-secret property test for the RedactionEngine (#261) + #264 pins.
+"""Seeded planted-secret property test for the RedactionEngine (#261, #264).
 
-The property (scope ruled by HW-PROGRAMME2 for #261): no planted fake PRIVATE
-KEY body survives any path, and the two-pass helper and a whole-text call
-agree on every case. The single-line residual classes are tracked in #264 and
-pinned below as strict xfails, so #264 starts from a RED that flips when fixed.
+The property (HC condition 1, #264): no planted fake secret of ANY kind
+survives ANY path (two-pass helper, whole-text redact_content,
+copy_and_redact), and the two-pass helper and a whole-text call agree on
+every case. The five #264 anchor-consumption classes are pinned below as
+plain tests (they were strict xfails on #261).
 
 Full-size run by hand: ``.venv/bin/python -m tests.unit.core.fuzz_redaction 261 20000``
 
@@ -26,16 +27,17 @@ FUZZ_CASES_PER_MODE = 1000
 
 
 @pytest.mark.parametrize("mode", ["A", "B"], ids=["abutting", "separated"])
-def test_no_private_key_body_survives_and_paths_agree(tmp_path: Path, mode: str) -> None:
+def test_no_planted_secret_survives_any_path_and_paths_agree(tmp_path: Path, mode: str) -> None:
     report = run(FUZZ_SEED, FUZZ_CASES_PER_MODE, mode, tmp_path)
     assert report.cases == FUZZ_CASES_PER_MODE
     for path in PATHS:
         assert report.leak_total(path, PRIVATE_KEY_KINDS) == 0, f"key body leaked via {path}"
+        assert report.leak_total(path) == 0, f"a planted secret leaked via {path}"
     assert report.differ == 0, "two-pass helper and whole-text call disagree"
 
 
 # ---------------------------------------------------------------------------
-# #264 residual classes: pre-existing (also on the v2 engine), not fixed here
+# #264 anchor-consumption classes: pre-existing (also on the v2 engine)
 # ---------------------------------------------------------------------------
 
 
@@ -69,7 +71,6 @@ _RESIDUAL_264 = {
 }
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#264")
 @pytest.mark.parametrize("text", _RESIDUAL_264.values(), ids=_RESIDUAL_264.keys())
 def test_residual_264_secret_does_not_survive(text: str) -> None:
     out = RedactionEngine.redact_content(text)
