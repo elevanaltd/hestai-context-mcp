@@ -120,13 +120,17 @@ def _redact_text(text: str) -> str:
     Two passes with the engine's own patterns (none are added or changed):
 
     - The multi-line (DOTALL) patterns run over the whole text, so a private
-      key reaches the engine with both its BEGIN and END lines.
+      key reaches the engine with both its BEGIN and END lines (a BEGIN with
+      no END is redacted to the end of the text, #256).
     - Every pattern then runs line by line via
-      ``RedactionEngine.redact_content``. The single-line patterns are not
-      line-bounded: on a whole text, db_password misses a password when a
-      later line contains ``@``, and its user part crosses newlines, turning
-      a URL on one line plus an ``@`` on a later line into a fake password
-      marker.
+      ``RedactionEngine.redact_content``. Since #256 the engine's single-line
+      patterns are line-bounded themselves (they stop at every
+      ``str.splitlines()`` boundary), so the per-line split is no longer what
+      keeps db_password correct. The two passes stay as defence in depth,
+      because their ordering adds protection (#261): running the private-key
+      pattern first means a single-line match cannot consume a key's BEGIN or
+      END line before it is seen, and a future pattern that is not
+      line-bounded still cannot cross a newline here.
 
     Raises:
         Exception: Whatever the engine raises. The caller fails closed.
