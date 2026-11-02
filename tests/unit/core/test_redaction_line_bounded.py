@@ -433,3 +433,39 @@ class TestPrivateKeyHeaderRule:
         result = RedactionEngine().redact(text)
         assert result.redacted_text == text
         assert result.redaction_count == 0
+
+
+# ---------------------------------------------------------------------------
+# (i) two URIs on one line: fail-safe collapse, no password leak (#261 round 1)
+# ---------------------------------------------------------------------------
+
+
+class TestTwoUrisOnOneLineFailSafe:
+    """Two URIs on one line collapse into one match to the line's last '@'.
+
+    That over-redacts the text between them but never leaks a password. The
+    greedy password is kept deliberately: ending it at whitespace would leak an
+    unencoded password that contains a space (pinned below).
+    """
+
+    def test_two_password_uris_both_redacted(self) -> None:
+        pw1, pw2 = _fake_password("I1"), _fake_password("I2")
+        text = _db_uri(pw1) + " then " + _db_uri(pw2, scheme="mysql", host="db2.example.test")
+        out = RedactionEngine.redact_content(text)
+        assert pw1 not in out, "first password leaked"
+        assert pw2 not in out, "second password leaked"
+        assert out == "postgresql://svcuser:" + _PW_MARKER + "@db2.example.test:5432/app"
+
+    def test_plain_url_then_password_uri_password_redacted(self) -> None:
+        pw = _fake_password("I3")
+        text = "see https://example.com:8080/a then " + _db_uri(pw, scheme="mysql")
+        out = RedactionEngine.redact_content(text)
+        assert pw not in out, "password leaked"
+        assert out.endswith(_PW_MARKER + "@db.example.test:5432/app")
+
+    def test_unencoded_password_with_space_redacted(self) -> None:
+        pw = "fk" + "Pw" + " " + "I4" + "zz"
+        text = "mysql://root:" + pw + "@db.example.test/app"
+        out = RedactionEngine.redact_content(text)
+        assert "I4" + "zz" not in out, "password fragment leaked"
+        assert out == "mysql://root:" + _PW_MARKER + "@db.example.test/app"
