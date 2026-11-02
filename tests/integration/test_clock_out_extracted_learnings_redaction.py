@@ -778,3 +778,63 @@ def test_transcript_path_is_not_logged(tmp_path: Path, caplog: pytest.LogCapture
 
     assert result["status"] == "success"
     _assert_no_credentials(caplog.text, "clock_out log output")
+
+
+@pytest.mark.integration
+def test_transcript_parser_read_failure_log_is_type_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """CE round 2: the parser's read-failure warning must not log the path or message.
+
+    clock_out runs the parser before its redaction stage. The transcript path
+    is supplied externally via session.json and the OSError text may echo it,
+    so the warning names the exception type only. The outcome is unchanged:
+    no messages parsed, the archive is still written, status success.
+    """
+
+    import builtins
+
+    from hestai_context_mcp.tools.clock_out import clock_out
+
+    secret_dir = tmp_path / f"t-{FAKE_GITHUB_PAT}"
+    secret_dir.mkdir()
+    transcript = _seed_session(tmp_path)
+    moved = secret_dir / transcript.name
+    transcript.rename(moved)
+    session_file = (
+        tmp_path / ".hestai" / "state" / "sessions" / "active" / SESSION_ID / "session.json"
+    )
+    data = json.loads(session_file.read_text(encoding="utf-8"))
+    data["transcript_path"] = str(moved)
+    session_file.write_text(json.dumps(data), encoding="utf-8")
+
+    real_open = builtins.open
+    calls = {"n": 0}
+
+    def _open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 2:  # can_parse succeeds; parse's read fails
+            raise OSError(f"read failed for {file} near {FAKE_GITHUB_PAT}")
+        return real_open(file, *args, **kwargs)
+
+    with (
+        caplog.at_level(logging.DEBUG),
+        patch("hestai_context_mcp.core.transcript.claude.open", side_effect=_open, create=True),
+    ):
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+    # Outcome unchanged: parse yields no messages; the archive copy still runs.
+    assert calls["n"] == 2
+    assert result["status"] == "success"
+    assert result["message_count"] == 0
+    assert result["extracted_learnings"] == {"decisions": [], "blockers": [], "learnings": []}
+    assert Path(result["archive_path"]).exists()
+
+    parser_warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and record.getMessage().startswith("Could not read transcript file")
+    ]
+    assert parser_warnings == ["Could not read transcript file: OSError"]
+    _assert_no_credentials(caplog.text, "clock_out log output")
