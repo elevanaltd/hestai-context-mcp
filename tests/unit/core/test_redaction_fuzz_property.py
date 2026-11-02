@@ -13,13 +13,24 @@ SYNTHETIC DATA ONLY: every secret is FAKE and assembled at runtime from parts.
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import pytest
 
 from hestai_context_mcp.core.redaction import RedactionEngine
 from hestai_context_mcp.tools.clock_out import _redact_text
-from tests.unit.core.fuzz_redaction import PATHS, PRIVATE_KEY_KINDS, run
+from tests.unit.core.fuzz_redaction import (
+    PATHS,
+    PRIVATE_KEY_KINDS,
+    build_pair,
+    feasible_pair_kinds,
+    is_bounded_width,
+    pair_label,
+    run,
+    single_line_patterns,
+    survives,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.security]
 
@@ -154,3 +165,91 @@ def test_s2_contract_exact_output_on_every_path(tmp_path: Path, text: str, expec
     outputs = _all_paths(text, tmp_path)
     for path, out in zip(PATHS, outputs, strict=True):
         assert out == expected, f"unexpected output via {path}"
+
+
+# ---------------------------------------------------------------------------
+# C1: same-pattern partial overlap of a bounded-width pattern (#265 HC ruling)
+# ---------------------------------------------------------------------------
+
+_AWS = "[REDACTED_AWS_" + "KEY]"
+
+
+def _gh_classic_pair(x_alt: str, y_alt: str, k: int) -> str:
+    """FAKE: a classic GitHub token whose tail ends with y_alt[:k], then Y's rest."""
+    x_tail = ("TESTONLY" + "1" + "G" * 36)[: 36 - k] + y_alt[:k]
+    return x_alt + x_tail + y_alt[k:] + ("TESTONLY" + "2" + "H" * 36)[:36]
+
+
+def _gh_pat_pair(k: int) -> str:
+    """FAKE: a fine-grained token whose tail ends with "github_pat_"[:k], then the rest."""
+    anchor = "github" + "_pat_"
+    x_tail = ("TESTONLY" + "1" + "G" * 82)[: 82 - k] + anchor[:k]
+    return anchor + x_tail + anchor[k:] + ("TESTONLY" + "2" + "H" * 82)[:82]
+
+
+def _aws_pair(x_alt: str, y_alt: str, k: int) -> str:
+    """FAKE: an AWS key whose 16-char tail ends with y_alt[:k], then Y's rest."""
+    x_tail = ("TEST" + "1" + "Z" * 16)[: 16 - k] + y_alt[:k]
+    return x_alt + x_tail + y_alt[k:] + ("TEST" + "2" + "Y" * 16)[:16]
+
+
+_GH_CLASSIC = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"]
+_C1_CASES = (
+    [
+        (f"gh_{x}>{y}:{k}", _gh_classic_pair(x, y, k), _GH)
+        for x in ("ghp_",)
+        for y in _GH_CLASSIC
+        for k in (1, 2, 3)
+    ]
+    + [(f"gh_pat>pat:{k}", _gh_pat_pair(k), _GH) for k in (1, 2, 3)]
+    + [
+        (f"aws_{x}>{y}:{k}", _aws_pair(x, y, k), _AWS)
+        for x in ("AKIA", "ASIA")
+        for y in ("AKIA", "ASIA")
+        for k in (1, 2, 3)
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"), [(t, e) for _, t, e in _C1_CASES], ids=[i for i, _, _ in _C1_CASES]
+)
+def test_c1_same_pattern_partial_overlap_redacted_on_every_path(
+    tmp_path: Path, text: str, expected: str
+) -> None:
+    for path, out in zip(PATHS, _all_paths(text, tmp_path), strict=True):
+        assert out == expected, f"same-pattern overlap leaked via {path}"
+
+
+# ---------------------------------------------------------------------------
+# Guard (#265 HC condition 3): every bounded-width pattern is an overlapping
+# matcher. Both checks are derived FROM PATTERNS, so a new pattern can't skip it.
+# ---------------------------------------------------------------------------
+
+
+def test_every_bounded_width_pattern_is_an_overlapping_matcher() -> None:
+    bounded = {n for n, p in single_line_patterns().items() if is_bounded_width(p)}
+    assert bounded, "expected at least one bounded-width pattern"
+    overlapping = getattr(RedactionEngine, "OVERLAPPING", frozenset())
+    assert (
+        bounded <= overlapping
+    ), f"bounded-width patterns not overlapping: {bounded - overlapping}"
+    assert overlapping <= set(single_line_patterns()), "OVERLAPPING names an unknown pattern"
+
+
+def test_every_same_pattern_overlap_kind_redacted_on_every_path(tmp_path: Path) -> None:
+    """Every feasible X>Y kind where X and Y are the same pattern, built from PATTERNS."""
+    rng = random.Random("same-pattern-overlap")
+    same = [kind for kind in feasible_pair_kinds() if kind[0] == kind[2]]
+    assert same
+    leaked = []
+    for kind in same:
+        for _ in range(3):
+            made = None
+            while made is None:
+                made = build_pair(kind, rng)
+            text, cores = made
+            for path, out in zip(PATHS, _all_paths(text, tmp_path), strict=True):
+                if any(survives(core, out) for core in cores):
+                    leaked.append((pair_label(kind), path))
+    assert not leaked, f"{len(leaked)} same-pattern overlap leaks, e.g. {leaked[:3]}"

@@ -1,11 +1,28 @@
-"""Planted-secret fuzz harness for the RedactionEngine (#261, #264).
+"""Planted-secret fuzz harness for the RedactionEngine (#261, #264, #265).
 
-Each case concatenates random noise and uniquely tagged FAKE secrets, then
-checks that every planted secret is absent from the output of each path:
+Each case concatenates random noise and FAKE secrets, then checks that no
+planted secret survives in the output of each path:
 
 - ``two_pass``: ``clock_out._redact_text`` (DOTALL patterns first, then per line)
 - ``whole``: ``RedactionEngine.redact_content`` on the whole text
 - ``copy_and_redact``: the archive path, through a temporary file
+
+Two fragment families:
+
+- Hand-written kinds (``KINDS``): sk, aws, gh, bearer, db, db with '@', and
+  PEM private keys (terminated, unterminated, lowercase).
+- Overlap pairs BUILT FROM ``RedactionEngine.PATTERNS`` (#265 HC): every
+  single-line pattern is parsed with ``re._parser``. Tokens are generated from
+  the parse tree and validated with ``fullmatch``, and its anchor alternatives
+  are enumerated (e.g. ghp_/gho_/ghu_/ghs_/ghr_/github_pat_, AKIA/ASIA). For
+  every ordered pair of (pattern, alternative), X's secret ends with a
+  k-char prefix of Y's lead for every feasible k (k = 0 is plain abutment),
+  then Y continues. Two extra forms: a bare "Bearer " keyword before Y, and Y
+  as the user part of a DB URI. A new pattern therefore gets these shapes
+  automatically.
+
+A planted secret "survives" if any 8-char window of its random body (or the
+whole body, if shorter) appears in the output, so partial leaks count.
 
 Modes:
 
@@ -18,28 +35,32 @@ Not a test module (no ``test_`` prefix). Reused by
     .venv/bin/python -m tests.unit.core.fuzz_redaction SEED N
 
 Exit status: 0 only when no planted secret survives any path and the two-pass
-helper agrees with a whole-text call on every case; 1 otherwise. It is 1 TODAY
-because of the known #264 residual classes (bearer/db kinds, seed 261: 418 in
-mode A, 58 in mode B). There is deliberately no allow-list flag: #264 spans
-whole kinds, so excluding them would also hide any new leak of those kinds.
+helper agrees with a whole-text call on every case; 1 otherwise. There is
+deliberately no allow-list flag.
 
-SYNTHETIC DATA ONLY: every secret is FAKE and assembled at runtime from parts.
+SYNTHETIC DATA ONLY: every secret is FAKE and assembled at runtime.
 """
 
 from __future__ import annotations
 
 import collections
+import functools
 import random
+import string
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from re import Match, Pattern
+from re import _constants as sre_c  # type: ignore[attr-defined]
+from re import _parser as sre_p  # type: ignore[attr-defined]
+from typing import Any
 
 from hestai_context_mcp.core.redaction import RedactionEngine
 from hestai_context_mcp.tools.clock_out import _redact_text
 
 _DASHES = "-" * 5
-SEPARATORS = ["\n", "\r\n", " ", "\t", " ", "\\n", '", "', "\n\n"]
+SEPARATORS = ["\n", "\r\n", " ", "\t", "\u2028", "\\n", '", "', "\n\n"]
 NOISE = [
     "text",
     "mail a" + "@" + "b.org",
@@ -55,6 +76,276 @@ NOISE = [
 KINDS = ["sk", "aws", "gh", "bearer", "db", "db_at", "pk_t", "pk_u", "pk_lower"]
 PRIVATE_KEY_KINDS = frozenset({"pk_t", "pk_u", "pk_lower"})
 PATHS = ("two_pass", "whole", "copy_and_redact")
+_WINDOW = 8
+
+# ---------------------------------------------------------------------------
+# Token generation from PATTERNS (#265 HC condition 2/3)
+# ---------------------------------------------------------------------------
+
+#: Chars used for negated classes and '.'; letters and digits only, so a
+#: generated token never contains a separator, quote or '@' by accident.
+_SAFE = string.ascii_letters + string.digits
+#: A class with at most this many chars counts as part of an anchor alternative.
+_SMALL_CLASS = 8
+_UNBOUNDED_EXTRA = 8
+
+
+def single_line_patterns() -> dict[str, Pattern[str]]:
+    """Every PATTERNS entry except the stage-1 private_key pattern."""
+    return {n: p for n, (p, _) in RedactionEngine.PATTERNS.items() if n != "private_key"}
+
+
+def is_bounded_width(pattern: Pattern[str]) -> bool:
+    """True when the pattern's maximum match width is finite (fixed/bounded)."""
+    return bool(sre_p.parse(pattern.pattern, pattern.flags).getwidth()[1] < sre_c.MAXREPEAT)
+
+
+def _class_chars(items: list[tuple[Any, Any]]) -> list[str]:
+    negate, chars = False, set()
+    for op, av in items:
+        if op is sre_c.NEGATE:
+            negate = True
+        elif op is sre_c.LITERAL:
+            chars.add(chr(av))
+        elif op is sre_c.RANGE:
+            chars.update(chr(c) for c in range(av[0], av[1] + 1))
+        elif op is sre_c.CATEGORY:
+            if av is sre_c.CATEGORY_WORD:
+                chars.update(_SAFE + "_")
+            elif av is sre_c.CATEGORY_DIGIT:
+                chars.update(string.digits)
+            elif av is sre_c.CATEGORY_SPACE:
+                chars.add(" ")
+            else:  # pragma: no cover - not used by PATTERNS today
+                raise ValueError(av)
+        else:  # pragma: no cover
+            raise ValueError(op)
+    if negate:
+        return [c for c in _SAFE if c not in chars]
+    return sorted(chars)
+
+
+def _has_assert(items: Any) -> bool:
+    for op, av in items:
+        if op in (sre_c.ASSERT, sre_c.ASSERT_NOT):
+            return True
+        if op in (sre_c.MAX_REPEAT, sre_c.MIN_REPEAT, sre_c.POSSESSIVE_REPEAT) and _has_assert(
+            av[2]
+        ):
+            return True
+        if op is sre_c.SUBPATTERN and _has_assert(av[3]):
+            return True
+        if op is sre_c.BRANCH and any(_has_assert(alt) for alt in av[1]):
+            return True
+        if op is sre_c.ATOMIC_GROUP and _has_assert(av):
+            return True
+    return False
+
+
+def _emit(items: Any, rng: random.Random, out: list[str]) -> None:
+    for op, av in items:
+        if op is sre_c.LITERAL:
+            out.append(chr(av))
+        elif op is sre_c.NOT_LITERAL:
+            out.append(rng.choice([c for c in _SAFE if ord(c) != av]))
+        elif op is sre_c.ANY:
+            out.append(rng.choice(_SAFE))
+        elif op is sre_c.IN:
+            out.append(rng.choice(_class_chars(av)))
+        elif op in (sre_c.MAX_REPEAT, sre_c.MIN_REPEAT, sre_c.POSSESSIVE_REPEAT):
+            lo, hi, sub = av
+            if _has_assert(sub):
+                count = lo
+            elif hi < sre_c.MAXREPEAT:
+                count = rng.randint(lo, hi)
+            else:
+                count = rng.randint(max(lo, 1), max(lo, 1) + _UNBOUNDED_EXTRA)
+            for _ in range(count):
+                _emit(sub, rng, out)
+        elif op is sre_c.BRANCH:
+            _emit(rng.choice(av[1]), rng, out)
+        elif op is sre_c.SUBPATTERN:
+            _emit(av[3], rng, out)
+        elif op is sre_c.ATOMIC_GROUP:
+            _emit(av, rng, out)
+        elif op in (sre_c.AT, sre_c.ASSERT, sre_c.ASSERT_NOT):
+            continue
+        else:  # pragma: no cover
+            raise ValueError(op)
+
+
+def _prefixes(items: Any) -> list[str]:
+    """Enumerate the literal lead strings (anchor alternatives) of ``items``."""
+    results = [""]
+    for op, av in items:
+        if op is sre_c.LITERAL:
+            results = [r + chr(av) for r in results]
+        elif op is sre_c.IN and len(_class_chars(av)) <= _SMALL_CLASS:
+            results = [r + c for r in results for c in _class_chars(av)]
+        elif op is sre_c.BRANCH:
+            return [r + a for r in results for alt in av[1] for a in _prefixes(alt)]
+        elif op is sre_c.SUBPATTERN:
+            inner = _prefixes(av[3])
+            return [r + a for r in results for a in inner]
+        elif op is sre_c.AT:
+            continue
+        else:
+            break
+    return results
+
+
+@functools.cache
+def anchors(name: str) -> tuple[str, ...]:
+    """Anchor alternatives of a single-line pattern, derived from PATTERNS."""
+    pattern = single_line_patterns()[name]
+    return tuple(sorted(set(_prefixes(sre_p.parse(pattern.pattern, pattern.flags)))))
+
+
+@dataclass(frozen=True)
+class Token:
+    """A generated token that fullmatches its pattern."""
+
+    name: str
+    anchor: str
+    text: str
+    secret: tuple[int, int]
+
+    @property
+    def lead(self) -> str:
+        """Text before the secret body: the anchor, or the kept prefix."""
+        start = self.secret[0] if self.secret[0] > 0 else len(self.anchor)
+        return self.text[:start]
+
+
+def _secret_span(name: str, match: Match[str]) -> tuple[int, int]:
+    pattern = single_line_patterns()[name]
+    return match.span("secret") if "secret" in pattern.groupindex else match.span(0)
+
+
+_POOL_SIZE = 64
+
+
+@functools.cache
+def _token_pool(name: str, anchor: str) -> tuple[Token, ...]:
+    """A deterministic pool of tokens of ``name`` starting with ``anchor``."""
+    pattern = single_line_patterns()[name]
+    parsed = sre_p.parse(pattern.pattern, pattern.flags)
+    rng = random.Random(f"pool-{name}-{anchor}")
+    pool: list[Token] = []
+    for _ in range(_POOL_SIZE * 400):
+        out: list[str] = []
+        _emit(parsed, rng, out)
+        text = "".join(out)
+        match = pattern.fullmatch(text)
+        if match and text.startswith(anchor):
+            pool.append(Token(name, anchor, text, _secret_span(name, match)))
+            if len(pool) == _POOL_SIZE:
+                return tuple(pool)
+    raise RuntimeError(f"cannot generate {name!r} with anchor {anchor!r}")
+
+
+def make_token(name: str, anchor: str, rng: random.Random) -> Token:
+    """A token of pattern ``name`` that starts with ``anchor`` (validated by fullmatch)."""
+    return rng.choice(_token_pool(name, anchor))
+
+
+def body(token: Token, cut_tail: int = 0) -> str:
+    """The token's random secret body (lead excluded), minus ``cut_tail`` chars."""
+    start = max(token.secret[0], len(token.lead))
+    return token.text[start : token.secret[1] - cut_tail]
+
+
+def survives(core: str, out: str) -> bool:
+    """True if ``core`` (or any _WINDOW-char window of it) appears in ``out``."""
+    if len(core) <= _WINDOW:
+        return bool(core) and core in out
+    return any(core[i : i + _WINDOW] in out for i in range(len(core) - _WINDOW + 1))
+
+
+def overlap_fragment(x: Token, y: Token, k: int) -> tuple[str, list[str]] | None:
+    """X's secret ends with y.lead[:k], then Y continues; None if infeasible."""
+    if k and x.secret[1] != len(x.text):
+        return None
+    x_text = x.text[: len(x.text) - k] + y.lead[:k]
+    pattern = single_line_patterns()[x.name]
+    if not pattern.fullmatch(x_text):
+        return None
+    return x_text + y.text[k:], [body(x, cut_tail=k), body(y)]
+
+
+def _alternatives() -> list[tuple[str, str]]:
+    return [(n, a) for n in single_line_patterns() for a in anchors(n)]
+
+
+#: (X form, X alternative, Y pattern, Y alternative, k). X form is a pattern
+#: name, or "bearer_kw" (a bare "Bearer " before Y) or "db_user" (Y as the
+#: user part of a DB URI); those two have no X alternative and k = 0.
+PairKind = tuple[str, str, str, str, int]
+
+
+def pair_label(kind: PairKind) -> str:
+    """Human-readable kind label, e.g. "pair:github_token[ghp_]>ai_api_key[sk-]:2"."""
+    x, x_alt, y, y_alt, k = kind
+    left = x if x in ("bearer_kw", "db_user") else f"{x}[{x_alt}]"
+    return f"pair:{left}>{y}[{y_alt}]:{k}"
+
+
+def _special(form: str, y: Token, rng: random.Random) -> tuple[str, list[str]] | None:
+    if form == "bearer_kw":
+        return "Bearer " + y.text, [body(y)]
+    if ":" in y.text or "@" in y.text:
+        return None
+    password = "".join(rng.choice(_SAFE) for _ in range(12))
+    text = "postgresql://" + y.text + ":" + password + "@db.example.test/app"
+    match = single_line_patterns()["db_password"].search(text)
+    if not match or match.group("secret") != password:
+        return None
+    return text, [password, body(y)]
+
+
+def build_pair(kind: PairKind, rng: random.Random) -> tuple[str, list[str]] | None:
+    """Try once to build a fragment of ``kind``; None if this draw is infeasible."""
+    x_form, x_alt, y_name, y_alt, k = kind
+    y = make_token(y_name, y_alt, rng)
+    if x_form in ("bearer_kw", "db_user"):
+        return _special(x_form, y, rng)
+    if k and k >= len(y.lead):
+        return None
+    return overlap_fragment(make_token(x_form, x_alt, rng), y, k)
+
+
+@functools.cache
+def feasible_pair_kinds() -> tuple[PairKind, ...]:
+    """Every pair kind the generator can produce (probed deterministically)."""
+    rng = random.Random("feasible-pair-kinds")
+    kinds: list[PairKind] = []
+    alts = _alternatives()
+    for y_name, y_alt in alts:
+        max_lead = max(len(make_token(y_name, y_alt, rng).lead) for _ in range(8))
+        candidates: list[PairKind] = [
+            ("bearer_kw", "", y_name, y_alt, 0),
+            ("db_user", "", y_name, y_alt, 0),
+        ]
+        candidates += [(x, xa, y_name, y_alt, k) for x, xa in alts for k in range(max(max_lead, 1))]
+        for kind in candidates:
+            if any(build_pair(kind, rng) for _ in range(12)):
+                kinds.append(kind)
+    return tuple(kinds)
+
+
+def overlap_pair(rng: random.Random) -> tuple[str, list[str], str]:
+    """One overlap-pair fragment of a uniformly chosen feasible kind."""
+    kind = rng.choice(feasible_pair_kinds())
+    for _ in range(200):
+        made = build_pair(kind, rng)
+        if made:
+            return made[0], made[1], pair_label(kind)
+    raise RuntimeError(f"cannot build {pair_label(kind)}")  # pragma: no cover
+
+
+# ---------------------------------------------------------------------------
+# Hand-written kinds
+# ---------------------------------------------------------------------------
 
 
 def _secret(rng: random.Random, tag: str) -> tuple[str, list[str], str]:
@@ -76,13 +367,18 @@ def _secret(rng: random.Random, tag: str) -> tuple[str, list[str], str]:
         core = "fkPw" + tag + "x9"
         password = core if kind == "db" else "fk@" + core
         return "postgresql://svcuser:" + password + "@db.example.test/app", [core], kind
-    body = ["MIIE" + "FAKE" + tag + "A" * 16, "FAKE" + tag + "B" * 20 + "="]
+    lines = ["MIIE" + "FAKE" + tag + "A" * 16, "FAKE" + tag + "B" * 20 + "="]
     lower = kind == "pk_lower"
     header = "rsa private" + " key" if lower else "RSA PRIVATE" + " KEY"
     begin = _DASHES + ("begin " if lower else "BEGIN ") + header + _DASHES
     end = _DASHES + ("end " if lower else "END ") + header + _DASHES
-    text = begin + "\n" + "\n".join(body) + ("" if kind == "pk_u" else "\n" + end)
-    return text, body, kind
+    text = begin + "\n" + "\n".join(lines) + ("" if kind == "pk_u" else "\n" + end)
+    return text, lines, kind
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -94,6 +390,7 @@ class FuzzReport:
     cases: int = 0
     differ: int = 0
     leaks: collections.Counter[tuple[str, str]] = field(default_factory=collections.Counter)
+    generated: collections.Counter[str] = field(default_factory=collections.Counter)
 
     def leak_total(self, path: str, kinds: frozenset[str] | None = None) -> int:
         """Leaked planted secrets on ``path``, optionally limited to ``kinds``."""
@@ -110,12 +407,17 @@ def run(seed: int, n: int, mode: str, workdir: Path) -> FuzzReport:
         parts: list[str] = []
         planted: list[tuple[str, str]] = []
         for j in range(rng.randint(1, 8)):
-            if rng.random() < 0.45:
+            roll = rng.random()
+            if roll < 0.2:
+                fragment, cores, kind = overlap_pair(rng)
+                report.generated[kind] += 1
+            elif roll < 0.45:
                 fragment, cores, kind = _secret(rng, f"{i:05d}{j}")
-                parts.append(fragment)
-                planted += [(core, kind) for core in cores]
             else:
                 parts.append(rng.choice(NOISE))
+                continue
+            parts.append(fragment)
+            planted += [(core, kind) for core in cores]
         text = "".join(part + rng.choice(glue) for part in parts)
         two, whole = _redact_text(text), RedactionEngine.redact_content(text)
         src.write_text(text, encoding="utf-8")
@@ -125,7 +427,7 @@ def run(seed: int, n: int, mode: str, workdir: Path) -> FuzzReport:
         report.differ += two != whole
         for core, kind in planted:
             for path, out in outputs.items():
-                if core in out:
+                if survives(core, out):
                     report.leaks[(path, kind)] += 1
     return report
 
@@ -134,13 +436,16 @@ def main(argv: list[str]) -> int:
     """CLI: print the per-mode table for SEED and N; exit 1 on any leak or disagreement."""
     seed, n = int(argv[1]), int(argv[2])
     failed = False
+    print("anchor alternatives:", {name: list(anchors(name)) for name in single_line_patterns()})
     with tempfile.TemporaryDirectory() as tmp:
         for mode in ("A", "B"):
             r = run(seed, n, mode, Path(tmp))
             totals = " ".join(f"leak_{p}={r.leak_total(p)}" for p in PATHS)
+            covered = len(set(r.generated) & {pair_label(k) for k in feasible_pair_kinds()})
             print(f"mode={mode} seed={seed} cases={r.cases} differ={r.differ} {totals}")
+            print(f"   overlap-pair kinds generated: {covered}/{len(feasible_pair_kinds())}")
             for path in PATHS:
-                kinds = {k: r.leaks[(path, k)] for k in KINDS if r.leaks[(path, k)]}
+                kinds = {k: c for (p, k), c in sorted(r.leaks.items()) if p == path and c}
                 print(f"   {path:16s} {kinds}")
             failed |= r.differ > 0 or any(r.leak_total(p) > 0 for p in PATHS)
     print("RESULT:", "FAIL (leak or path disagreement)" if failed else "PASS")
