@@ -88,6 +88,9 @@ _SAFE = string.ascii_letters + string.digits
 #: A class with at most this many chars counts as part of an anchor alternative.
 _SMALL_CLASS = 8
 _UNBOUNDED_EXTRA = 8
+#: Minimum length of an unbounded repeat, so every planted secret body stays
+#: distinctive (a 1-char password would "survive" by matching any output text).
+_UNBOUNDED_MIN = 16
 
 
 def single_line_patterns() -> dict[str, Pattern[str]]:
@@ -159,7 +162,8 @@ def _emit(items: Any, rng: random.Random, out: list[str]) -> None:
             elif hi < sre_c.MAXREPEAT:
                 count = rng.randint(lo, hi)
             else:
-                count = rng.randint(max(lo, 1), max(lo, 1) + _UNBOUNDED_EXTRA)
+                floor = max(lo, _UNBOUNDED_MIN)
+                count = rng.randint(floor, floor + _UNBOUNDED_EXTRA)
             for _ in range(count):
                 _emit(sub, rng, out)
         elif op is sre_c.BRANCH:
@@ -266,6 +270,8 @@ def overlap_fragment(x: Token, y: Token, k: int) -> tuple[str, list[str]] | None
     """X's secret ends with y.lead[:k], then Y continues; None if infeasible."""
     if k and x.secret[1] != len(x.text):
         return None
+    if len(body(x, cut_tail=k)) < _WINDOW:  # X must keep a distinctive body
+        return None
     x_text = x.text[: len(x.text) - k] + y.lead[:k]
     pattern = single_line_patterns()[x.name]
     if not pattern.fullmatch(x_text):
@@ -303,44 +309,79 @@ def _special(form: str, y: Token, rng: random.Random) -> tuple[str, list[str]] |
     return text, [password, body(y)]
 
 
-def build_pair(kind: PairKind, rng: random.Random) -> tuple[str, list[str]] | None:
-    """Try once to build a fragment of ``kind``; None if this draw is infeasible."""
-    x_form, x_alt, y_name, y_alt, k = kind
+def _draw(kind: PairKind, rng: random.Random) -> tuple[Token | None, Token]:
+    x_form, x_alt, y_name, y_alt, _k = kind
     y = make_token(y_name, y_alt, rng)
     if x_form in ("bearer_kw", "db_user"):
+        return None, y
+    return make_token(x_form, x_alt, rng), y
+
+
+def _assemble(
+    kind: PairKind, x: Token | None, y: Token, rng: random.Random
+) -> tuple[str, list[str]] | None:
+    x_form, _x_alt, _y_name, _y_alt, k = kind
+    if x is None:
         return _special(x_form, y, rng)
     if k and k >= len(y.lead):
         return None
-    return overlap_fragment(make_token(x_form, x_alt, rng), y, k)
+    return overlap_fragment(x, y, k)
+
+
+_PROBE_DRAWS = 48
+_KEEP_SUCCESSES = 8
 
 
 @functools.cache
-def feasible_pair_kinds() -> tuple[PairKind, ...]:
-    """Every pair kind the generator can produce (probed deterministically)."""
+def _feasible() -> dict[PairKind, tuple[tuple[Token | None, Token], ...]]:
+    """Every feasible pair kind, with token pairs that are known to build it."""
     rng = random.Random("feasible-pair-kinds")
-    kinds: list[PairKind] = []
+    found: dict[PairKind, tuple[tuple[Token | None, Token], ...]] = {}
     alts = _alternatives()
     for y_name, y_alt in alts:
-        max_lead = max(len(make_token(y_name, y_alt, rng).lead) for _ in range(8))
+        max_lead = max(len(t.lead) for t in _token_pool(y_name, y_alt))
         candidates: list[PairKind] = [
             ("bearer_kw", "", y_name, y_alt, 0),
             ("db_user", "", y_name, y_alt, 0),
         ]
         candidates += [(x, xa, y_name, y_alt, k) for x, xa in alts for k in range(max(max_lead, 1))]
         for kind in candidates:
-            if any(build_pair(kind, rng) for _ in range(12)):
-                kinds.append(kind)
-    return tuple(kinds)
+            wins: list[tuple[Token | None, Token]] = []
+            for _ in range(_PROBE_DRAWS):
+                x, y = _draw(kind, rng)
+                if _assemble(kind, x, y, rng):
+                    wins.append((x, y))
+                    if len(wins) == _KEEP_SUCCESSES:
+                        break
+            if wins:
+                found[kind] = tuple(wins)
+    return found
+
+
+def feasible_pair_kinds() -> tuple[PairKind, ...]:
+    """Every pair kind the generator can produce (probed deterministically)."""
+    return tuple(_feasible())
+
+
+def build_pair(kind: PairKind, rng: random.Random) -> tuple[str, list[str]]:
+    """A fragment of a feasible ``kind``: random draws first, then a known pair."""
+    for _ in range(10):
+        x, y = _draw(kind, rng)
+        made = _assemble(kind, x, y, rng)
+        if made:
+            return made
+    for x, y in rng.sample(_feasible()[kind], len(_feasible()[kind])):
+        made = _assemble(kind, x, y, rng)
+        if made:
+            return made
+    raise RuntimeError(f"cannot build {pair_label(kind)}")  # pragma: no cover
 
 
 def overlap_pair(rng: random.Random) -> tuple[str, list[str], str]:
     """One overlap-pair fragment of a uniformly chosen feasible kind."""
     kind = rng.choice(feasible_pair_kinds())
-    for _ in range(200):
-        made = build_pair(kind, rng)
-        if made:
-            return made[0], made[1], pair_label(kind)
-    raise RuntimeError(f"cannot build {pair_label(kind)}")  # pragma: no cover
+    text, cores = build_pair(kind, rng)
+    return text, cores, pair_label(kind)
 
 
 # ---------------------------------------------------------------------------
