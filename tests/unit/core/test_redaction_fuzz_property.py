@@ -14,6 +14,7 @@ SYNTHETIC DATA ONLY: every secret is FAKE and assembled at runtime from parts.
 from __future__ import annotations
 
 import random
+import time
 from pathlib import Path
 
 import pytest
@@ -230,7 +231,7 @@ def test_c1_same_pattern_partial_overlap_redacted_on_every_path(
 def test_every_bounded_width_pattern_is_an_overlapping_matcher() -> None:
     bounded = {n for n, p in single_line_patterns().items() if is_bounded_width(p)}
     assert bounded, "expected at least one bounded-width pattern"
-    overlapping = getattr(RedactionEngine, "OVERLAPPING", frozenset())
+    overlapping = RedactionEngine.OVERLAPPING
     assert (
         bounded <= overlapping
     ), f"bounded-width patterns not overlapping: {bounded - overlapping}"
@@ -253,3 +254,39 @@ def test_every_same_pattern_overlap_kind_redacted_on_every_path(tmp_path: Path) 
                 if any(survives(core, out) for core in cores):
                     leaked.append((pair_label(kind), path))
     assert not leaked, f"{len(leaked)} same-pattern overlap leaks, e.g. {leaked[:3]}"
+
+
+# ---------------------------------------------------------------------------
+# ReDoS regression guard (#265 TMG condition): these inputs were quadratic on
+# the v3 engine (db_password's plain "\w+://" rescanned a long word from every
+# start: about 1s at 40k chars, about 20s at 160k). The final engine handles
+# each in milliseconds. The 1s bound at 120k chars is deliberately generous so
+# a slow CI machine cannot flake it, yet the old pattern exceeds it by about 10x.
+# ---------------------------------------------------------------------------
+
+_REDOS_CHARS = 120_000
+_REDOS_BOUND_SECONDS = 1.0
+_REDOS_FAMILIES = {
+    "long_word": lambda n: "a" * n,
+    "long_word_then_scheme": lambda n: "a" * n + "://x",
+    "aws_anchor_then_uppercase_run": lambda n: "AKIA" + "Z" * n,
+    "aws_anchor_run": lambda n: "AKIA" * (n // 4),
+    "ghp_anchor_then_alnum_run": lambda n: "ghp_" + "A" * n,
+    "ghp_anchor_run": lambda n: ("ghp_" + "A" * 33 + "ghp") * (n // 40),
+    "github_pat_underscore_run": lambda n: "github" + "_pat_" * (n // 5),
+}
+
+
+@pytest.mark.parametrize("family", _REDOS_FAMILIES, ids=list(_REDOS_FAMILIES))
+def test_redos_guard_adversarial_input_is_linear(family: str) -> None:
+    text = _REDOS_FAMILIES[family](_REDOS_CHARS)
+    start = time.perf_counter()
+    RedactionEngine.redact_content(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < _REDOS_BOUND_SECONDS, f"{family}: {elapsed:.2f}s for {len(text)} chars"
+
+
+def test_db_password_scheme_is_word_bounded_and_possessive() -> None:
+    """Structural guard: plain "\\w+://" retries every start inside one word."""
+    source = RedactionEngine.PATTERNS["db_password"][0].pattern
+    assert source.startswith("(" + "\\b\\w++://"), "db_password scheme must be \\b\\w++://"
