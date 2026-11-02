@@ -40,6 +40,11 @@ REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
 #:          a BEGIN with no END to the end of the input (fail safe).
 REDACTION_ENGINE_VERSION: str = "3"
 
+#: Every line boundary ``str.splitlines()`` honours, as a regex character-class
+#: body: LF, CR, VT, FF, FS, GS, RS, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR
+#: (CRLF is CR then LF). Single-line patterns must not cross any of them (#261).
+_LINE_SEPARATORS: str = r"\n\r\x0b\x0c\x1c\x1d\x1e\x85  "
+
 
 @dataclass(frozen=True)
 class RedactionResult:
@@ -89,10 +94,14 @@ class RedactionEngine:
     # REDACTION_ENGINE_VERSION above. This ensures artifact provenance records
     # accurately reflect which pattern set was active at archive time.
     #
-    # LINE-BOUNDING RULE (#256): callers pass multi-line text (copy_and_redact
-    # passes a whole file). Every pattern except private_key must be
-    # line-bounded: no character class may match '\n', and any '$' anchor needs
-    # re.MULTILINE so it means end-of-line, not end-of-input.
+    # LINE-BOUNDING RULE (#256, #261): callers pass multi-line text
+    # (copy_and_redact passes a whole file). Every pattern except private_key
+    # must be line-bounded: no character class may match any of
+    # _LINE_SEPARATORS, and an end-of-line test must be a lookahead for one
+    # of them (or \Z). Do not use '$' with re.MULTILINE: it knows only '\n'.
+    #
+    # Critical-Engineer: consulted for Redaction security and archive integrity
+    # (#261 round 1 BLOCKED at 46f6108; separators, key headers, two URIs).
     PATTERNS: dict[str, tuple[Pattern[str], str]] = {
         # AI API keys: sk- followed by 20+ alphanumeric, hyphen, or underscore chars.
         # G7 fix: widened from [a-zA-Z0-9] to [a-zA-Z0-9\-_] to capture full tokens
@@ -141,18 +150,26 @@ class RedactionEngine:
         # Database passwords in connection strings.
         # Matches: scheme://user:password@host:port/db
         # Uses a lookahead to find the LAST @ ON THE LINE before host/port/path.
-        # Pattern breakdown:
-        #   (\w+://[^:\n]+:) - Capture scheme://user: (user part never crosses a line)
-        #   (.+)             - Capture password (greedy; '.' never matches '\n')
-        #   (@)              - Capture the @ separator
-        #   (?=[^@\n]*$)     - Lookahead: no more @ before the END OF THIS LINE
+        # Pattern breakdown (S = _LINE_SEPARATORS, every str.splitlines() boundary):
+        #   (\w+://[^:S]+:)      - Capture scheme://user: (user part never crosses a line)
+        #   ([^S]+)              - Capture password (greedy, never crosses a line)
+        #   (@)                  - Capture the @ separator
+        #   (?=[^@S]*(?:[S]|\Z)) - Lookahead: no more @ before the END OF THIS LINE
         #   This ensures password can contain @ symbols but we match to the line's final @
-        # LINE-BOUNDED (#256, PROD::I2): re.MULTILINE makes ``$`` end-of-line. Without
-        # it, on multi-line input (the whole-file copy_and_redact archive) any '@' on a
-        # LATER line failed the lookahead and the password survived, and ``[^:]+``
-        # joined a URL line to a later '@' line, over-redacting unrelated text.
+        # LINE-BOUNDED (#256, PROD::I2): without it, on multi-line input (the
+        # whole-file copy_and_redact archive) an '@' on a LATER line failed the
+        # lookahead and the password survived, and the user part joined a URL line
+        # to a later '@' line, over-redacting unrelated text. '\n' alone was not
+        # enough (#261): a lone '\r' or U+2028 inside a record ran the match on.
+        # Two URIs on ONE line collapse into one match to the line's last '@';
+        # that only over-redacts the text between them (both passwords are
+        # inside the redacted group). It is kept on purpose: a password ending at
+        # whitespace would leak an unencoded password that contains a space.
         "db_password": (
-            re.compile(r"(\w+://[^:\n]+:)(.+)(@)(?=[^@\n]*$)", re.MULTILINE),
+            re.compile(
+                rf"(\w+://[^:{_LINE_SEPARATORS}]+:)([^{_LINE_SEPARATORS}]+)(@)"
+                rf"(?=[^@{_LINE_SEPARATORS}]*(?:[{_LINE_SEPARATORS}]|\Z))"
+            ),
             r"\1[REDACTED_PASSWORD]\3",
         ),
         # GitHub Personal Access Tokens (G2).
