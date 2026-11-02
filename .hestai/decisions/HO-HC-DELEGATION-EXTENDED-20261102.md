@@ -1,0 +1,18 @@
+---
+type: "DECISION_RECORD"
+version: "1.4"
+token: "HO-HC-DELEGATION-EXTENDED-20261102"
+status: "RATIFIED"
+tier: "TACTICAL"
+authored_at: "2026-11-02T02:19:11Z"
+decision: "The HC control room keeps authority to make decisions and merge pull requests in hestai-context-mcp until 9am GMT on Monday 2 November 2026, under the same rules as the weekend delegation."
+because: "The operator restated the authority first-party in the HC session after the weekend window lapsed, so the control room can finish the in-flight hestai-context-mcp work."
+scope: "Same scope, relay rule, merge rules and limits as HO-HC-WEEKEND-DELEGATION-20261031: hestai-context-mcp decisions and merges by the HC control room, one merge at a time, review gate approved at head, required checks green, gh pr merge --match-head-commit, main CI checked after each merge. HW-PROGRAMME2 slots govern sequencing (hestai-workbench #689, merged 6cf5403d)"
+ratified_by: "human:operator<shaunbuswell>"
+ratified_at: "2026-11-02T02:19:11Z"
+authoring_session: "holistic-orchestrator:hc-control-room-20260929"
+ceremony_ref: "625fb59c-a1a2-466b-bb95-608cb4285017"
+operator_ruling: "Shaun Buswell, 2026-11-02, HC control room session, first-party, verbatim: 'You still have authority to make decisions and merge PRs until 9am GMT Monday'"
+related_decisions: "HO-HC-WEEKEND-DELEGATION-20261031, HO-RECORDS-AUTHORITY-CONTINUES-20261102, HW-PROGRAMME2-AUTHORITY-CONTINUES-WHILE-OPERATOR-PART-TIME-20261102"
+window: "From the operator's message (about 2026-11-02T02:19Z) to 2026-11-02T09:00Z (9am GMT Monday). The earlier window in HO-HC-WEEKEND-DELEGATION-20261031 lapsed at 2026-11-02T01:18Z; this record restores the same authority for the new window and then lapses without further action"
+---
