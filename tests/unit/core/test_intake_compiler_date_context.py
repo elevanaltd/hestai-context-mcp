@@ -141,7 +141,12 @@ class TestYamlRecordVersionFact:
         clock(_NOW)
         scripted(_compiled(TOKEN=_TODAY_TOKEN, VERSION="1.1"))
         result = await run_intake_pipeline(tmp_path, _ctx())
-        assert 'version: "1.4"' not in (result["octave"] or "")
+        # Gate A accepts version "1.1" for a YAML record, so the run files it and the
+        # canonical record still declares "1.1": the pipeline did not rewrite the version.
+        assert result["ok"] is True, result["validation_errors"]
+        octave = result["octave"] or ""
+        assert 'version: "1.1"' in octave
+        assert 'version: "1.4"' not in octave
 
 
 class TestDateContextIsNotOperatorWords:
