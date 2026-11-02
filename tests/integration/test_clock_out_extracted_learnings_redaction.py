@@ -421,3 +421,62 @@ class TestRedactionScopeAtExtraction:
         (artifact,) = _published_artifacts(tmp_path)
         assert artifact["payload"]["learnings"] == expected
         _assert_absent_everywhere(tmp_path, result, (FAKE_PEM_BODY, "PRIVATE KEY-----"))
+
+    def test_multiline_description_db_password_with_later_at_line_is_redacted(
+        self, tmp_path: Path
+    ) -> None:
+        """A db password in a multi-line description must not reach the payload.
+
+        One engine pass over the whole description misses it when a later line
+        contains '@' (the db_password lookahead), so the description needs the
+        same line-bounded treatment as the transcript messages.
+        """
+
+        description = f"Used {FAKE_DB_URI} for staging\nping @reviewer before merge"
+        result = _clock_out_with(tmp_path, f"LEARNING: {PLAIN_LEARNING}", description)
+
+        _assert_absent_everywhere(tmp_path, result, (FAKE_DB_PASSWORD,))
+        (artifact,) = _published_artifacts(tmp_path)
+        assert artifact["payload"]["description"].endswith("\nping @reviewer before merge")
+
+    def test_multiline_description_url_line_does_not_redact_a_later_email(
+        self, tmp_path: Path
+    ) -> None:
+        """(5) No over-redaction of a non-secret multi-line description."""
+
+        description = "See https://docs.example.com/guide for setup\nNote: email ops@example.com"
+        _clock_out_with(tmp_path, f"LEARNING: {PLAIN_LEARNING}", description)
+
+        (artifact,) = _published_artifacts(tmp_path)
+        assert artifact["payload"]["description"] == description
+
+
+@pytest.mark.integration
+def test_description_redaction_failure_fails_closed(tmp_path: Path) -> None:
+    """(4) A failure redacting only the description also fails closed."""
+
+    from hestai_context_mcp.tools.clock_out import clock_out
+
+    marker = "DESCRIPTION-ONLY-MARKER"
+    description = f"{marker} rotated access key {FAKE_AWS_KEY}"
+    _write_identity_config(tmp_path)
+    _seed_session(tmp_path)
+    real_redact = RedactionEngine.redact_content
+
+    def _fail_on_description(text: str) -> str:
+        if marker in text:
+            raise RuntimeError("simulated redaction failure")
+        return real_redact(text)
+
+    with patch.object(RedactionEngine, "redact_content", side_effect=_fail_on_description):
+        result = clock_out(
+            session_id=SESSION_ID, working_dir=str(tmp_path), description=description
+        )
+
+    assert result["status"] == "success"
+    assert result["extracted_learnings"] == {"decisions": [], "blockers": [], "learnings": []}
+    publication = result["portable_publication"]
+    assert publication["status"] == "failed"
+    assert publication["error_code"] == "redaction_failure"
+    assert _published_artifacts(tmp_path) == []
+    _assert_absent_everywhere(tmp_path, result, (FAKE_AWS_KEY, marker) + FAKE_CREDENTIALS)
