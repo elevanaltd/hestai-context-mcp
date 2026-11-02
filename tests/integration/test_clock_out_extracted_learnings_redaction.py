@@ -59,13 +59,24 @@ def _write_identity_config(working_dir: Path) -> None:
     cfg_path.write_text(json.dumps(_identity_dict()), encoding="utf-8")
 
 
-def _seed_session(working_dir: Path) -> Path:
+def _default_assistant_text() -> str:
+    return (
+        f"DECISION: {RAW_DECISION}\n"
+        f"BLOCKER: {RAW_BLOCKER}\n"
+        f"LEARNING: {RAW_SECRET_LEARNING}\n"
+        f"LEARNING: {PLAIN_LEARNING}"
+    )
+
+
+def _seed_session(working_dir: Path, assistant_text: str | None = None) -> Path:
     """Seed an active session whose transcript carries credentials in learnings.
 
     Returns the transcript path (it lives outside ``.hestai/state`` so a
     byte scan of the state tree only sees what clock_out wrote).
     """
 
+    if assistant_text is None:
+        assistant_text = _default_assistant_text()
     transcript = working_dir / "transcript.jsonl"
     records = [
         {
@@ -80,12 +91,7 @@ def _seed_session(working_dir: Path) -> Path:
                 "content": [
                     {
                         "type": "text",
-                        "text": (
-                            f"DECISION: {RAW_DECISION}\n"
-                            f"BLOCKER: {RAW_BLOCKER}\n"
-                            f"LEARNING: {RAW_SECRET_LEARNING}\n"
-                            f"LEARNING: {PLAIN_LEARNING}"
-                        ),
+                        "text": assistant_text,
                     }
                 ],
             },
@@ -299,3 +305,92 @@ class TestExtractedLearningsRedactionFailsClosed:
                 path.read_text(encoding="utf-8", errors="replace"),
                 str(path.relative_to(tmp_path)),
             )
+
+
+# Fake multi-line private key and DB password, built from parts at runtime.
+FAKE_PEM_BODY = "MII" + "Q" * 40
+FAKE_PEM = (
+    "-----BEGIN "
+    + "RSA PRIVATE KEY-----\n"
+    + FAKE_PEM_BODY
+    + "\n"
+    + "Q" * 40
+    + "\n-----END "
+    + "RSA PRIVATE KEY-----"
+)
+FAKE_DB_PASSWORD = "Fake" + "Pass" + "word" + "123"
+FAKE_DB_URI = "postgres://admin:" + FAKE_DB_PASSWORD + "@db.local:5432/app"
+
+
+def _clock_out_with(
+    working_dir: Path, assistant_text: str, description: str = ""
+) -> dict[str, Any]:
+    from hestai_context_mcp.tools.clock_out import clock_out
+
+    _write_identity_config(working_dir)
+    _seed_session(working_dir, assistant_text)
+    result = clock_out(session_id=SESSION_ID, working_dir=str(working_dir), description=description)
+    assert result["status"] == "success"
+    assert result["portable_publication"]["status"] in {"published", "duplicate"}
+    return result
+
+
+def _assert_absent_everywhere(
+    working_dir: Path, result: dict[str, Any], needles: tuple[str, ...]
+) -> None:
+    """No needle in the response or in any file clock_out wrote under .hestai/state."""
+
+    response = json.dumps(result)
+    for needle in needles:
+        assert needle not in response, "fake secret material leaked into clock_out response"
+    for path in _state_files(working_dir):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for needle in needles:
+            assert (
+                needle not in text
+            ), f"fake secret material leaked into {path.relative_to(working_dir)}"
+
+
+@pytest.mark.integration
+class TestRedactionScopeAtExtraction:
+    """Code-review findings on the first GREEN: what per-value redaction alone misses."""
+
+    def test_multiline_private_key_in_learning_line_is_redacted(self, tmp_path: Path) -> None:
+        """A key that starts on a LEARNING line and ends lines later must not leak.
+
+        The extraction regex stops at the newline, so redacting only the
+        extracted value never shows the engine the BEGIN...END span.
+        """
+
+        text = f"LEARNING: the deploy key was {FAKE_PEM}\nDECISION: rotate the deploy key"
+        result = _clock_out_with(tmp_path, text)
+
+        _assert_absent_everywhere(tmp_path, result, (FAKE_PEM_BODY, "PRIVATE KEY-----"))
+        (artifact,) = _published_artifacts(tmp_path)
+        assert artifact["payload"]["learnings"] == ["the deploy key was [REDACTED_PRIVATE_KEY]"]
+        assert artifact["payload"]["decisions"] == ["rotate the deploy key"]
+
+    def test_db_password_redacted_when_a_later_line_has_an_at_sign(self, tmp_path: Path) -> None:
+        """Guard: whole-message redaction alone misses this; the extracted value must not.
+
+        The db_password pattern only fires when no ``@`` follows it in the
+        string, so a later ``@reviewer`` line defeats it on the whole message.
+        """
+
+        text = f"DECISION: use {FAKE_DB_URI} for staging\nLEARNING: ping @reviewer before merge"
+        result = _clock_out_with(tmp_path, text)
+
+        _assert_absent_everywhere(tmp_path, result, (FAKE_DB_PASSWORD,))
+        (artifact,) = _published_artifacts(tmp_path)
+        assert artifact["payload"]["learnings"] == ["ping @reviewer before merge"]
+
+    def test_description_credential_absent_from_published_payload(self, tmp_path: Path) -> None:
+        """The caller-supplied description is written into the same portable payload."""
+
+        description = f"rotated access key {FAKE_AWS_KEY} after the leak"
+        result = _clock_out_with(tmp_path, f"LEARNING: {PLAIN_LEARNING}", description)
+
+        _assert_absent_everywhere(tmp_path, result, (FAKE_AWS_KEY,))
+        (artifact,) = _published_artifacts(tmp_path)
+        assert artifact["payload"]["description"] == RedactionEngine.redact_content(description)
+        assert artifact["payload"]["learnings"] == [PLAIN_LEARNING]
