@@ -118,7 +118,11 @@ class RedactionEngine:
         # Accepted cost: everything after an unterminated BEGIN is lost from
         # that input (data loss over data exposure). Whatever input a caller
         # passes defines that span: a whole file for copy_and_redact, one line
-        # or record for a per-line caller.
+        # or record for a per-line caller. On a JSONL archive that means every
+        # later record is dropped and the cut record is no longer valid JSON.
+        # A bare BEGIN marker with no key material (prose, grep output) also
+        # triggers it. Bounding the span to one record was rejected: a
+        # truncated key streamed across several records would then leak.
         "private_key": (
             re.compile(
                 r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",

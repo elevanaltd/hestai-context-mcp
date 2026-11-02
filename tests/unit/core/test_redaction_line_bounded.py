@@ -104,7 +104,12 @@ class TestDbPasswordLaterAtOnAnotherLine:
 
 
 class TestNoCrossLineOverRedaction:
-    """A URL line plus a later email line must stay as it is (#256 defect 1)."""
+    """A URL line plus a later email line must stay as it is (#256 defect 1).
+
+    Scope: physical lines, i.e. real '\\n' (one JSONL record per line). An
+    escaped newline inside one JSON string is part of the same physical line
+    and is NOT covered here; that same-line behaviour is unchanged by #256.
+    """
 
     def test_url_line_then_email_line_unchanged(self) -> None:
         text = "see https://example.com/docs\ncontact: " + _email("bob") + "\n"
