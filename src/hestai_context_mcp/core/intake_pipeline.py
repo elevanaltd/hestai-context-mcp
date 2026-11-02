@@ -33,6 +33,7 @@ import dataclasses
 import logging
 import re
 import unicodedata
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, TypedDict
@@ -336,6 +337,38 @@ def _gate(
     return True, regex_result, [], octave_result.available
 
 
+def _now_utc() -> datetime:
+    """The pipeline clock seam (#249): tests patch this; production reads real UTC."""
+    return datetime.now(UTC)
+
+
+_AUTHORED_AT_KEY_RE = re.compile(r"authored_at\s*:", re.IGNORECASE)
+
+
+def _stamp_authored_at(record: str, authored_at: str) -> str:
+    """Add ``authored_at`` to a compiled quoted-YAML ``record`` that omits it (#249).
+
+    ADR-RFC-ARCH-004 §1.2: UTC, set once at record creation, never edited. An
+    ``authored_at`` already in the front matter (operator-supplied) is kept as is.
+    Only a quoted-YAML record is touched, and only this one field; the TOKEN is never
+    re-dated, so a TOKEN-date mismatch is left for Gate A's §1.3 check to reject. The
+    caller runs Gate A on the result, which re-emits the canonical bytes (key order).
+    Unchanged when there is no closing fence (Gate A then rejects it).
+    """
+    # A leading BOM is rejected at line 1 as invalid_key (§1.1); leave it unstamped so
+    # it still fails loudly rather than being made acceptable.
+    if not is_yaml_front_matter(record) or record.startswith("\ufeff"):
+        return record
+    lines = record.split("\n")
+    # The reader's fence rule (``_is_fence_line``): ``---`` plus at most one CR.
+    close = next((i for i in range(1, len(lines)) if lines[i].removesuffix("\r") == "---"), None)
+    if close is None or any(_AUTHORED_AT_KEY_RE.match(line) for line in lines[1:close]):
+        return record
+    eol = "\r" if lines[0].endswith("\r") else ""  # the record's own line ending
+    stamp = f"authored_at: {encode_yaml_scalar(authored_at)}{eol}"
+    return "\n".join([lines[0], stamp, *lines[1:]])
+
+
 def _augment_prompt_with_errors(ctx: IntakeContext, errors: list[str]) -> IntakeContext:
     """Return a new IntakeContext whose prompt appends the validation errors.
 
@@ -391,6 +424,8 @@ async def run_intake_pipeline(
     # Defaults True (no degrade observed) for compile-fail aborts that never
     # reach the validator.
     last_available = True
+    # #249: ONE clock read per call, reused by every attempt, so a retry never re-dates.
+    authored_at = _now_utc().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         compiled = await compile_prose_to_octave(
@@ -415,7 +450,9 @@ async def run_intake_pipeline(
                 "real_validation_available": last_available,
             }
 
-        octave = compiled["octave"]
+        # Stamped before Gate A, the fidelity guard and canonicalisation (#249), so each
+        # judges the exact final bytes.
+        octave = _stamp_authored_at(compiled["octave"], authored_at)
         prose = intake_context.prose_input
         passed, regex_result, errors, last_available = _gate(working_dir, octave, prose)
         if passed and write_adr:
