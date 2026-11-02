@@ -35,9 +35,11 @@ REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
 #:   '2' — Phase 1 hardening (issue #43): G1 stream-mode PEM fix (full-buffer
 #:          copy_and_redact), G2 GitHub PAT patterns (classic + fine-grained),
 #:          G7 sk- character class widened to include hyphens/underscores.
-#:   '3' — issue #256: db_password line-bounded (v2 could keep a password on
-#:          multi-line input when a later line held '@'); private_key redacts
-#:          a BEGIN with no END to the end of the input (fail safe).
+#:   '3' — issue #256 / PR #261: db_password line-bounded at every
+#:          str.splitlines() boundary (v2 could keep a password on multi-line
+#:          input when a later line held '@'); private_key redacts a BEGIN with
+#:          no END to the end of the input (fail safe), and its header matches
+#:          case-insensitively, incl. PGP "PRIVATE KEY BLOCK" and SSH2 armour.
 REDACTION_ENGINE_VERSION: str = "3"
 
 #: Every line boundary ``str.splitlines()`` honours, as a regex character-class
@@ -118,8 +120,11 @@ class RedactionEngine:
             "[REDACTED_AWS_KEY]",
         ),
         # PEM private keys: entire BEGIN/END block.
-        # Uses [A-Z ]* (zero or more) to handle both qualified keys
-        # (e.g., "RSA PRIVATE KEY") and bare "PRIVATE KEY").
+        # Header rule (#261, fail-safe bias): case-insensitive; 4 or 5 dashes with an
+        # optional space (SSH2 "---- BEGIN ... ----"); any kind words before
+        # "PRIVATE KEY" ([A-Z0-9 ]*: RSA, EC, DSA, OPENSSH, ENCRYPTED, SSH2, bare)
+        # and any after it (PGP "PRIVATE KEY BLOCK"). Public keys, PGP public
+        # blocks and certificates never say "PRIVATE KEY", so they do not match.
         # NOTE: DOTALL is required; this pattern only works on a full-buffer string.
         # copy_and_redact uses full-buffer mode (G1 fix) to guarantee this pattern fires,
         # including a block whose BEGIN and END sit in different JSONL records.
@@ -137,8 +142,9 @@ class RedactionEngine:
         # truncated key streamed across several records would then leak.
         "private_key": (
             re.compile(
-                r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
-                re.DOTALL,
+                r"-{4,5} ?BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]* ?-{4,5}"
+                r"(?:.*?-{4,5} ?END [A-Z0-9 ]*PRIVATE KEY[A-Z ]* ?-{4,5}|.*)",
+                re.DOTALL | re.IGNORECASE,
             ),
             "[REDACTED_PRIVATE_KEY]",
         ),
