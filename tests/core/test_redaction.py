@@ -742,11 +742,11 @@ class TestFalsePositivePrevention:
 class TestEngineVersion:
     """Verify REDACTION_ENGINE_VERSION is correctly bumped after pattern additions."""
 
-    def test_engine_version_is_3(self) -> None:
-        """REDACTION_ENGINE_VERSION must be '3' after the #256 line-bounding change.
+    def test_engine_version_is_4(self) -> None:
+        """REDACTION_ENGINE_VERSION must be '4' after the #264 S2 span-union change.
 
         Bump policy: increment on every pattern addition so downstream readers
         can identify artifacts produced by an older (potentially incomplete)
         redactor.
         """
-        assert REDACTION_ENGINE_VERSION == "3"
+        assert REDACTION_ENGINE_VERSION == "4"

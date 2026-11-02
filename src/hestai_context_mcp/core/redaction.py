@@ -40,7 +40,11 @@ REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
 #:          input when a later line held '@'); private_key redacts a BEGIN with
 #:          no END to the end of the input (fail safe), and its header matches
 #:          case-insensitively, incl. PGP "PRIVATE KEY BLOCK" and SSH2 armour.
-REDACTION_ENGINE_VERSION: str = "3"
+#:   '4' — issue #264 / PR #265: S2 span-union redaction (single-line
+#:          patterns all match the same text; the union of overlapping secret
+#:          spans is replaced), so no pattern can consume another's anchor
+#:          (v3 leaked on B1-B3, A1-A4); bearer chain; possessive db scheme.
+REDACTION_ENGINE_VERSION: str = "4"
 
 #: Every line boundary ``str.splitlines()`` honours, as a regex character-class
 #: body: LF, CR, VT, FF, FS, GS, RS, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR
