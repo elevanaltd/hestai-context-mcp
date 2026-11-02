@@ -61,7 +61,8 @@ class RedactionEngine:
     Detects the following credential patterns (high-confidence, low false-positive):
     - AI API keys (sk-... including Anthropic sk-ant-* and OpenAI sk-proj-*/sk-svcacct-*)
     - AWS access keys (AKIA..., ASIA... with 16 uppercase alphanumeric)
-    - PEM-encoded private keys (BEGIN/END PRIVATE KEY blocks)
+    - PEM-encoded private keys (BEGIN/END PRIVATE KEY blocks; a BEGIN with no
+      END is redacted to the end of the input, fail safe)
     - Bearer authentication tokens
     - Database passwords in connection strings (scheme://user:password@host)
     - GitHub Personal Access Tokens (classic ghp_/gho_/ghu_/ghs_/ghr_,
@@ -84,6 +85,11 @@ class RedactionEngine:
     # BUMP POLICY: When adding or changing any pattern here, also increment
     # REDACTION_ENGINE_VERSION above. This ensures artifact provenance records
     # accurately reflect which pattern set was active at archive time.
+    #
+    # LINE-BOUNDING RULE (#256): callers pass multi-line text (copy_and_redact
+    # passes a whole file). Every pattern except private_key must be
+    # line-bounded: no character class may match '\n', and any '$' anchor needs
+    # re.MULTILINE so it means end-of-line, not end-of-input.
     PATTERNS: dict[str, tuple[Pattern[str], str]] = {
         # AI API keys: sk- followed by 20+ alphanumeric, hyphen, or underscore chars.
         # G7 fix: widened from [a-zA-Z0-9] to [a-zA-Z0-9\-_] to capture full tokens
@@ -103,10 +109,19 @@ class RedactionEngine:
         # Uses [A-Z ]* (zero or more) to handle both qualified keys
         # (e.g., "RSA PRIVATE KEY") and bare "PRIVATE KEY").
         # NOTE: DOTALL is required; this pattern only works on a full-buffer string.
-        # copy_and_redact uses full-buffer mode (G1 fix) to guarantee this pattern fires.
+        # copy_and_redact uses full-buffer mode (G1 fix) to guarantee this pattern fires,
+        # including a block whose BEGIN and END sit in different JSONL records.
+        # Fail safe (#256, PROD::I2): a BEGIN with no END anywhere after it
+        # (truncated output) is redacted to the END OF THE INPUT. The lazy first
+        # alternative is always tried first, so a terminated block is still
+        # replaced in place; only an unterminated BEGIN falls through to ``.*``.
+        # Accepted cost: everything after an unterminated BEGIN is lost from
+        # that input (data loss over data exposure). Whatever input a caller
+        # passes defines that span: a whole file for copy_and_redact, one line
+        # or record for a per-line caller.
         "private_key": (
             re.compile(
-                r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+                r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
                 re.DOTALL,
             ),
             "[REDACTED_PRIVATE_KEY]",
@@ -118,15 +133,19 @@ class RedactionEngine:
         ),
         # Database passwords in connection strings.
         # Matches: scheme://user:password@host:port/db
-        # Uses negative lookahead to find the LAST @ before host/port/path.
+        # Uses a lookahead to find the LAST @ ON THE LINE before host/port/path.
         # Pattern breakdown:
-        #   (\w+://[^:]+:) - Capture scheme://user:
-        #   (.+)           - Capture password (greedy, everything)
-        #   (@)            - Capture the @ separator
-        #   (?=[^@]*$)     - Lookahead: ensure no more @ after this one (= last @)
-        #   This ensures password can contain @ symbols but we match to the final @
+        #   (\w+://[^:\n]+:) - Capture scheme://user: (user part never crosses a line)
+        #   (.+)             - Capture password (greedy; '.' never matches '\n')
+        #   (@)              - Capture the @ separator
+        #   (?=[^@\n]*$)     - Lookahead: no more @ before the END OF THIS LINE
+        #   This ensures password can contain @ symbols but we match to the line's final @
+        # LINE-BOUNDED (#256, PROD::I2): re.MULTILINE makes ``$`` end-of-line. Without
+        # it, on multi-line input (the whole-file copy_and_redact archive) any '@' on a
+        # LATER line failed the lookahead and the password survived, and ``[^:]+``
+        # joined a URL line to a later '@' line, over-redacting unrelated text.
         "db_password": (
-            re.compile(r"(\w+://[^:]+:)(.+)(@)(?=[^@]*$)"),
+            re.compile(r"(\w+://[^:\n]+:)(.+)(@)(?=[^@\n]*$)", re.MULTILINE),
             r"\1[REDACTED_PASSWORD]\3",
         ),
         # GitHub Personal Access Tokens (G2).
