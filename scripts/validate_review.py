@@ -373,6 +373,12 @@ _SECURITY_PATTERNS = [
     r"(^|/)session/",
     r"(^|/)config/env",
     r"(^|/)path_utils",
+    # Credential-safety code (PROD::I2, issue #258): fail-closed redaction,
+    # provenance and the clock_out lifecycle tool that invokes redaction.
+    # Segment-anchored like the entries above; path-only, never labels/titles.
+    r"(^|/)redaction",
+    r"(^|/)provenance",
+    r"(^|/)clock_out",
 ]
 
 # Security-load-bearing basenames (issue #1833): leading-dot, extensionless
