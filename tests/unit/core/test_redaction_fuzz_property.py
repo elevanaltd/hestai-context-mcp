@@ -290,3 +290,67 @@ def test_db_password_scheme_is_word_bounded_and_possessive() -> None:
     """Structural guard: plain "\\w+://" retries every start inside one word."""
     source = RedactionEngine.PATTERNS["db_password"][0].pattern
     assert source.startswith("(" + "\\b\\w++://"), "db_password scheme must be \\b\\w++://"
+
+
+# ---------------------------------------------------------------------------
+# #269 unrecognised credential forms (HC ruling issuecomment-6582850613).
+# Exact kept text is not pinned here; that is part of the design ruling.
+# ---------------------------------------------------------------------------
+
+
+def _pw269() -> str:
+    return "fkPw" + "269" + "zzK"
+
+
+def _tok269() -> str:
+    return "FAKEbearer" + "269" + "val"
+
+
+_U1_CASES = {
+    "redis_userless": "redis://:" + _pw269() + "@cache.example.test:6379/0",
+    "postgresql_userless": "postgresql://:" + _pw269() + "@db.example.test/app",
+}
+_U2_CASES = {
+    "lower": "bearer " + _tok269(),
+    "upper": "BEARER " + _tok269(),
+    "mixed": "bEaReR " + _tok269(),
+    "authorization_header_lower": "Authorization: bearer " + _tok269(),
+    "chain_lower": "bearer bearer " + _tok269(),
+    "chain_mixed": "BEARER Bearer " + _tok269(),
+}
+#: (input, excess that must not survive, marker). ghp_ + 40 and AKIA + 20.
+_U3_CASES = {
+    "ghp_plus_40": (
+        "ghp_" + ("TESTONLY" + "269" + "G" * 40)[:36] + "x9X8",
+        "x9X8",
+        "[REDACTED_GITHUB_" + "TOKEN]",
+    ),
+    "akia_plus_20": (
+        "AKIA" + ("TEST" + "269" + "Z" * 20)[:16] + "W7V6",
+        "W7V6",
+        "[REDACTED_AWS_" + "KEY]",
+    ),
+}
+
+
+@pytest.mark.parametrize("text", _U1_CASES.values(), ids=list(_U1_CASES))
+def test_u1_userless_db_uri_password_redacted_on_every_path(tmp_path: Path, text: str) -> None:
+    for path, out in zip(PATHS, _all_paths(text, tmp_path), strict=True):
+        assert _pw269() not in out, f"userless-URI password survived via {path}"
+        assert _PW in out, f"no password marker via {path}"
+
+
+@pytest.mark.parametrize("text", _U2_CASES.values(), ids=list(_U2_CASES))
+def test_u2_bearer_keyword_any_case_redacted_on_every_path(tmp_path: Path, text: str) -> None:
+    for path, out in zip(PATHS, _all_paths(text, tmp_path), strict=True):
+        assert _tok269() not in out, f"bearer value survived via {path}"
+        assert _BR in out, f"no bearer marker via {path}"
+
+
+@pytest.mark.parametrize(("text", "excess", "marker"), _U3_CASES.values(), ids=list(_U3_CASES))
+def test_u3_overwidth_run_redacted_whole_on_every_path(
+    tmp_path: Path, text: str, excess: str, marker: str
+) -> None:
+    for path, out in zip(PATHS, _all_paths(text, tmp_path), strict=True):
+        assert excess not in out, f"over-width excess survived via {path}"
+        assert marker in out, f"no marker via {path}"
