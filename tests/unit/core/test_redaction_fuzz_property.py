@@ -14,6 +14,7 @@ SYNTHETIC DATA ONLY: every secret is FAKE and assembled at runtime from parts.
 from __future__ import annotations
 
 import random
+import re
 import time
 from pathlib import Path
 
@@ -248,6 +249,51 @@ def test_token_patterns_absorb_own_anchors_or_are_overlapping() -> None:
             wrong.append(f"{name}: absorbs={absorbs} overlapping={overlapping}")
     assert not wrong, "C1 guard: " + "; ".join(wrong)
     assert set(single_line_patterns()) >= RedactionEngine.OVERLAPPING
+
+
+# --- The guard must FAIL CLOSED (#270 TMG round 1, issuecomment-6585628022) ---
+
+#: TMG's probe: a whole-match token pattern whose anchor sits behind a leading
+#: lookahead. Anchor discovery used to return "" for it, so the guard skipped it.
+_PROBE_LOOKAHEAD_TOKEN = (re.compile(r"(?=AB_)AB_[A-Z]{16}"), "[REDACTED_PROBE]")
+
+
+def _guard_with_patterns(monkeypatch: pytest.MonkeyPatch, **changes: object) -> None:
+    """Run the structural guard against PATTERNS with ``changes`` (None removes)."""
+    for name, value in changes.items():
+        if value is None:
+            monkeypatch.delitem(RedactionEngine.PATTERNS, name)
+        else:
+            monkeypatch.setitem(RedactionEngine.PATTERNS, name, value)
+    test_token_patterns_absorb_own_anchors_or_are_overlapping()
+
+
+def test_guard_fails_on_a_lookahead_led_token_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stakes, reproduced: this pattern really does leak a second token's tail.
+    probe = RedactionEngine.PATTERNS.copy()
+    probe["probe_token"] = _PROBE_LOOKAHEAD_TOKEN
+    variant = type("Probe", (RedactionEngine,), {"PATTERNS": probe})
+    out = variant.redact_content("AB_" + "C" * 14 + "AB_" + "Y" * 16)
+    assert "Y" * 16 in out, "probe no longer leaks; the fixture no longer shows the risk"
+    with pytest.raises(AssertionError):
+        _guard_with_patterns(monkeypatch, probe_token=_PROBE_LOOKAHEAD_TOKEN)
+
+
+def test_guard_fails_on_an_unclassified_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+    unknown = (re.compile(r"probe=(?P<secret>[A-Z]{12,})"), "[REDACTED_PROBE]")
+    with pytest.raises(AssertionError):
+        _guard_with_patterns(monkeypatch, probe_secret_group=unknown)
+
+
+def test_guard_fails_on_an_unexpected_extra_token_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    extra = (re.compile(r"xk-[A-Za-z0-9\-]{20,}"), "[REDACTED_PROBE]")
+    with pytest.raises(AssertionError):
+        _guard_with_patterns(monkeypatch, probe_extra_family=extra)
+
+
+def test_guard_fails_when_a_token_family_is_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(AssertionError):
+        _guard_with_patterns(monkeypatch, github_pat=None)
 
 
 def test_every_same_pattern_overlap_kind_redacted_on_every_path(tmp_path: Path) -> None:
