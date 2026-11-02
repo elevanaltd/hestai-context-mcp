@@ -213,7 +213,7 @@ class TestCredentialSafetyPathsAreSecurity:
     @pytest.mark.parametrize(
         ("path", "expected"),
         [
-            # Segment-anchored: a longer unrelated name must not match.
+            # Start-anchored: a name that merely CONTAINS the stem must not match.
             ("src/hestai_context_mcp/core/unredaction.py", {"ROUTINE_CODE"}),
             ("src/hestai_context_mcp/core/reduction.py", {"ROUTINE_CODE"}),
             ("src/hestai_context_mcp/tools/clock_in.py", {"ROUTINE_CODE"}),
@@ -227,6 +227,19 @@ class TestCredentialSafetyPathsAreSecurity:
     def test_unrelated_paths_stay_as_before(self, path: str, expected: set[str]) -> None:
         facets, _roles = _classify_one(path)
         assert facets == expected, f"{path}: expected {expected}, got {facets}"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # Prefix matching is intentional: related modules inherit the facet.
+            "src/hestai_context_mcp/core/redaction_helpers.py",
+            "src/hestai_context_mcp/core/redaction/patterns.py",
+            "src/hestai_context_mcp/storage/provenance_report.py",
+        ],
+    )
+    def test_prefix_variants_also_security(self, path: str) -> None:
+        facets, _roles = _classify_one(path)
+        assert "SECURITY" in facets, f"{path} should be SECURITY, got {facets}"
 
     @pytest.mark.parametrize(
         "path",
