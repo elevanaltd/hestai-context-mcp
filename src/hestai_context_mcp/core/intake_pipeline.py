@@ -358,10 +358,12 @@ def _stamp_authored_at(record: str, authored_at: str) -> str:
     if not is_yaml_front_matter(record):
         return record
     lines = record.split("\n")
-    close = next((i for i in range(1, len(lines)) if lines[i] == "---"), None)
+    # The reader's fence rule (``_is_fence_line``): ``---`` plus at most one CR.
+    close = next((i for i in range(1, len(lines)) if lines[i].removesuffix("\r") == "---"), None)
     if close is None or any(_AUTHORED_AT_KEY_RE.match(line) for line in lines[1:close]):
         return record
-    stamp = f"authored_at: {encode_yaml_scalar(authored_at)}"
+    eol = "\r" if lines[0].endswith("\r") else ""  # the record's own line ending
+    stamp = f"authored_at: {encode_yaml_scalar(authored_at)}{eol}"
     return "\n".join([lines[0], stamp, *lines[1:]])
 
 

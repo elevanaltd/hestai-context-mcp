@@ -236,12 +236,22 @@ class TestStampAgreesWithTheReaderOnFences:
         assert result["ok"] is True, result["validation_errors"]
         assert result["octave"] == _expected(_NOW_STAMP)
 
-    async def test_bom_prefixed_record_is_stamped(self, tmp_path: Path, scripted, clock) -> None:
+    async def test_bom_prefixed_record_is_rejected_never_accepted(
+        self, tmp_path: Path, scripted, clock
+    ) -> None:
+        # ADR-RFC-ARCH-004 §1.1: a leading BOM is "rejected at line 1 as invalid_key".
+        # The stamp must never turn such a record into an accepted one.
         clock(_NOW)
-        scripted("﻿" + _compiled())
+        scripted("\ufeff" + _compiled())
         result = await run_intake_pipeline(tmp_path, _ctx())
-        assert result["ok"] is True, result["validation_errors"]
-        assert _NOW_STAMP in (result["octave"] or "")
+        assert result["ok"] is False
+        assert result["octave"] is None
+        joined = "\n".join(result["validation_errors"])
+        assert "rejected at line 1: invalid_key" in joined, joined
+
+    def test_bom_prefixed_record_is_left_unstamped(self) -> None:
+        bom = "\ufeff" + _compiled()
+        assert mod._stamp_authored_at(bom, _NOW_STAMP) == bom
 
     async def test_existing_authored_at_with_cr_counts_as_present(
         self, tmp_path: Path, scripted, clock
