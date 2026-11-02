@@ -84,7 +84,14 @@ _WINDOW = 8
 
 #: Chars used for negated classes and '.'; letters and digits only, so a
 #: generated token never contains a separator, quote or '@' by accident.
-_SAFE = string.ascii_letters + string.digits
+#: STRICT edge sentinel (#265 cubic P2): every bounded-width secret body starts
+#: and ends with it, and nothing else in the harness ever produces it (it is
+#: excluded from _SAFE and from every random class choice; noise, separators,
+#: markers and hand-written values never contain it). So ANY occurrence in an
+#: output means an edge character of a bounded-width body survived; this is
+#: the any-prefix/any-suffix check that 8-char windows cannot give.
+SENTINEL = "Q"
+_SAFE = "".join(c for c in string.ascii_letters + string.digits if c != SENTINEL)
 #: A class with at most this many chars counts as part of an anchor alternative.
 _SMALL_CLASS = 8
 _UNBOUNDED_EXTRA = 8
@@ -154,7 +161,7 @@ def _emit(items: Any, rng: random.Random, out: list[str]) -> None:
         elif op is sre_c.ANY:
             out.append(rng.choice(_SAFE))
         elif op is sre_c.IN:
-            out.append(rng.choice(_class_chars(av)))
+            out.append(rng.choice([c for c in _class_chars(av) if c != SENTINEL]))
         elif op in (sre_c.MAX_REPEAT, sre_c.MIN_REPEAT, sre_c.POSSESSIVE_REPEAT):
             lo, hi, sub = av
             if _has_assert(sub):
@@ -229,6 +236,15 @@ def _secret_span(name: str, match: Match[str]) -> tuple[int, int]:
 _POOL_SIZE = 64
 
 
+def _with_sentinel_edges(token: Token) -> Token:
+    """Replace the first and last char of the token's secret body with SENTINEL."""
+    start, end = max(token.secret[0], len(token.lead)), token.secret[1]
+    if end - start < 2:  # pragma: no cover - bounded bodies are 16+ chars
+        return token
+    text = token.text[:start] + SENTINEL + token.text[start + 1 : end - 1] + SENTINEL
+    return Token(token.name, token.anchor, text + token.text[end:], token.secret)
+
+
 @functools.cache
 def _token_pool(name: str, anchor: str) -> tuple[Token, ...]:
     """A deterministic pool of tokens of ``name`` starting with ``anchor``."""
@@ -242,7 +258,12 @@ def _token_pool(name: str, anchor: str) -> tuple[Token, ...]:
         text = "".join(out)
         match = pattern.fullmatch(text)
         if match and text.startswith(anchor):
-            pool.append(Token(name, anchor, text, _secret_span(name, match)))
+            token = Token(name, anchor, text, _secret_span(name, match))
+            if is_bounded_width(pattern):
+                token = _with_sentinel_edges(token)
+                if not pattern.fullmatch(token.text):
+                    continue
+            pool.append(token)
             if len(pool) == _POOL_SIZE:
                 return tuple(pool)
     raise RuntimeError(f"cannot generate {name!r} with anchor {anchor!r}")
@@ -393,13 +414,15 @@ def _secret(rng: random.Random, tag: str) -> tuple[str, list[str], str]:
     """Return (fragment, planted cores that must not survive, kind)."""
     kind = rng.choice(KINDS)
     if kind == "sk":
-        core = "TESTONLY" + tag + "Q" * 12
+        core = "TESTONLY" + tag + "R" * 12
         return "sk-" + core, [core], kind
     if kind == "aws":
-        core = "AKIA" + "TEST" + tag + "Z" * 7
+        # EXACT width (AKIA + 16); sentinel edges (cubic P2: was AKIA + 17).
+        core = "AKIA" + SENTINEL + ("TEST" + tag + "Z" * 16)[:14] + SENTINEL
         return core, [core], kind
     if kind == "gh":
-        core = "TESTONLY" + tag + "G" * 23
+        # EXACT width (ghp_ + 36); sentinel edges (cubic P2: was ghp_ + 37).
+        core = SENTINEL + ("TESTONLY" + tag + "G" * 36)[:34] + SENTINEL
         return "ghp_" + core, [core], kind
     if kind == "bearer":
         core = "FAKEbearer" + tag + ".val"
@@ -470,6 +493,9 @@ def run(seed: int, n: int, mode: str, workdir: Path) -> FuzzReport:
             for path, out in outputs.items():
                 if survives(core, out):
                     report.leaks[(path, kind)] += 1
+        for path, out in outputs.items():
+            if SENTINEL in out:  # strict: an edge char of a bounded-width body survived
+                report.leaks[(path, "strict_bounded_edge")] += out.count(SENTINEL)
     return report
 
 
