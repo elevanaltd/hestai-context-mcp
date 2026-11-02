@@ -84,7 +84,7 @@ _WINDOW = 8
 
 #: Chars used for negated classes and '.'; letters and digits only, so a
 #: generated token never contains a separator, quote or '@' by accident.
-#: STRICT edge sentinel (#265 cubic P2): every bounded-width secret body starts
+#: STRICT edge sentinel (#265 cubic P2): every token-family secret body starts
 #: and ends with it, and nothing else in the harness ever produces it (it is
 #: excluded from _SAFE and from every random class choice; noise, separators,
 #: markers and hand-written values never contain it). So ANY occurrence in an
@@ -105,9 +105,29 @@ def single_line_patterns() -> dict[str, Pattern[str]]:
     return {n: p for n, (p, _) in RedactionEngine.PATTERNS.items() if n != "private_key"}
 
 
-def is_bounded_width(pattern: Pattern[str]) -> bool:
-    """True when the pattern's maximum match width is finite (fixed/bounded)."""
-    return bool(sre_p.parse(pattern.pattern, pattern.flags).getwidth()[1] < sre_c.MAXREPEAT)
+def is_token_family(name: str) -> bool:
+    """A whole-match token pattern with a literal anchor (sk-, AKIA, gh?_, github_pat_)."""
+    pattern = single_line_patterns()[name]
+    return "secret" not in pattern.groupindex and all(anchors(name))
+
+
+def run_class(name: str) -> tuple[frozenset[str], bool]:
+    """(chars, unbounded) of the pattern's trailing run, from the parse tree."""
+    pattern = single_line_patterns()[name]
+    op, av = list(sre_p.parse(pattern.pattern, pattern.flags))[-1]
+    if op not in (sre_c.MAX_REPEAT, sre_c.MIN_REPEAT, sre_c.POSSESSIVE_REPEAT):
+        raise AssertionError(f"{name}: no trailing run to analyse ({op})")
+    lo, hi, sub = av
+    (sub_op, sub_av), *rest = list(sub)
+    if rest or sub_op is not sre_c.IN:
+        raise AssertionError(f"{name}: trailing run is not a single character class")
+    return frozenset(_class_chars(sub_av)), hi >= sre_c.MAXREPEAT
+
+
+def absorbs_own_anchors(name: str) -> bool:
+    """True if the trailing run is unbounded and its class holds every anchor char."""
+    chars, unbounded = run_class(name)
+    return unbounded and all(set(anchor) <= chars for anchor in anchors(name))
 
 
 def _class_chars(items: list[tuple[Any, Any]]) -> list[str]:
@@ -267,7 +287,7 @@ def _token_pool(name: str, anchor: str, salt: str = "") -> tuple[Token, ...]:
         match = pattern.fullmatch(text)
         if match and text.startswith(anchor):
             token = Token(name, anchor, text, _secret_span(name, match))
-            if is_bounded_width(pattern):
+            if is_token_family(name):
                 token = _with_sentinel_edges(token)
                 if not pattern.fullmatch(token.text):
                     continue
@@ -420,8 +440,9 @@ def overlap_pair(rng: random.Random) -> tuple[str, list[str], str]:
 # - u2_bearer_case: a generated bearer value after the keyword in another casing
 #   (lower, upper or mixed, never exactly "Bearer"), sometimes chained
 #   ("bearer bearer X")
-# - u3_overwidth: a bounded-width token followed by 1-8 more chars of its class,
-#   ending in SENTINEL, so a surviving excess also fails the strict check
+# - u3_overwidth: a whole-match token (every anchored token family) followed by
+#   1-8 more chars of its class, ending in SENTINEL, so a surviving excess also
+#   fails the strict check
 # ---------------------------------------------------------------------------
 
 _U3_EXTRA = "".join(c for c in string.ascii_uppercase + string.digits if c != SENTINEL)
@@ -458,10 +479,8 @@ def variant(rng: random.Random) -> tuple[str, list[str], str]:
         if rng.random() < 0.3:
             prefix = _case_variant("Bearer", rng) + " " + prefix
         return prefix + value, [value], form
-    bounded = [
-        (n, a) for n, p in single_line_patterns().items() if is_bounded_width(p) for a in anchors(n)
-    ]
-    name, alt = rng.choice(bounded)
+    families = [(n, a) for n in single_line_patterns() if is_token_family(n) for a in anchors(n)]
+    name, alt = rng.choice(families)
     tok = make_token(name, alt, rng, salt="variant")
     extra = "".join(rng.choice(_U3_EXTRA) for _ in range(rng.randint(1, 8))) + SENTINEL
     return tok.text + extra, [body(tok) + extra], f"{form}:{name}[{alt}]"

@@ -24,9 +24,10 @@ from hestai_context_mcp.tools.clock_out import _redact_text
 from tests.unit.core.fuzz_redaction import (
     PATHS,
     PRIVATE_KEY_KINDS,
+    absorbs_own_anchors,
     build_pair,
     feasible_pair_kinds,
-    is_bounded_width,
+    is_token_family,
     pair_label,
     run,
     single_line_patterns,
@@ -228,14 +229,25 @@ def test_c1_same_pattern_partial_overlap_redacted_on_every_path(
 # ---------------------------------------------------------------------------
 
 
-def test_every_bounded_width_pattern_is_an_overlapping_matcher() -> None:
-    bounded = {n for n, p in single_line_patterns().items() if is_bounded_width(p)}
-    assert bounded, "expected at least one bounded-width pattern"
-    overlapping = RedactionEngine.OVERLAPPING
-    assert (
-        bounded <= overlapping
-    ), f"bounded-width patterns not overlapping: {bounded - overlapping}"
-    assert overlapping <= set(single_line_patterns()), "OVERLAPPING names an unknown pattern"
+def test_token_patterns_absorb_own_anchors_or_are_overlapping() -> None:
+    """Structural C1 guard (#269 HC), derived from PATTERNS via the parse tree.
+
+    C1 can reopen exactly when a token match can END inside its own anchor and
+    the pattern is not an overlapping matcher. A whole-match token pattern must
+    therefore EITHER absorb its own anchors (unbounded trailing run whose class
+    holds every anchor char) OR be in OVERLAPPING. Never both: overlap on an
+    absorbing run rescans the run from every start (quadratic on repeated
+    anchors). No skip path: a parser change fails here, loudly.
+    """
+    families = [n for n in single_line_patterns() if is_token_family(n)]
+    assert {"ai_api_key", "aws_key", "github_token", "github_pat"} <= set(families)
+    wrong = []
+    for name in families:
+        absorbs, overlapping = absorbs_own_anchors(name), name in RedactionEngine.OVERLAPPING
+        if absorbs == overlapping:
+            wrong.append(f"{name}: absorbs={absorbs} overlapping={overlapping}")
+    assert not wrong, "C1 guard: " + "; ".join(wrong)
+    assert set(single_line_patterns()) >= RedactionEngine.OVERLAPPING
 
 
 def test_every_same_pattern_overlap_kind_redacted_on_every_path(tmp_path: Path) -> None:
