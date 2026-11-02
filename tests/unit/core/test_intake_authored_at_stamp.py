@@ -223,3 +223,37 @@ class TestNothingElseIsStamped:
         # Byte-equal to the canonical record carrying exactly the stamp: no
         # human_adr_ref, no ratification fields, no issue reference.
         assert result["octave"] == _expected(_NOW_STAMP)
+
+
+class TestStampAgreesWithTheReaderOnFences:
+    """cubic P2 on #250: CR line endings and a BOM are accepted by the reader, so the
+    stamp must locate the closing fence by the same rule and keep the record's EOL."""
+
+    async def test_crlf_compiled_record_is_stamped(self, tmp_path: Path, scripted, clock) -> None:
+        clock(_NOW)
+        scripted(_compiled().replace("\n", "\r\n"))
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is True, result["validation_errors"]
+        assert result["octave"] == _expected(_NOW_STAMP)
+
+    async def test_bom_prefixed_record_is_stamped(self, tmp_path: Path, scripted, clock) -> None:
+        clock(_NOW)
+        scripted("﻿" + _compiled())
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is True, result["validation_errors"]
+        assert _NOW_STAMP in (result["octave"] or "")
+
+    async def test_existing_authored_at_with_cr_counts_as_present(
+        self, tmp_path: Path, scripted, clock
+    ) -> None:
+        clock(_NOW)
+        scripted(_expected(_OPERATOR_AT).replace("\n", "\r\n"))
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is True, result["validation_errors"]
+        assert result["octave"] == _expected(_OPERATOR_AT)
+
+    def test_stamp_keeps_the_records_own_line_ending(self) -> None:
+        crlf = _compiled().replace("\n", "\r\n")
+        stamped = mod._stamp_authored_at(crlf, _NOW_STAMP)
+        assert stamped.startswith(f'---\r\nauthored_at: "{_NOW_STAMP}"\r\n')
+        assert "\n" not in stamped.replace("\r\n", "")
