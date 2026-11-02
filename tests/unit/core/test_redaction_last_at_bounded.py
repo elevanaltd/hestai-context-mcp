@@ -48,7 +48,8 @@ SEPARATORS: list[str] = [*_SEPARATOR_CHARS, "\r\n"]
 
 _DB_LABEL = RedactionEngine.PATTERNS["db_password"][1]
 _USER_SOURCE = RedactionEngine.PATTERNS["db_password"][0].pattern
-#: #270's userless form: the user part may be empty. A no-op once #270 lands.
+#: #270's userless form: the user part may be empty. Since #270 the live
+#: pattern IS this form, so the replace is a no-op and both FORMS run it.
 _USERLESS_SOURCE = _USER_SOURCE.replace(
     f"[^:{_LINE_SEPARATORS}]+:)", f"[^:{_LINE_SEPARATORS}]*:)", 1
 )
