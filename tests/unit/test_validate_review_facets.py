@@ -856,3 +856,24 @@ class TestMarkdownDecisionRecordsAreGovernance:
         _, roles, tier, _ = validate_review.classify_pr_facets([record])
         assert "SR" in roles
         assert tier != "TIER_0_EXEMPT"
+
+    def test_rename_between_records_with_unreadable_old_side_is_governance_only(self) -> None:
+        """A plain .md record cannot hide an .oct.md TYPE; unreadable old side needs only SR."""
+        record = _rec(".hestai/decisions/B.md")
+        record["status"] = "R"
+        record["previous_path"] = ".hestai/decisions/A.md"
+        record["old_content"] = validate_review.CONTENT_UNAVAILABLE
+        facets, roles, tier, _ = validate_review.classify_pr_facets([record])
+        assert facets == {"GOVERNANCE"}
+        assert roles == {"SR"}
+        assert tier != "TIER_0_EXEMPT"
+
+    def test_rename_from_unreadable_oct_md_record_still_escalates(self) -> None:
+        """Pin: an unreadable .oct.md old side keeps the EXECUTABLE_SPEC escalation."""
+        record = _rec(".hestai/decisions/B.md")
+        record["status"] = "R"
+        record["previous_path"] = ".hestai/decisions/A.oct.md"
+        record["old_content"] = validate_review.CONTENT_UNAVAILABLE
+        facets, roles, _, _ = validate_review.classify_pr_facets([record])
+        assert "EXECUTABLE_SPEC" in facets
+        assert {"CE", "CRS", "SR"} <= roles
