@@ -221,7 +221,9 @@ def test_differential_every_bounded_pattern_matches_like_finditer() -> None:
                 diffs += 1
                 first.append(f"{pattern.pattern[:30]!r} on {text!r}: {expected} != {actual}")
     assert diffs == 0, first[:5]
-    assert matched > 1000, f"differential is near-vacuous: {matched} inputs with a match"
+    assert (
+        matched > 1000
+    ), f"differential is near-vacuous: {matched} (pattern, input) pairs with a match"
 
 
 @pytest.mark.parametrize("form", FORMS)
