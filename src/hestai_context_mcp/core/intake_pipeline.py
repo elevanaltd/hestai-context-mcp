@@ -369,6 +369,19 @@ def _stamp_authored_at(record: str, authored_at: str) -> str:
     return "\n".join([lines[0], stamp, *lines[1:]])
 
 
+def _with_date_context(ctx: IntakeContext, now: datetime) -> IntakeContext:
+    """Return ``ctx`` whose prompt tells the compiler today's UTC date (#253).
+
+    ``now`` is the pipeline's single clock read, so the date the compiler is told and the
+    ``authored_at`` stamp can never disagree. Retries extend this prompt, so they keep it.
+    """
+    line = (
+        f"Today's UTC date is {now.strftime('%Y-%m-%d')}; a new TOKEN ends with "
+        f"-{now.strftime('%Y%m%d')} (that date as YYYYMMDD).\n"
+    )
+    return dataclasses.replace(ctx, prompt=f"{ctx.prompt}{line}")
+
+
 def _augment_prompt_with_errors(ctx: IntakeContext, errors: list[str]) -> IntakeContext:
     """Return a new IntakeContext whose prompt appends the validation errors.
 
@@ -425,7 +438,11 @@ async def run_intake_pipeline(
     # reach the validator.
     last_available = True
     # #249: ONE clock read per call, reused by every attempt, so a retry never re-dates.
-    authored_at = _now_utc().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = _now_utc().astimezone(UTC)
+    authored_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # #253: the compiler is told the SAME instant's UTC date, as context only. A TOKEN is
+    # never rewritten (#249 condition 4): a mismatch still fails loudly at Gate A.
+    ctx = _with_date_context(ctx, now)
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         compiled = await compile_prose_to_octave(
