@@ -69,7 +69,7 @@ _RESIDUAL_264 = {
 }
 
 
-@pytest.mark.xfail(strict=True, reason="#264")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#264")
 @pytest.mark.parametrize("text", _RESIDUAL_264.values(), ids=_RESIDUAL_264.keys())
 def test_residual_264_secret_does_not_survive(text: str) -> None:
     out = RedactionEngine.redact_content(text)

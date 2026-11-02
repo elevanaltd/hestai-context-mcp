@@ -17,6 +17,12 @@ Not a test module (no ``test_`` prefix). Reused by
 
     .venv/bin/python -m tests.unit.core.fuzz_redaction SEED N
 
+Exit status: 0 only when no planted secret survives any path and the two-pass
+helper agrees with a whole-text call on every case; 1 otherwise. It is 1 TODAY
+because of the known #264 residual classes (bearer/db kinds, seed 261: 418 in
+mode A, 58 in mode B). There is deliberately no allow-list flag: #264 spans
+whole kinds, so excluding them would also hide any new leak of those kinds.
+
 SYNTHETIC DATA ONLY: every secret is FAKE and assembled at runtime from parts.
 """
 
@@ -125,8 +131,9 @@ def run(seed: int, n: int, mode: str, workdir: Path) -> FuzzReport:
 
 
 def main(argv: list[str]) -> int:
-    """CLI: print the per-mode table for SEED and N."""
+    """CLI: print the per-mode table for SEED and N; exit 1 on any leak or disagreement."""
     seed, n = int(argv[1]), int(argv[2])
+    failed = False
     with tempfile.TemporaryDirectory() as tmp:
         for mode in ("A", "B"):
             r = run(seed, n, mode, Path(tmp))
@@ -135,7 +142,9 @@ def main(argv: list[str]) -> int:
             for path in PATHS:
                 kinds = {k: r.leaks[(path, k)] for k in KINDS if r.leaks[(path, k)]}
                 print(f"   {path:16s} {kinds}")
-    return 0
+            failed |= r.differ > 0 or any(r.leak_total(p) > 0 for p in PATHS)
+    print("RESULT:", "FAIL (leak or path disagreement)" if failed else "PASS")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
