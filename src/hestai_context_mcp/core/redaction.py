@@ -102,23 +102,16 @@ class RedactionEngine:
     # _LINE_SEPARATORS, and an end-of-line test must be a lookahead for one
     # of them (or \Z). Do not use '$' with re.MULTILINE: it knows only '\n'.
     #
+    # ORDER MATTERS (#261): patterns run in dict order, and private_key MUST be
+    # first. A single-line pattern whose class includes '-' (ai_api_key since G7,
+    # bearer_token) can otherwise consume an abutting '-----BEGIN' or '-----END'
+    # armour line, so the key body survives. Pinned by
+    # test_private_key_is_the_first_pattern. compute_ruleset_hash sorts PATTERNS
+    # by NAME, so it cannot see an order-only change (tracked in #263).
+    #
     # Critical-Engineer: consulted for Redaction security and archive integrity
     # (#261 round 1 BLOCKED at 46f6108; separators, key headers, two URIs).
     PATTERNS: dict[str, tuple[Pattern[str], str]] = {
-        # AI API keys: sk- followed by 20+ alphanumeric, hyphen, or underscore chars.
-        # G7 fix: widened from [a-zA-Z0-9] to [a-zA-Z0-9\-_] to capture full tokens
-        # for Anthropic (sk-ant-api03-...) and OpenAI (sk-proj-..., sk-svcacct-...).
-        # Without hyphens/underscores in the character class the regex terminates at
-        # the first hyphen, leaving the entropy tail in cleartext.
-        "ai_api_key": (
-            re.compile(r"sk-[a-zA-Z0-9\-_]{20,}"),
-            "[REDACTED_API_KEY]",
-        ),
-        # AWS access keys: AKIA or ASIA followed by 16 uppercase alphanumeric
-        "aws_key": (
-            re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}"),
-            "[REDACTED_AWS_KEY]",
-        ),
         # PEM private keys: entire BEGIN/END block.
         # Header rule (#261, fail-safe bias): case-insensitive; 4 or 5 dashes with an
         # optional space (SSH2 "---- BEGIN ... ----"); any kind words before
@@ -147,6 +140,20 @@ class RedactionEngine:
                 re.DOTALL | re.IGNORECASE,
             ),
             "[REDACTED_PRIVATE_KEY]",
+        ),
+        # AI API keys: sk- followed by 20+ alphanumeric, hyphen, or underscore chars.
+        # G7 fix: widened from [a-zA-Z0-9] to [a-zA-Z0-9\-_] to capture full tokens
+        # for Anthropic (sk-ant-api03-...) and OpenAI (sk-proj-..., sk-svcacct-...).
+        # Without hyphens/underscores in the character class the regex terminates at
+        # the first hyphen, leaving the entropy tail in cleartext.
+        "ai_api_key": (
+            re.compile(r"sk-[a-zA-Z0-9\-_]{20,}"),
+            "[REDACTED_API_KEY]",
+        ),
+        # AWS access keys: AKIA or ASIA followed by 16 uppercase alphanumeric
+        "aws_key": (
+            re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}"),
+            "[REDACTED_AWS_KEY]",
         ),
         # Bearer tokens: Bearer followed by base64-like characters
         "bearer_token": (
