@@ -45,7 +45,10 @@ REDACTION_ENGINE_VERSION: str = "3"
 #: Every line boundary ``str.splitlines()`` honours, as a regex character-class
 #: body: LF, CR, VT, FF, FS, GS, RS, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR
 #: (CRLF is CR then LF). Single-line patterns must not cross any of them (#261).
-_LINE_SEPARATORS: str = r"\n\r\x0b\x0c\x1c\x1d\x1e\x85  "
+_LINE_SEPARATORS: str = r"\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+#: One bearer-token value: base64-like characters plus optional '=' padding.
+_BEARER_VALUE: str = r"[a-zA-Z0-9\-\._~\+\/]+=*"
 
 
 @dataclass(frozen=True)
@@ -102,12 +105,22 @@ class RedactionEngine:
     # _LINE_SEPARATORS, and an end-of-line test must be a lookahead for one
     # of them (or \Z). Do not use '$' with re.MULTILINE: it knows only '\n'.
     #
-    # ORDER MATTERS (#261): patterns run in dict order, and private_key MUST be
-    # first. A single-line pattern whose class includes '-' (ai_api_key since G7,
-    # bearer_token) can otherwise consume an abutting '-----BEGIN' or '-----END'
-    # armour line, so the key body survives. Pinned by
-    # test_private_key_is_the_first_pattern. compute_ruleset_hash sorts PATTERNS
-    # by NAME, so it cannot see an order-only change (tracked in #263).
+    # REDACTION MODEL (S2, #264/#265 HC ruling). Each entry is (regex, label):
+    # 1. Stage 1: private_key alone, ``subn`` over the whole input. It runs first
+    #    (by name, not by dict position) so no single-line match can consume a
+    #    key's armour line (#261). It stays the first entry for readability and
+    #    is pinned by test_private_key_is_the_first_pattern.
+    # 2. Stage 2: every other pattern runs ``finditer`` on the SAME stage-1 text,
+    #    so no pattern ever sees another's replacement (the old sequential model
+    #    let one pattern consume another's anchor: #264 A1-A4, B1). Each match
+    #    contributes the span of its named group ``secret``, or the whole match.
+    #    The UNION of overlapping spans is replaced, so no byte of any matched
+    #    secret survives, even on partial overlap. Text outside every secret
+    #    span (e.g. "Bearer ", "scheme://user:") is kept, so a kept prefix can
+    #    never extend into another pattern's secret. Label of a merged span:
+    #    the longest contributing span's label, ties broken by PATTERNS order.
+    # compute_ruleset_hash sorts PATTERNS by NAME and hashes only the strings,
+    # so it cannot see dict order or this model (tracked in #263).
     #
     # Critical-Engineer: consulted for Redaction security and archive integrity
     # (#261 round 1 BLOCKED at 46f6108; separators, key headers, two URIs).
@@ -155,17 +168,22 @@ class RedactionEngine:
             re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}"),
             "[REDACTED_AWS_KEY]",
         ),
-        # Bearer tokens: Bearer followed by base64-like characters
+        # Bearer tokens: "Bearer " then base64-like characters; the value is the
+        # secret. Chain (#264 B2/B3): the value class has no space, so a value
+        # that ends in the word "Bearer" ("Bearer Bearer X", "Bearer V1Bearer V2")
+        # continues through the following spaces and value instead of leaving
+        # it unredacted. Linear: the value class, '=' and ' ' are disjoint and
+        # the lookbehind is fixed-width.
         "bearer_token": (
-            re.compile(r"Bearer [a-zA-Z0-9\-\._~\+\/]+=*"),
-            "Bearer [REDACTED_BEARER]",
+            re.compile(rf"Bearer (?P<secret>{_BEARER_VALUE}(?:(?<=Bearer) +{_BEARER_VALUE})*)"),
+            "[REDACTED_BEARER]",
         ),
         # Database passwords in connection strings.
         # Matches: scheme://user:password@host:port/db
         # Uses a lookahead to find the LAST @ ON THE LINE before host/port/path.
         # Pattern breakdown (S = _LINE_SEPARATORS, every str.splitlines() boundary):
-        #   (\w+://[^:S]+:)      - Capture scheme://user: (user part never crosses a line)
-        #   ([^S]+)              - Capture password (greedy, never crosses a line)
+        #   (\b\w++://[^:S]+:)   - Keep scheme://user: (user part never crosses a line)
+        #   (?P<secret>[^S]+)    - The password, the only redacted part (greedy, one line)
         #   (@)                  - Capture the @ separator
         #   (?=[^@S]*(?:[S]|\Z)) - Lookahead: no more @ before the END OF THIS LINE
         #   This ensures password can contain @ symbols but we match to the line's final @
@@ -178,12 +196,16 @@ class RedactionEngine:
         # that only over-redacts the text between them (both passwords are
         # inside the redacted group). It is kept on purpose: a password ending at
         # whitespace would leak an unencoded password that contains a space.
+        # ReDoS (#265): the scheme is ``\b\w++`` (word-boundary start, possessive),
+        # so one long word is scanned once; plain ``\w+://`` retried every start
+        # inside the word and was quadratic (40k chars: about 1s). The redacted
+        # password span is unchanged; only the kept prefix can start earlier.
         "db_password": (
             re.compile(
-                rf"(\w+://[^:{_LINE_SEPARATORS}]+:)([^{_LINE_SEPARATORS}]+)(@)"
+                rf"(\b\w++://[^:{_LINE_SEPARATORS}]+:)(?P<secret>[^{_LINE_SEPARATORS}]+)(@)"
                 rf"(?=[^@{_LINE_SEPARATORS}]*(?:[{_LINE_SEPARATORS}]|\Z))"
             ),
-            r"\1[REDACTED_PASSWORD]\3",
+            "[REDACTED_PASSWORD]",
         ),
         # GitHub Personal Access Tokens (G2).
         # Classic PATs (40-char alphanumeric tail, introduced 2021):
@@ -207,24 +229,7 @@ class RedactionEngine:
         Returns:
             RedactionResult with redacted text, count, and type metadata.
         """
-        result = text
-        total_count = 0
-        found_types: list[str] = []
-
-        for pattern_name, (pattern, replacement) in self.PATTERNS.items():
-            matches = pattern.findall(result)
-            match_count = len(matches)
-            if match_count > 0:
-                result = pattern.sub(replacement, result)
-                total_count += match_count
-                if pattern_name not in found_types:
-                    found_types.append(pattern_name)
-
-        return RedactionResult(
-            redacted_text=result,
-            redaction_count=total_count,
-            redacted_types=found_types,
-        )
+        return self._redact(text)
 
     @classmethod
     def redact_content(cls, text: str) -> str:
@@ -236,10 +241,53 @@ class RedactionEngine:
         Returns:
             Text with secrets replaced by redaction markers.
         """
-        result = text
-        for _pattern_name, (pattern, replacement) in cls.PATTERNS.items():
-            result = pattern.sub(replacement, result)
-        return result
+        return cls._redact(text).redacted_text
+
+    @classmethod
+    def _redact(cls, text: str) -> RedactionResult:
+        """Apply the S2 redaction model described above PATTERNS."""
+        counts: dict[str, int] = {}
+
+        # Stage 1: private keys over the whole input, before anything else.
+        key_pattern, key_label = cls.PATTERNS["private_key"]
+        text, counts["private_key"] = key_pattern.subn(key_label, text)
+
+        # Stage 2: every single-line pattern on the same stage-1 text.
+        # (start, end, length, PATTERNS rank, label) for each secret span.
+        spans: list[tuple[int, int, int, int, str]] = []
+        for rank, (name, (pattern, label)) in enumerate(cls.PATTERNS.items()):
+            if name == "private_key":
+                continue
+            group: int | str = "secret" if "secret" in pattern.groupindex else 0
+            for match in pattern.finditer(text):
+                start, end = match.span(group)
+                spans.append((start, end, end - start, rank, label))
+                counts[name] = counts.get(name, 0) + 1
+        spans.sort(key=lambda span: span[0])
+
+        # Replace the union of overlapping spans with one label: the longest
+        # member's, ties broken by PATTERNS order (lower rank wins).
+        pieces: list[str] = []
+        cursor = 0
+        i = 0
+        while i < len(spans):
+            start, end, _length, _rank, _label = spans[i]
+            members = [spans[i]]
+            i += 1
+            while i < len(spans) and spans[i][0] < end:
+                end = max(end, spans[i][1])
+                members.append(spans[i])
+                i += 1
+            label = min(members, key=lambda m: (-m[2], m[3]))[4]
+            pieces += [text[cursor:start], label]
+            cursor = end
+        pieces.append(text[cursor:])
+
+        return RedactionResult(
+            redacted_text="".join(pieces),
+            redaction_count=sum(counts.values()),
+            redacted_types=[name for name in cls.PATTERNS if counts.get(name)],
+        )
 
     @classmethod
     def copy_and_redact(cls, src: Path, dst: Path) -> None:
