@@ -35,7 +35,17 @@ REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
 #:   '2' — Phase 1 hardening (issue #43): G1 stream-mode PEM fix (full-buffer
 #:          copy_and_redact), G2 GitHub PAT patterns (classic + fine-grained),
 #:          G7 sk- character class widened to include hyphens/underscores.
-REDACTION_ENGINE_VERSION: str = "2"
+#:   '3' — issue #256 / PR #261: db_password line-bounded at every
+#:          str.splitlines() boundary (v2 could keep a password on multi-line
+#:          input when a later line held '@'); private_key redacts a BEGIN with
+#:          no END to the end of the input (fail safe), and its header matches
+#:          case-insensitively, incl. PGP "PRIVATE KEY BLOCK" and SSH2 armour.
+REDACTION_ENGINE_VERSION: str = "3"
+
+#: Every line boundary ``str.splitlines()`` honours, as a regex character-class
+#: body: LF, CR, VT, FF, FS, GS, RS, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR
+#: (CRLF is CR then LF). Single-line patterns must not cross any of them (#261).
+_LINE_SEPARATORS: str = r"\n\r\x0b\x0c\x1c\x1d\x1e\x85  "
 
 
 @dataclass(frozen=True)
@@ -61,7 +71,8 @@ class RedactionEngine:
     Detects the following credential patterns (high-confidence, low false-positive):
     - AI API keys (sk-... including Anthropic sk-ant-* and OpenAI sk-proj-*/sk-svcacct-*)
     - AWS access keys (AKIA..., ASIA... with 16 uppercase alphanumeric)
-    - PEM-encoded private keys (BEGIN/END PRIVATE KEY blocks)
+    - PEM-encoded private keys (BEGIN/END PRIVATE KEY blocks; a BEGIN with no
+      END is redacted to the end of the input, fail safe)
     - Bearer authentication tokens
     - Database passwords in connection strings (scheme://user:password@host)
     - GitHub Personal Access Tokens (classic ghp_/gho_/ghu_/ghs_/ghr_,
@@ -84,7 +95,52 @@ class RedactionEngine:
     # BUMP POLICY: When adding or changing any pattern here, also increment
     # REDACTION_ENGINE_VERSION above. This ensures artifact provenance records
     # accurately reflect which pattern set was active at archive time.
+    #
+    # LINE-BOUNDING RULE (#256, #261): callers pass multi-line text
+    # (copy_and_redact passes a whole file). Every pattern except private_key
+    # must be line-bounded: no character class may match any of
+    # _LINE_SEPARATORS, and an end-of-line test must be a lookahead for one
+    # of them (or \Z). Do not use '$' with re.MULTILINE: it knows only '\n'.
+    #
+    # ORDER MATTERS (#261): patterns run in dict order, and private_key MUST be
+    # first. A single-line pattern whose class includes '-' (ai_api_key since G7,
+    # bearer_token) can otherwise consume an abutting '-----BEGIN' or '-----END'
+    # armour line, so the key body survives. Pinned by
+    # test_private_key_is_the_first_pattern. compute_ruleset_hash sorts PATTERNS
+    # by NAME, so it cannot see an order-only change (tracked in #263).
+    #
+    # Critical-Engineer: consulted for Redaction security and archive integrity
+    # (#261 round 1 BLOCKED at 46f6108; separators, key headers, two URIs).
     PATTERNS: dict[str, tuple[Pattern[str], str]] = {
+        # PEM private keys: entire BEGIN/END block.
+        # Header rule (#261, fail-safe bias): case-insensitive; 4 or 5 dashes with an
+        # optional space (SSH2 "---- BEGIN ... ----"); any kind words before
+        # "PRIVATE KEY" ([A-Z0-9 ]*: RSA, EC, DSA, OPENSSH, ENCRYPTED, SSH2, bare)
+        # and any after it (PGP "PRIVATE KEY BLOCK"). Public keys, PGP public
+        # blocks and certificates never say "PRIVATE KEY", so they do not match.
+        # NOTE: DOTALL is required; this pattern only works on a full-buffer string.
+        # copy_and_redact uses full-buffer mode (G1 fix) to guarantee this pattern fires,
+        # including a block whose BEGIN and END sit in different JSONL records.
+        # Fail safe (#256, PROD::I2): a BEGIN with no END anywhere after it
+        # (truncated output) is redacted to the END OF THE INPUT. The lazy first
+        # alternative is always tried first, so a terminated block is still
+        # replaced in place; only an unterminated BEGIN falls through to ``.*``.
+        # Accepted cost: everything after an unterminated BEGIN is lost from
+        # that input (data loss over data exposure). Whatever input a caller
+        # passes defines that span: a whole file for copy_and_redact, one line
+        # or record for a per-line caller. On a JSONL archive that means every
+        # later record is dropped and the cut record is no longer valid JSON.
+        # A bare BEGIN marker with no key material (prose, grep output) also
+        # triggers it. Bounding the span to one record was rejected: a
+        # truncated key streamed across several records would then leak.
+        "private_key": (
+            re.compile(
+                r"-{4,5} ?BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z ]* ?-{4,5}"
+                r"(?:.*?-{4,5} ?END [A-Z0-9 ]*PRIVATE KEY[A-Z ]* ?-{4,5}|.*)",
+                re.DOTALL | re.IGNORECASE,
+            ),
+            "[REDACTED_PRIVATE_KEY]",
+        ),
         # AI API keys: sk- followed by 20+ alphanumeric, hyphen, or underscore chars.
         # G7 fix: widened from [a-zA-Z0-9] to [a-zA-Z0-9\-_] to capture full tokens
         # for Anthropic (sk-ant-api03-...) and OpenAI (sk-proj-..., sk-svcacct-...).
@@ -99,18 +155,6 @@ class RedactionEngine:
             re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}"),
             "[REDACTED_AWS_KEY]",
         ),
-        # PEM private keys: entire BEGIN/END block.
-        # Uses [A-Z ]* (zero or more) to handle both qualified keys
-        # (e.g., "RSA PRIVATE KEY") and bare "PRIVATE KEY").
-        # NOTE: DOTALL is required; this pattern only works on a full-buffer string.
-        # copy_and_redact uses full-buffer mode (G1 fix) to guarantee this pattern fires.
-        "private_key": (
-            re.compile(
-                r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
-                re.DOTALL,
-            ),
-            "[REDACTED_PRIVATE_KEY]",
-        ),
         # Bearer tokens: Bearer followed by base64-like characters
         "bearer_token": (
             re.compile(r"Bearer [a-zA-Z0-9\-\._~\+\/]+=*"),
@@ -118,15 +162,27 @@ class RedactionEngine:
         ),
         # Database passwords in connection strings.
         # Matches: scheme://user:password@host:port/db
-        # Uses negative lookahead to find the LAST @ before host/port/path.
-        # Pattern breakdown:
-        #   (\w+://[^:]+:) - Capture scheme://user:
-        #   (.+)           - Capture password (greedy, everything)
-        #   (@)            - Capture the @ separator
-        #   (?=[^@]*$)     - Lookahead: ensure no more @ after this one (= last @)
-        #   This ensures password can contain @ symbols but we match to the final @
+        # Uses a lookahead to find the LAST @ ON THE LINE before host/port/path.
+        # Pattern breakdown (S = _LINE_SEPARATORS, every str.splitlines() boundary):
+        #   (\w+://[^:S]+:)      - Capture scheme://user: (user part never crosses a line)
+        #   ([^S]+)              - Capture password (greedy, never crosses a line)
+        #   (@)                  - Capture the @ separator
+        #   (?=[^@S]*(?:[S]|\Z)) - Lookahead: no more @ before the END OF THIS LINE
+        #   This ensures password can contain @ symbols but we match to the line's final @
+        # LINE-BOUNDED (#256, PROD::I2): without it, on multi-line input (the
+        # whole-file copy_and_redact archive) an '@' on a LATER line failed the
+        # lookahead and the password survived, and the user part joined a URL line
+        # to a later '@' line, over-redacting unrelated text. '\n' alone was not
+        # enough (#261): a lone '\r' or U+2028 inside a record ran the match on.
+        # Two URIs on ONE line collapse into one match to the line's last '@';
+        # that only over-redacts the text between them (both passwords are
+        # inside the redacted group). It is kept on purpose: a password ending at
+        # whitespace would leak an unencoded password that contains a space.
         "db_password": (
-            re.compile(r"(\w+://[^:]+:)(.+)(@)(?=[^@]*$)"),
+            re.compile(
+                rf"(\w+://[^:{_LINE_SEPARATORS}]+:)([^{_LINE_SEPARATORS}]+)(@)"
+                rf"(?=[^@{_LINE_SEPARATORS}]*(?:[{_LINE_SEPARATORS}]|\Z))"
+            ),
             r"\1[REDACTED_PASSWORD]\3",
         ),
         # GitHub Personal Access Tokens (G2).
