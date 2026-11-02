@@ -46,7 +46,11 @@ REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
 #:          patterns all match the same text; the union of overlapping secret
 #:          spans is replaced), so no pattern can consume another's anchor
 #:          (v3 leaked on B1-B3, A1-A4); bearer chain; possessive db scheme.
-REDACTION_ENGINE_VERSION: str = "4"
+#:   '5' — issue #269: db_password allows an empty user part ("redis://:pw@");
+#:          bearer keyword case-insensitive (incl. the chain); over-width token
+#:          runs redacted whole (aws {16,}, github {36,}/{82,}); github_token
+#:          split (classic overlapping, github_pat non-overlapping).
+REDACTION_ENGINE_VERSION: str = "5"
 
 #: Every line boundary ``str.splitlines()`` honours, as a regex character-class
 #: body: LF, CR, VT, FF, FS, GS, RS, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR
