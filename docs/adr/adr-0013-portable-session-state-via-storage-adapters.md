@@ -9,7 +9,9 @@ ACCEPTED
 - **Type**: ADR
 - **Author**: requirements-steward (codex, via control-room session)
 - **Created**: 2026-04-25
-- **Updated**: 2026-04-26
+- **Version**: 1.1
+- **Revision**: 1.0→1.1 2026-10-04: `.hestai-state` may be a single live copy on an operator-mounted volume, including the LucidLink filespace `hestai-shared-spaces`, used from one machine at a time; carve-out made consistently in Context, Decision, R1, Consequences and Alternatives (ruling `HO-HESTAI-STATE-LUCIDLINK-SHARED-STORE-20261004`)
+- **Updated**: 2026-10-04
 - **Ratified**: 2026-04-26 (human authority via control-room session)
 - **Phase**: D2 design
 - **GitHub Issue**: [#13](https://github.com/elevanaltd/hestai-context-mcp/issues/13)
@@ -22,9 +24,9 @@ Alignment verdict: [ALIGNED]. Evidence: hestai-context-mcp North Star defines th
 
 ## Context
 
-`.hestai/state/` is per-project mutable state: sessions, context, checklist, and fast-layer working material. It is gitignored and per-machine. This is deliberate. HestAI-MCP commit `70b63d06d11edede2e57f81986f601c4931bb441` moved working state from `.hestai/` to `.hestai/state/` as Tier 3 state, gitignored and symlinked across worktrees. The current multi-machine failure mode is that a fresh machine can clone or open the project and have no `.hestai/state/` at all, so it cannot see accumulated session, context, or checklist memory.
+`.hestai/state/` is per-project mutable state: sessions, context, checklist, and fast-layer working material. It is gitignored and has a single live copy, normally one per machine. This is deliberate. Since v1.1 that one copy may sit on an operator-mounted volume reachable from more than one of the operator's machines, used from one machine at a time (R1, Live-copy location). HestAI-MCP commit `70b63d06d11edede2e57f81986f601c4931bb441` moved working state from `.hestai/` to `.hestai/state/` as Tier 3 state, gitignored and symlinked across worktrees. The current multi-machine failure mode is that a fresh machine can clone or open the project and have no `.hestai/state/` at all, so it cannot see accumulated session, context, or checklist memory.
 
-The requirement is not to sync the raw folder. Raw `.hestai/state/` remains Local State. The requirement is to make redacted, derived, portable session memory available through optional carriers so any computer logged into HestAI can restore shared memory without violating the product immutables. This ADR calls the architecture **Portable Session State (PSS)**.
+The requirement is not to sync the raw folder. Raw `.hestai/state/` remains Local State. Keeping its single live copy on an operator-mounted volume that more than one of the operator's machines can mount, one machine at a time, is not syncing it (R1, Live-copy location). The requirement is to make redacted, derived, portable session memory available through optional carriers so any computer logged into HestAI can restore shared memory without violating the product immutables. This ADR calls the architecture **Portable Session State (PSS)**.
 
 The design inputs converged on Class A: a pluggable storage adapter model. Class T, a transport proxy, was rejected because it would turn context access into a remote runtime dependency and breach PROD I6. Class S, raw sync, was rejected because it would move unclassified local state and risk credential persistence, breaching PROD I2. PSS preserves LocalFilesystem as the default and complete offline path, so all core behavior remains available without remote services (PROD I6).
 
@@ -41,17 +43,37 @@ Vocabulary adopted by this ADR:
 
 ## Decision
 
-We decide on PSS as the design contract: LocalFilesystem remains the default StorageAdapter, remote-capable carriers are optional, and `.hestai/state/` itself never goes to cloud. Only Portable Memory Artifacts can cross carrier boundaries, and redaction provenance is the publication gate. This preserves PROD I1, PROD I2, PROD I3, PROD I5, PROD I6, and immutable stdio JSON-RPC transport.
+We decide on PSS as the design contract: LocalFilesystem remains the default StorageAdapter, remote-capable carriers are optional, and `.hestai/state/` itself is never synced or copied, to the cloud or between locations: it has a single live copy, which may sit on an operator-mounted volume (R1, Live-copy location). Only Portable Memory Artifacts can cross carrier boundaries, and redaction provenance is the publication gate. This preserves PROD I1, PROD I2, PROD I3, PROD I5, PROD I6, and immutable stdio JSON-RPC transport.
 
 ### R1: State classification
 
 | Tier | Sync eligibility | Examples | North Star preservation |
 |------|------------------|----------|--------------------------|
-| `LOCAL_MUTABLE` | Never synced as a folder or raw file set | `.hestai/state/sessions/active/{session_id}/session.json`, `.hestai/state/sessions/archive/*-redacted.jsonl`, `.hestai/state/learnings-index.jsonl`, `.hestai/state/sessions/control-room-ledger.oct.md`, `.hestai/state/context/state/*` | Keeps raw working state local, preserving PROD I2 and PROD I6. |
+| `LOCAL_MUTABLE` | Never synced or copied as a folder or raw file set; its single live copy may sit on an operator-mounted volume (see Live-copy location below) | `.hestai/state/sessions/active/{session_id}/session.json`, `.hestai/state/sessions/archive/*-redacted.jsonl`, `.hestai/state/learnings-index.jsonl`, `.hestai/state/sessions/control-room-ledger.oct.md`, `.hestai/state/context/state/*` | Keeps raw working state local, preserving PROD I2 and PROD I6. |
 | `PORTABLE_MEMORY` | Eligible for optional carriers only after redaction and provenance validation | `.hestai/state/portable/outbox/{artifact_id}.json`, abstract carrier path `pss/{carrier_namespace}/{project_id}/{workspace_id}/{user_id}/artifacts/{artifact_id}`, redacted session summaries, extracted decisions, extracted blockers, checklist deltas, tombstones | Shares memory without syncing raw state, preserving PROD I2 and provider-neutral context semantics under PROD I3. |
 | `DERIVED_PROJECTION` | Never synced; rebuilt on hydrate or local reads | `.hestai/state/portable/snapshots/{session_id}/context-projection.json`, materialized `.hestai/state/context/PROJECT-CONTEXT.oct.md` when derived from portable memory, fast-layer read models | Makes `get_context` a pure local read and protects PROD I5. |
 
 Classification is mandatory. Unknown state is treated as `LOCAL_MUTABLE` until explicitly classified. That fail-closed default protects PROD I2.
+
+**Live-copy location (v1.1).** `.hestai-state`, the target of `.hestai/state`, has exactly one live copy. Where that copy sits changes no classification above. The R1 claim that `LOCAL_MUTABLE` state preserves PROD I2 holds only for the archived transcript, which `clock_out` redacts before writing it. The learnings index (`learnings-index.jsonl`), the extracted learnings in the `clock_out` response and the portable payload built from them are not redacted (hestai-context-mcp #255), so this ADR does not claim PROD I2 for them. Until #255 lands, a live copy on any volume may hold credentials in those fields. Encryption of the operator's own volumes, including the provider side of a LucidLink filespace, is local disk policy and outside this ADR, as the R2 encryption row already states.
+
+1. **Allowed.** The live copy may sit on any operator-mounted volume: the internal disk, an external drive, or a LucidLink filespace mounted as a drive. For this operator that is `/Volumes/elevana-av/hestai-shared-spaces/<repo>/.hestai-state`, reached by a symlink at `<repo>/.hestai-state`, so the operator's MacBook Pro and Mac Pro use the same copy.
+2. **Still banned (Class S stays rejected).** Syncing or copying the raw folder between locations (Dropbox, iCloud, OneDrive, rsync jobs, git or any cloud sync service). Also banned: two machines writing the same live copy at the same time.
+3. **What LucidLink actually does.** A LucidLink filespace stores its data with the provider, keeps a local cache on each machine, and uploads changes in the background. Concurrent saves resolve last-save-wins with no merge, and a closed laptop keeps unsent writes in its cache. R9 rejects last-write-wins. This rule meets R9 by forbidding concurrent writers, not by merging.
+4. **One machine at a time.** The operator works on one machine at a time, never both at once. Before switching machines, close agent sessions and let LucidLink finish uploading.
+5. **Membership and data class.** The filespace is operator-only. Developers may be added after signing an NDA. LucidLink cannot hide a folder from a member, so data is separated by filespace, not by folder:
+   - `.hestai-state` holds operational state only.
+   - Company finance (Xero reports, accounts) goes to eav-finance.
+   - Client material, agreements and client-project finance go to eav-internal.
+   - Staff pay (including per-person pay) and bonuses, health notes about anyone, other personal material, and one-to-one or appraisal records go to eav-hr (operator-only; the MD may be added later).
+
+   Material in any of the last three classes moves out of a live copy now, not when a developer is added. The filespace must be clean before it is shared, and an NDA does not change need-to-know for personal data.
+6. **`clock_in`/`clock_out` on the second machine.** These are allowed only after two fixes merge: the worktree-link fix (#197), and `clock_out` tolerating ENOTEMPTY when it removes the active session directory (files held open on the mount), with a later sweep (#199). Until then the second machine uses the shared live copy as plain files only. Making `learnings-index.jsonl` one file per writer is not required while rule 4 holds.
+7. **Gitignore.** Each repo's `.gitignore` ignores `.hestai-state` with no trailing slash, because a trailing-slash pattern does not match a symlink. The change goes in the same PR that introduces the link, or earlier. For this repo that is PR #198, merged 2026-10-04.
+8. **Retroactive.** This covers the `hestai-workbench` link to the filespace that has existed since 2026-09-30.
+9. **Rollback.** Each machine keeps a `.pre-lucidlink-<date>` copy of its local state for two weeks after its link goes in. The copy lives outside the repository working tree, so git can never stage it. To roll back, remove the link and restore that copy.
+
+*Evidence:* the 2026-10-02 SMB probe on the mount, summarised in the ruling PR. Also the operator-reported 2026-10-04 two-Mac taking-turns test (`hestai-shared-spaces/_probe-crossmac-20261002/shared-append.log`): the Mac Pro wrote 100 lines at 09:12:24–35 UTC and the MacBook 100 lines at 09:25:59 UTC, each through its own mount. The result was 200/200 lines, none lost, torn or duplicated, and each machine's lines in order. Neither test covered simultaneous writes or upload lag; rule 4 covers both.
 
 ### R2: StorageAdapter protocol contract and carrier capability matrix
 
@@ -193,7 +215,7 @@ These require future ADRs. This ADR defines the PSS architecture boundary, class
 
 Positive consequences:
 
-- Multi-machine continuity becomes possible without syncing raw `.hestai/state/`.
+- Multi-machine continuity becomes possible without syncing raw `.hestai/state/`. One operator can also use the same single live copy from more than one machine, one machine at a time (R1, Live-copy location).
 - Existing LocalFilesystem behavior remains the default and complete offline mode.
 - `get_context` stays pure, local, and deterministic.
 - Credential safety is strengthened by provenance rather than weakened by remote storage.
@@ -206,10 +228,11 @@ Negative consequences:
 - Publication can lag behind local archival, so callers must surface unpublished memory status.
 - A future non-local adapter must meet strict capability requirements before it can publish.
 - Session-bound snapshots require tool contracts to carry or resolve session identity during context reads.
+- A live copy on a LucidLink filespace depends on the one-machine-at-a-time discipline. Concurrent writers lose data, last-save-wins.
 
 Neutral consequences:
 
-- `.hestai/state/` remains local and gitignored.
+- `.hestai/state/` remains gitignored and is never synced or copied; its single live copy sits on an operator-mounted volume, which may be a LucidLink filespace (R1, Live-copy location).
 - Remote storage is a portability option, not a runtime dependency.
 - Compaction becomes a projection concern, not a replacement for append history.
 
@@ -219,7 +242,7 @@ Class A: Pluggable Storage Adapter. Accepted. It preserves local-first behavior,
 
 Class T: Transport proxy. Rejected. Putting storage or context synthesis behind a mandatory remote transport would make runtime operation depend on remote availability and breach PROD I6. It also risks coupling context behavior to provider or deployment assumptions, undermining PROD I3.
 
-Class S: Raw sync. Rejected. Syncing `.hestai/state/` directly would publish unclassified mutable state and risk credential persistence. It contradicts the deliberate Tier 3 move in commit `70b63d06d11edede2e57f81986f601c4931bb441` and breaches PROD I2.
+Class S: Raw sync. Rejected. Syncing `.hestai/state/` directly would publish unclassified mutable state and risk credential persistence. It contradicts the deliberate Tier 3 move in commit `70b63d06d11edede2e57f81986f601c4931bb441` and breaches PROD I2. Keeping one live copy on an operator-mounted volume used from one machine at a time (R1, Live-copy location, v1.1) is not raw sync; copying or syncing the folder between locations stays rejected.
 
 Custom Git refs. Rejected. The phantom-substrate evidence from commit `9dad66035922363a3d18e154d85e31fedb680f87` proves default clone, fetch, push, checkout, index, and reflog behavior are unsuitable for portable memory.
 
