@@ -679,7 +679,7 @@ def _classify_old_side(record: dict[str, Any]) -> str | None:
         return None  # not a rename
     content = _recorded_content(record, "old_content")
     facet = _classify_file_facet(previous_path, content)
-    if content is CONTENT_UNAVAILABLE and facet == "GOVERNANCE":
+    if content is CONTENT_UNAVAILABLE and facet == "GOVERNANCE" and _is_octave_path(previous_path):
         return "EXECUTABLE_SPEC"
     return facet
 
