@@ -215,6 +215,8 @@ class TestCredentialSafetyPathsAreSecurity:
         [
             # Start-anchored: a name that merely CONTAINS the stem must not match.
             ("src/hestai_context_mcp/core/unredaction.py", {"ROUTINE_CODE"}),
+            ("src/hestai_context_mcp/storage/unprovenance.py", {"ROUTINE_CODE"}),
+            ("src/hestai_context_mcp/tools/xclock_out.py", {"ROUTINE_CODE"}),
             ("src/hestai_context_mcp/core/reduction.py", {"ROUTINE_CODE"}),
             ("src/hestai_context_mcp/tools/clock_in.py", {"ROUTINE_CODE"}),
             # Exempt classes still win before the SECURITY path check.
