@@ -744,6 +744,13 @@ class TestExceptionTextNeverReachesSinks:
             result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
 
         assert result["status"] == "success"
+        removal_warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and record.getMessage().startswith("Could not remove active session directory")
+        ]
+        assert removal_warnings == ["Could not remove active session directory: OSError"]
         assert "cannot remove" not in caplog.text
         _assert_tree_and_logs_clean(tmp_path, result, caplog.text)
 
