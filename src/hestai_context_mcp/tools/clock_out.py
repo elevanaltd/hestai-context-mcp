@@ -351,12 +351,18 @@ def clock_out(
             archive_path = str(dest)
             logger.info("Archived redacted transcript to %s", dest)
         except Exception as e:
-            logger.error("Redaction/archival failed: %s", e)
+            logger.error("Redaction/archival failed: %s", type(e).__name__)
             # CE rework RISK_010: do NOT silently fall through to publish.
             # The transcript existed but redaction failed — this is a
             # structural credential-safety failure (PROD::I2 fail-closed).
+            # The reason names only the exception type (cubic P1, #255): the
+            # message could echo transcript content, and the reason reaches
+            # the response and the on-disk skip record. An earlier sanitized
+            # reason from the extraction stage is kept.
             redaction_failed = True
-            redaction_failure_reason = str(e)
+            redaction_failure_reason = redaction_failure_reason or (
+                f"archive redaction failed ({type(e).__name__}); publish blocked fail-closed"
+            )
             # Best-effort cleanup of any partial dest file so no
             # half-redacted content lingers on disk.
             try:
