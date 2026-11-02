@@ -11,6 +11,7 @@ Harvested from legacy hestai-mcp RedactionEngine with clean interface adaptation
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,22 @@ REDACTION_ENGINE_VERSION: str = "4"
 #: body: LF, CR, VT, FF, FS, GS, RS, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR
 #: (CRLF is CR then LF). Single-line patterns must not cross any of them (#261).
 _LINE_SEPARATORS: str = r"\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+#: Name of the group that wraps an overlapping matcher's whole match.
+_OVERLAP_GROUP: str = "_overlap"
+
+
+@functools.cache
+def _overlapping(pattern: Pattern[str]) -> Pattern[str]:
+    """``pattern`` inside a lookahead, so ``finditer`` tries EVERY start position.
+
+    A plain ``finditer`` never starts a match inside the previous one, so a
+    bounded-width match that ends partway into the next token's anchor hides
+    that token (#265 C1). Zero-width lookahead matches advance one character
+    at a time; the span comes from the wrapping group (or ``secret``).
+    """
+    return re.compile(rf"(?=(?P<{_OVERLAP_GROUP}>{pattern.pattern}))", pattern.flags)
+
 
 #: One bearer-token value: base64-like characters plus optional '=' padding.
 _BEARER_VALUE: str = r"[a-zA-Z0-9\-\._~\+\/]+=*"
@@ -123,11 +140,21 @@ class RedactionEngine:
     #    span (e.g. "Bearer ", "scheme://user:") is kept, so a kept prefix can
     #    never extend into another pattern's secret. Label of a merged span:
     #    the longest contributing span's label, ties broken by PATTERNS order.
+    # 3. OVERLAPPING (#265 C1): a bounded-width pattern (finite maximum width:
+    #    aws_key, github_token) can end partway into the anchor of a second
+    #    token of the SAME pattern, which plain finditer then skips. These run
+    #    as overlapping matchers (every start position) and the union above
+    #    merges the results. Unbounded patterns absorb a following anchor of
+    #    their own kind (their class covers it, bearer chains, db runs to the
+    #    line's last '@'). test_every_bounded_width_pattern_is_an_overlapping_matcher
+    #    derives the bounded set from PATTERNS and fails if one is missing here.
     # compute_ruleset_hash sorts PATTERNS by NAME and hashes only the strings,
     # so it cannot see dict order or this model (tracked in #263).
     #
     # Critical-Engineer: consulted for Redaction security and archive integrity
     # (#261 round 1 BLOCKED at 46f6108; separators, key headers, two URIs).
+    OVERLAPPING: frozenset[str] = frozenset({"aws_key", "github_token"})
+
     PATTERNS: dict[str, tuple[Pattern[str], str]] = {
         # PEM private keys: entire BEGIN/END block.
         # Header rule (#261, fail-safe bias): case-insensitive; 4 or 5 dashes with an
@@ -262,8 +289,12 @@ class RedactionEngine:
         for rank, (name, (pattern, label)) in enumerate(cls.PATTERNS.items()):
             if name == "private_key":
                 continue
+            overlapping = name in cls.OVERLAPPING
+            matcher = _overlapping(pattern) if overlapping else pattern
             group: int | str = "secret" if "secret" in pattern.groupindex else 0
-            for match in pattern.finditer(text):
+            if group == 0 and overlapping:
+                group = _OVERLAP_GROUP
+            for match in matcher.finditer(text):
                 start, end = match.span(group)
                 spans.append((start, end, end - start, rank, label))
                 counts[name] = counts.get(name, 0) + 1
