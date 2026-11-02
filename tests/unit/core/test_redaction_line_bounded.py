@@ -141,11 +141,19 @@ class TestSameLineBehaviourPreserved:
         assert RedactionEngine.redact_content(text) == expected
 
     def test_single_line_password_containing_at_redacted_to_last_at(self) -> None:
-        pw = "fk" + "@" + "Pw" + "C2"
-        text = _db_uri(pw)
+        """The password runs to the LAST '@' on the line, not the first (#261 TMG).
+
+        A first-'@' matcher would stop inside the password and leave its tail
+        ("Pw" + "C2" + "@" ...) in the output; the exact-output assert and the
+        per-fragment asserts both catch that.
+        """
+        head, tail = "fk" + "Hd", "Pw" + "C2"
+        text = _db_uri(head + "@" + tail)
         out = RedactionEngine.redact_content(text)
-        assert pw not in out, "connection-string password leaked"
-        assert out.endswith("@db.example.test:5432/app")
+        assert head not in out, "password head leaked"
+        assert tail not in out, "password tail leaked"
+        assert out == "postgresql://svcuser:" + _PW_MARKER + "@db.example.test:5432/app"
+        assert out.count("@") == 1
 
 
 # ---------------------------------------------------------------------------
