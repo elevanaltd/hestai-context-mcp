@@ -114,6 +114,29 @@ def _extract_learnings(
     }
 
 
+def _redact_text(text: str) -> str:
+    """Redact credentials from free text that may span several lines (#255).
+
+    Two passes with the engine's own patterns (none are added or changed):
+
+    - The multi-line (DOTALL) patterns run over the whole text, so a private
+      key reaches the engine with both its BEGIN and END lines.
+    - Every pattern then runs line by line via
+      ``RedactionEngine.redact_content``. The single-line patterns are not
+      line-bounded: on a whole text, db_password misses a password when a
+      later line contains ``@``, and its user part crosses newlines, turning
+      a URL on one line plus an ``@`` on a later line into a fake password
+      marker.
+
+    Raises:
+        Exception: Whatever the engine raises. The caller fails closed.
+    """
+    for pattern, replacement in RedactionEngine.PATTERNS.values():
+        if pattern.flags & re.DOTALL:
+            text = pattern.sub(replacement, text)
+    return "\n".join(RedactionEngine.redact_content(line) for line in text.split("\n"))
+
+
 def _extract_redacted_learnings(
     messages: list[TranscriptMessage],
 ) -> dict[str, list[str]]:
@@ -121,23 +144,9 @@ def _extract_redacted_learnings(
 
     #255 / PROD::I2: the values come from the raw parsed transcript, so they
     must be redacted before they reach the learnings index, the tool response
-    or the portable payload. This is the one redaction stage; every sink
-    consumes the returned dict.
-
-    Two passes, because each sees what the other cannot:
-
-    - Before extraction, each assistant message is passed whole through the
-      engine's multi-line (DOTALL) patterns. The extraction patterns stop at
-      a newline, so a private key that starts on a LEARNING line would
-      otherwise reach the engine without its END line and escape the
-      BEGIN...END pattern. Only the DOTALL patterns run here: the
-      single-line patterns are not line-bounded (db_password's user part
-      crosses newlines), so on a whole message they would turn a URL on one
-      line plus an ``@`` on a later learning into a fake password marker.
-    - After extraction, every engine pattern runs on each extracted value
-      via ``RedactionEngine.redact_content``.
-
-    The engine's patterns are used as-is; none are added or changed here.
+    or the portable payload. Each message is redacted with ``_redact_text``
+    before extraction; an extracted value is the tail of an already-redacted
+    line. This is the one redaction stage; every sink consumes the result.
 
     Args:
         messages: Parsed transcript messages (unredacted).
@@ -148,27 +157,7 @@ def _extract_redacted_learnings(
     Raises:
         Exception: Whatever the engine raises. The caller fails closed.
     """
-    multiline_patterns = [
-        (pattern, replacement)
-        for pattern, replacement in RedactionEngine.PATTERNS.values()
-        if pattern.flags & re.DOTALL
-    ]
-
-    def _redact_multiline(text: str) -> str:
-        for pattern, replacement in multiline_patterns:
-            text = pattern.sub(replacement, text)
-        return text
-
-    # Only assistant messages are scanned by _extract_learnings, so only
-    # they need the whole-message pass.
-    redacted_messages = [
-        (replace(msg, content=_redact_multiline(msg.content)) if msg.role == "assistant" else msg)
-        for msg in messages
-    ]
-    return {
-        key: [RedactionEngine.redact_content(value) for value in values]
-        for key, values in _extract_learnings(redacted_messages).items()
-    }
+    return _extract_learnings([replace(msg, content=_redact_text(msg.content)) for msg in messages])
 
 
 def _append_to_learnings_index(
@@ -325,7 +314,7 @@ def clock_out(
     # and the on-disk skip record.
     try:
         extracted_learnings = _extract_redacted_learnings(messages)
-        description = RedactionEngine.redact_content(description)
+        description = _redact_text(description)
     except Exception as e:
         logger.error("Redaction of extracted learnings failed: %s", type(e).__name__)
         redaction_failed = True
@@ -380,12 +369,11 @@ def clock_out(
     octave_path: str | None = None
     compression_status = "skipped"
 
-    # CE rework RISK_010: when redaction fails, the in-memory
-    # extracted_learnings may carry unredacted credentials from the parsed
-    # transcript. PROD::I2 fail-closed forbids surfacing them in the
-    # response or the learnings index. Replace with empty lists so the
-    # caller gets the structured shape (PROD::I4 STRUCTURED_RETURN_SHAPES)
-    # without any credential exposure.
+    # CE rework RISK_010: on any redaction failure (the extraction stage
+    # above or the archive copy) the engine itself is suspect, so the
+    # learnings are withheld too — conservative PROD::I2 fail-closed, even
+    # though the extraction stage has already redacted them (#255). Empty
+    # lists keep the structured shape (PROD::I4 STRUCTURED_RETURN_SHAPES).
     if redaction_failed:
         extracted_learnings = {"decisions": [], "blockers": [], "learnings": []}
 
