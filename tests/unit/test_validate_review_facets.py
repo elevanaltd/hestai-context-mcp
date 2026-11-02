@@ -829,3 +829,23 @@ class TestMarkdownDecisionRecordsAreGovernance:
         assert facets == set()
         assert roles == set()
         assert tier == "TIER_0_EXEMPT"
+
+    @pytest.mark.parametrize("path", [".HESTAI/Decisions/X.md", "Docs/ADR/x.md"])
+    def test_prefix_match_is_casefolded(self, path: str) -> None:
+        assert validate_review._classify_file_facet(path) == "GOVERNANCE"
+
+    @pytest.mark.parametrize(
+        "path", [".hestai/decisions.md", "sub/docs/adr/x.md", "docs/adr.md", "docs/adr/x.txt"]
+    )
+    def test_prefix_boundary_and_root_anchor_stay_exempt_or_unchanged(self, path: str) -> None:
+        facet = validate_review._classify_file_facet(path)
+        assert facet in (None, "ROUTINE_CODE")
+        assert facet != "GOVERNANCE"
+
+    def test_rename_out_of_decisions_still_requires_sr(self) -> None:
+        record = _rec("archive/old-ruling.md")
+        record["status"] = "R"
+        record["previous_path"] = _YAML_RECORD
+        _, roles, tier, _ = validate_review.classify_pr_facets([record])
+        assert "SR" in roles
+        assert tier != "TIER_0_EXEMPT"
