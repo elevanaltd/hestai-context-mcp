@@ -21,6 +21,7 @@ contiguous secret-shaped literal exists in this file.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -293,6 +294,11 @@ class TestExtractedLearningsRedactionFailsClosed:
         assert _published_artifacts(tmp_path) == []
         assert result["unpublished_memory_exists"] is True
 
+        # Archive: the whole-transcript redaction still succeeded and is clean.
+        archive = Path(result["archive_path"])
+        assert archive.exists()
+        _assert_no_credentials(archive.read_text(encoding="utf-8"), "archived transcript")
+
         # Index: entry written with empty lists.
         (entry,) = _index_entries(tmp_path)
         assert entry["decisions"] == []
@@ -300,6 +306,74 @@ class TestExtractedLearningsRedactionFailsClosed:
         assert entry["learnings"] == []
 
         # Disk: nothing clock_out wrote holds a credential.
+        for path in _state_files(tmp_path):
+            _assert_no_credentials(
+                path.read_text(encoding="utf-8", errors="replace"),
+                str(path.relative_to(tmp_path)),
+            )
+
+    def test_both_redactions_fail_with_credential_in_message_reason_is_type_only(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Extraction AND archive redaction raise with a credential in the message.
+
+        The failure reason reaches the response and the on-disk skip record, so
+        it must name only the exception type; the archive handler must not
+        replace the sanitized extraction reason with ``str(e)``.
+        """
+
+        from hestai_context_mcp.tools.clock_out import clock_out
+
+        _write_identity_config(tmp_path)
+        _seed_session(tmp_path)
+
+        def _raise_echoing_input(text: str) -> str:
+            raise RuntimeError(f"cannot redact input near {FAKE_GITHUB_PAT}")
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch.object(RedactionEngine, "redact_content", side_effect=_raise_echoing_input),
+        ):
+            result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        publication = result["portable_publication"]
+        assert publication["error_code"] == "redaction_failure"
+        assert "RuntimeError" in publication["error_message"]
+        assert "cannot redact input" not in publication["error_message"]
+        assert result["archive_path"] is None
+        _assert_no_credentials(json.dumps(result), "clock_out response")
+        _assert_no_credentials(caplog.text, "clock_out log output")
+        for path in _state_files(tmp_path):
+            _assert_no_credentials(
+                path.read_text(encoding="utf-8", errors="replace"),
+                str(path.relative_to(tmp_path)),
+            )
+
+    def test_archive_redaction_failure_with_credential_in_message_reason_is_type_only(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Only the archive redaction raises; its message must not leak either."""
+
+        from hestai_context_mcp.tools.clock_out import clock_out
+
+        _write_identity_config(tmp_path)
+        _seed_session(tmp_path)
+
+        def _raise_echoing_input(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError(f"cannot redact input near {FAKE_GITHUB_PAT}")
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch.object(RedactionEngine, "copy_and_redact", side_effect=_raise_echoing_input),
+        ):
+            result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        publication = result["portable_publication"]
+        assert publication["error_code"] == "redaction_failure"
+        assert "RuntimeError" in publication["error_message"]
+        assert "cannot redact input" not in publication["error_message"]
+        _assert_no_credentials(json.dumps(result), "clock_out response")
+        _assert_no_credentials(caplog.text, "clock_out log output")
         for path in _state_files(tmp_path):
             _assert_no_credentials(
                 path.read_text(encoding="utf-8", errors="replace"),
