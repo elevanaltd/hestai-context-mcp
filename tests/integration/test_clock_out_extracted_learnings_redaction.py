@@ -554,3 +554,220 @@ def test_description_redaction_failure_fails_closed(tmp_path: Path) -> None:
     assert publication["error_code"] == "redaction_failure"
     assert _published_artifacts(tmp_path) == []
     _assert_absent_everywhere(tmp_path, result, (FAKE_AWS_KEY, marker) + FAKE_CREDENTIALS)
+
+
+# ---------------------------------------------------------------------------
+# CE round 1 on PR #257: session metadata and exception text reach the sinks.
+# ---------------------------------------------------------------------------
+
+
+def _assert_tree_and_logs_clean(working_dir: Path, result: dict[str, Any], log_text: str) -> None:
+    """No fake credential in the response, the logs, or any path or file under .hestai/state."""
+
+    _assert_no_credentials(json.dumps(result), "clock_out response")
+    _assert_no_credentials(log_text, "clock_out log output")
+    for path in _state_files(working_dir):
+        rel = str(path.relative_to(working_dir))
+        _assert_no_credentials(rel, f"file name {rel[:40]}...")
+        _assert_no_credentials(path.read_text(encoding="utf-8", errors="replace"), rel)
+
+
+def _seed_session_metadata(working_dir: Path, *, role: str, focus: str) -> None:
+    """Overwrite role/focus in the seeded session.json."""
+
+    session_file = (
+        working_dir / ".hestai" / "state" / "sessions" / "active" / SESSION_ID / "session.json"
+    )
+    data = json.loads(session_file.read_text(encoding="utf-8"))
+    data["role"] = role
+    data["focus"] = focus
+    session_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.mark.integration
+class TestSessionMetadataRedacted:
+    """role and focus from session.json reach every sink; they must be redacted."""
+
+    def test_credential_in_role_and_focus_absent_from_every_sink(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from hestai_context_mcp.tools.clock_out import clock_out
+
+        role = f"implementation-lead {FAKE_GITHUB_PAT}"
+        focus = f"issue-255 {FAKE_AWS_KEY}"
+        _write_identity_config(tmp_path)
+        _seed_session(tmp_path)
+        _seed_session_metadata(tmp_path, role=role, focus=focus)
+
+        with caplog.at_level(logging.DEBUG):
+            result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["status"] == "success"
+        assert result["portable_publication"]["status"] in {"published", "duplicate"}
+        _assert_tree_and_logs_clean(tmp_path, result, caplog.text)
+
+        (entry,) = _index_entries(tmp_path)
+        assert entry["role"] == RedactionEngine.redact_content(role)
+        assert entry["focus"] == RedactionEngine.redact_content(focus)
+        (artifact,) = _published_artifacts(tmp_path)
+        assert artifact["payload"]["role"] == RedactionEngine.redact_content(role)
+        assert artifact["payload"]["focus"] == RedactionEngine.redact_content(focus)
+        assert Path(result["archive_path"]).exists()
+
+    def test_metadata_redaction_failure_fails_closed(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failure redacting only role/focus empties the lists and blocks publish."""
+
+        from hestai_context_mcp.tools.clock_out import clock_out
+
+        marker = "METADATA-ONLY-MARKER"
+        _write_identity_config(tmp_path)
+        _seed_session(tmp_path)
+        _seed_session_metadata(tmp_path, role=f"{marker} {FAKE_GITHUB_PAT}", focus="issue-255")
+        real_redact = RedactionEngine.redact_content
+
+        def _fail_on_metadata(text: str) -> str:
+            if marker in text:
+                raise RuntimeError("simulated redaction failure")
+            return real_redact(text)
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch.object(RedactionEngine, "redact_content", side_effect=_fail_on_metadata),
+        ):
+            result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["extracted_learnings"] == {"decisions": [], "blockers": [], "learnings": []}
+        assert result["portable_publication"]["error_code"] == "redaction_failure"
+        assert _published_artifacts(tmp_path) == []
+        _assert_tree_and_logs_clean(tmp_path, result, caplog.text)
+        assert marker not in json.dumps(result)
+        (entry,) = _index_entries(tmp_path)
+        assert marker not in json.dumps(entry)
+
+
+@pytest.mark.integration
+class TestExceptionTextNeverReachesSinks:
+    """Exception messages may echo input: every failure reason names the type only."""
+
+    def test_adapter_write_failure_reason_is_type_only(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from hestai_context_mcp.storage.local_filesystem import LocalFilesystemAdapter
+        from hestai_context_mcp.tools.clock_out import clock_out
+
+        _write_identity_config(tmp_path)
+        _seed_session(tmp_path)
+
+        def _raise(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError(f"carrier write failed near {FAKE_GITHUB_PAT}")
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch.object(LocalFilesystemAdapter, "write_artifact", side_effect=_raise),
+        ):
+            result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        publication = result["portable_publication"]
+        assert publication["error_code"] == "adapter_write_failed"
+        assert "RuntimeError" in publication["error_message"]
+        assert "carrier write failed" not in publication["error_message"]
+        outbox = tmp_path / ".hestai" / "state" / "portable" / "outbox"
+        assert any(outbox.iterdir()), "adapter failure must still enqueue an outbox entry"
+        _assert_tree_and_logs_clean(tmp_path, result, caplog.text)
+
+    def test_archive_unreadable_reason_is_type_only(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from hestai_context_mcp.tools.clock_out import clock_out
+
+        _write_identity_config(tmp_path)
+        _seed_session(tmp_path)
+        real_read_text = Path.read_text
+
+        def _read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+            if self.name.endswith("-redacted.jsonl"):
+                raise OSError(f"cannot read archive near {FAKE_GITHUB_PAT}")
+            return real_read_text(self, *args, **kwargs)
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch.object(Path, "read_text", _read_text),
+        ):
+            result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        publication = result["portable_publication"]
+        assert publication["error_code"] == "archive_unreadable"
+        assert "OSError" in publication["error_message"]
+        assert "cannot read archive" not in publication["error_message"]
+        _assert_tree_and_logs_clean(tmp_path, result, caplog.text)
+
+    def test_session_metadata_unreadable_message_is_type_only(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from hestai_context_mcp.tools.clock_out import clock_out
+
+        _seed_session(tmp_path)
+        real_read_text = Path.read_text
+
+        def _read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+            if self.name == "session.json":
+                raise OSError(f"cannot read session near {FAKE_GITHUB_PAT}")
+            return real_read_text(self, *args, **kwargs)
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch.object(Path, "read_text", _read_text),
+        ):
+            result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["status"] == "error"
+        assert "OSError" in result["message"]
+        assert "cannot read session" not in result["message"]
+        _assert_tree_and_logs_clean(tmp_path, result, caplog.text)
+
+    def test_active_session_removal_failure_log_is_type_only(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from hestai_context_mcp.tools.clock_out import clock_out
+
+        _seed_session(tmp_path)
+
+        def _raise(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError(f"cannot remove near {FAKE_GITHUB_PAT}")
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch("hestai_context_mcp.tools.clock_out.shutil.rmtree", side_effect=_raise),
+        ):
+            result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["status"] == "success"
+        assert "cannot remove" not in caplog.text
+        _assert_tree_and_logs_clean(tmp_path, result, caplog.text)
+
+
+@pytest.mark.integration
+def test_transcript_path_is_not_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """transcript_path comes from session.json, not from clock_in: keep it out of logs."""
+
+    from hestai_context_mcp.tools.clock_out import clock_out
+
+    secret_dir = tmp_path / f"t-{FAKE_GITHUB_PAT}"
+    secret_dir.mkdir()
+    transcript = _seed_session(tmp_path)
+    moved = secret_dir / transcript.name
+    transcript.rename(moved)
+    session_file = (
+        tmp_path / ".hestai" / "state" / "sessions" / "active" / SESSION_ID / "session.json"
+    )
+    data = json.loads(session_file.read_text(encoding="utf-8"))
+    data["transcript_path"] = str(moved)
+    session_file.write_text(json.dumps(data), encoding="utf-8")
+
+    with caplog.at_level(logging.DEBUG):
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+    assert result["status"] == "success"
+    _assert_no_credentials(caplog.text, "clock_out log output")
