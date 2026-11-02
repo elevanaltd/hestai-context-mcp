@@ -5,7 +5,8 @@ Archives an agent session by:
 2. Parsing the transcript using the provider adapter pattern
 3. Redacting credentials via RedactionEngine
 4. Archiving the redacted transcript
-5. Extracting learnings (DECISION/BLOCKER/LEARNING patterns)
+5. Extracting learnings (DECISION/BLOCKER/LEARNING patterns), redacted
+   once at extraction and fail-closed (#255)
 6. Appending to learnings index
 7. Cleaning up the active session directory
 
@@ -109,6 +110,30 @@ def _extract_learnings(
         "decisions": decisions,
         "blockers": blockers,
         "learnings": learnings,
+    }
+
+
+def _redact_learnings(extracted: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Redact credentials from extracted DECISION/BLOCKER/LEARNING values.
+
+    #255 / PROD::I2: the values come from the raw parsed transcript, so they
+    must be redacted before they reach the learnings index, the tool response
+    or the portable payload. Applied once, at extraction; every sink consumes
+    the returned dict.
+
+    Args:
+        extracted: Output of ``_extract_learnings``.
+
+    Returns:
+        Same keys and ordering, each value passed through
+        ``RedactionEngine.redact_content``.
+
+    Raises:
+        Exception: Whatever the engine raises. The caller fails closed.
+    """
+    return {
+        key: [RedactionEngine.redact_content(value) for value in values]
+        for key, values in extracted.items()
     }
 
 
@@ -249,17 +274,33 @@ def clock_out(
         else:
             logger.warning("No parser detected for transcript: %s", transcript_path)
 
-    # Extract learnings from assistant messages
-    extracted_learnings = _extract_learnings(messages)
-
-    # Archive: redact and save transcript.
     # RISK_010 fail-closed (CE rework): redaction failure is structurally
     # distinct from "no transcript" — the former MUST block publish; the
     # latter is a legitimate skip. We track the two outcomes separately so
     # the publish path can decide deterministically.
-    archive_path: str | None = None
     redaction_failed: bool = False
     redaction_failure_reason: str = ""
+
+    # Extract learnings from assistant messages, then redact them once here
+    # (#255, PROD::I2). The learnings index, the response and the portable
+    # payload all consume this one redacted dict. If redaction raises, fail
+    # closed: drop the raw values and block publish. The reason names only
+    # the exception type — its message could echo the unredacted input, and
+    # the reason is written to the response and the on-disk skip record.
+    extracted_learnings = _extract_learnings(messages)
+    try:
+        extracted_learnings = _redact_learnings(extracted_learnings)
+    except Exception as e:
+        logger.error("Redaction of extracted learnings failed: %s", type(e).__name__)
+        redaction_failed = True
+        redaction_failure_reason = (
+            f"extracted learnings redaction failed ({type(e).__name__}); "
+            "publish blocked fail-closed"
+        )
+        extracted_learnings = {"decisions": [], "blockers": [], "learnings": []}
+
+    # Archive: redact and save transcript.
+    archive_path: str | None = None
     archive_dir = wd / ".hestai" / "state" / "sessions" / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
 
