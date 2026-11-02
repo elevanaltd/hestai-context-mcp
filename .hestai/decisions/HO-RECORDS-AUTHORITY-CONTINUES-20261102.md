@@ -1,0 +1,18 @@
+---
+type: "DECISION_RECORD"
+version: "1.1"
+token: "HO-RECORDS-AUTHORITY-CONTINUES-20261102"
+status: "PROPOSED"
+tier: "OPERATIONAL"
+authored_at: "2026-11-02T02:11:10Z"
+decision: "Continue HO-RECORDS lane authority to push, open, and merge pull requests beyond HW-PROGRAMME-WEEKEND-AUTHORITY-20261031."
+because: "The weekend grant lapsed, and HW-PROGRAMME2-AUTHORITY-CONTINUES-WHILE-OPERATOR-PART-TIME-20261102 arrived only by peer relay, so the lane held PR #250 until first-party operator confirmation."
+issue_ref: "repo:hestai-context-mcp#249"
+scope: "Merge only within HW-PROGRAMME2-granted slots and after HC VERIFIED, using --merge --match-head-commit and a main CI check."
+compression_tier: "CONSERVATIVE"
+confirmation_context: "Shaun Buswell confirmed first-party in the HO-RECORDS session, hestai-context-mcp worktree ho-records-1, holistic-orchestrator lane, on 2026-11-02."
+first_applied: "hestai-context-mcp PR #250, closing #249, merged as 9262cef5."
+loss_profile: "[preserve:authority∧causal_basis∧operator_quote∧scope∧merge_conditions∧PR_IDs∧merge_commit∧related_decisions,drop:narrative_filler]"
+operator_ruling: "\"to confirm, you can continue to push PRs and merge\""
+related_decisions: "HW-PROGRAMME-WEEKEND-AUTHORITY-20261031; HW-PROGRAMME2-AUTHORITY-CONTINUES-WHILE-OPERATOR-PART-TIME-20261102"
+---
