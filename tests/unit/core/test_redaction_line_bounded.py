@@ -342,3 +342,94 @@ class TestEverySeparatorBoundsDbPassword:
         out = dst.read_text(encoding="utf-8")
         assert pw not in out, "archive kept a connection-string password"
         assert sep + "mail " + _email() in out
+
+
+# ---------------------------------------------------------------------------
+# (h) private-key header rule: case-insensitive, all key kinds (#261 round 1)
+# ---------------------------------------------------------------------------
+
+
+def _armour(edge: str, kind: str, dashes: str = _DASHES, pad: str = "") -> str:
+    """An armour line built from parts: ``<dashes><pad><edge> <kind><pad><dashes>``."""
+    return dashes + pad + edge + " " + kind + pad + dashes
+
+
+#: (id, BEGIN line, END line) for private-key armours, built from parts.
+_KEY_ARMOURS = [
+    ("lower", _armour("begin", "rsa private" + " key"), _armour("end", "rsa private" + " key")),
+    ("mixed", _armour("Begin", "Rsa Private" + " Key"), _armour("End", "Rsa Private" + " Key")),
+    (
+        "openssh",
+        _armour("BEGIN", "OPENSSH PRIVATE" + " KEY"),
+        _armour("END", "OPENSSH PRIVATE" + " KEY"),
+    ),
+    (
+        "encrypted",
+        _armour("BEGIN", "ENCRYPTED PRIVATE" + " KEY"),
+        _armour("END", "ENCRYPTED PRIVATE" + " KEY"),
+    ),
+    ("dsa", _armour("BEGIN", "DSA PRIVATE" + " KEY"), _armour("END", "DSA PRIVATE" + " KEY")),
+    (
+        "pgp",
+        _armour("BEGIN", "PGP PRIVATE" + " KEY BLOCK"),
+        _armour("END", "PGP PRIVATE" + " KEY BLOCK"),
+    ),
+    (
+        "pgp_lower",
+        _armour("begin", "pgp private" + " key block"),
+        _armour("end", "pgp private" + " key block"),
+    ),
+    (
+        "ssh2",
+        _armour("BEGIN", "SSH2 ENCRYPTED PRIVATE" + " KEY", dashes="-" * 4, pad=" "),
+        _armour("END", "SSH2 ENCRYPTED PRIVATE" + " KEY", dashes="-" * 4, pad=" "),
+    ),
+]
+_KEY_IDS = [a[0] for a in _KEY_ARMOURS]
+
+
+class TestPrivateKeyHeaderRule:
+    """Any case and any private-key kind must be caught, terminated or not."""
+
+    @pytest.mark.parametrize(("name", "begin", "end"), _KEY_ARMOURS, ids=_KEY_IDS)
+    def test_terminated_block_redacted_in_place(self, name: str, begin: str, end: str) -> None:
+        body = _fake_key_body("H1")
+        text = "before\n" + begin + "\n" + "\n".join(body) + "\n" + end + "\nafter\n"
+        out = RedactionEngine.redact_content(text)
+        assert out == "before\n" + _KEY_MARKER + "\nafter\n"
+
+    @pytest.mark.parametrize(("name", "begin", "end"), _KEY_ARMOURS, ids=_KEY_IDS)
+    def test_unterminated_block_redacted(self, name: str, begin: str, end: str) -> None:
+        body = _fake_key_body("H2")
+        text = "before\n" + begin + "\n" + "\n".join(body) + "\n"
+        result = RedactionEngine().redact(text)
+        assert result.redacted_text == "before\n" + _KEY_MARKER
+        assert "private_key" in result.redacted_types
+
+    @pytest.mark.parametrize(("name", "begin", "end"), _KEY_ARMOURS, ids=_KEY_IDS)
+    def test_archive_unterminated_block_redacted(
+        self, tmp_path: Path, name: str, begin: str, end: str
+    ) -> None:
+        body = _fake_key_body("H3")
+        src, dst = tmp_path / "h.jsonl", tmp_path / "h-redacted.jsonl"
+        src.write_text(_jsonl("first", begin + "\\n" + "\\n".join(body)), encoding="utf-8")
+        RedactionEngine.copy_and_redact(src, dst)
+        out = dst.read_text(encoding="utf-8")
+        for line in body:
+            assert line not in out, "archive kept private key material"
+        assert out.startswith(_jsonl("first"))
+
+    @pytest.mark.parametrize(
+        "begin",
+        [
+            _armour("begin", "public" + " key"),
+            _armour("BEGIN", "PGP PUBLIC" + " KEY BLOCK"),
+            _armour("BEGIN", "CERTIFICATE"),
+        ],
+        ids=["public_lower", "pgp_public", "certificate"],
+    )
+    def test_public_material_not_redacted(self, begin: str) -> None:
+        text = begin + "\n" + "\n".join(_fake_key_body("H4")) + "\n"
+        result = RedactionEngine().redact(text)
+        assert result.redacted_text == text
+        assert result.redaction_count == 0
