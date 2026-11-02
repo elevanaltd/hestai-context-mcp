@@ -394,3 +394,30 @@ class TestRedactionScopeAtExtraction:
         (artifact,) = _published_artifacts(tmp_path)
         assert artifact["payload"]["description"] == RedactionEngine.redact_content(description)
         assert artifact["payload"]["learnings"] == [PLAIN_LEARNING]
+
+    def test_url_line_does_not_redact_a_later_learning_with_an_at_sign(
+        self, tmp_path: Path
+    ) -> None:
+        """(5) No over-redaction: a URL on one line must not wipe a later learning.
+
+        The engine's db_password pattern can span lines (its user part is a
+        negated class), so running every pattern over the whole message turns
+        'email ops@example.com' into a fake password marker. Only the
+        multi-line private-key handling needs the whole message.
+        """
+
+        email_learning = "email ops@example.com for access"
+        text = (
+            "See https://docs.example.com/guide for the setup steps\n"
+            f"LEARNING: {email_learning}\n"
+            f"LEARNING: the deploy key was {FAKE_PEM}"
+        )
+        result = _clock_out_with(tmp_path, text)
+
+        expected = [email_learning, "the deploy key was [REDACTED_PRIVATE_KEY]"]
+        assert result["extracted_learnings"]["learnings"] == expected
+        (entry,) = _index_entries(tmp_path)
+        assert entry["learnings"] == expected
+        (artifact,) = _published_artifacts(tmp_path)
+        assert artifact["payload"]["learnings"] == expected
+        _assert_absent_everywhere(tmp_path, result, (FAKE_PEM_BODY, "PRIVATE KEY-----"))
