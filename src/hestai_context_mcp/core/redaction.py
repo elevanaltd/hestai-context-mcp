@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import functools
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from re import Pattern
+from re import Match, Pattern
 
 #: Canonical engine identifier for provenance metadata (RISK_004 / G6).
 #: Used by storage.provenance.build_provenance to populate
@@ -52,8 +53,39 @@ REDACTION_ENGINE_VERSION: str = "4"
 #: (CRLF is CR then LF). Single-line patterns must not cross any of them (#261).
 _LINE_SEPARATORS: str = r"\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 
+#: One line: a maximal run of characters that are not _LINE_SEPARATORS.
+_LINE: Pattern[str] = re.compile(rf"[^{_LINE_SEPARATORS}]+")
+
 #: Name of the group that wraps an overlapping matcher's whole match.
 _OVERLAP_GROUP: str = "_overlap"
+
+
+def _last_at_bounded(pattern: Pattern[str], text: str) -> Iterator[Match[str]]:
+    """``pattern.finditer(text)`` for a pattern whose every match ends at the
+    LAST '@' of its line, in linear time (#266).
+
+    Plain ``finditer`` was quadratic on one long line: every ``scheme://``
+    candidate scanned its password to the end of the line before failing (400k
+    chars: about 70s). Here a line with no '@' is skipped, since no match is
+    possible on it, and on any other line ONE search runs, in a window that
+    ends just after the line's last '@': the text after it is never scanned.
+
+    Same matches as ``finditer``, group for group, because: each match lies
+    inside one line and its lookahead passes only at the line's last '@' A, so
+    a line has at most one match and it ends at A+1. In the window
+    [line start, A+1) the lookahead also passes only at A (``\\Z`` matches at
+    ``endpos``); ``\\b`` at ``pos`` reads the real preceding character, a
+    separator, which is never ``\\w``. The greedy password stops at A either
+    way. Pinned by test_redaction_last_at_bounded.py (differential + guard).
+    """
+    for line in _LINE.finditer(text):
+        start, end = line.span()
+        last_at = text.rfind("@", start, end)
+        if last_at < 0:
+            continue
+        match = pattern.search(text, start, last_at + 1)
+        if match is not None:
+            yield match
 
 
 @functools.cache
@@ -148,12 +180,18 @@ class RedactionEngine:
     #    their own kind (their class covers it, bearer chains, db runs to the
     #    line's last '@'). test_every_bounded_width_pattern_is_an_overlapping_matcher
     #    derives the bounded set from PATTERNS and fails if one is missing here.
+    # 4. LAST_AT_BOUNDED (#266 HC ruling): a pattern whose every match ends at
+    #    the LAST '@' of its line (db_password) runs through _last_at_bounded,
+    #    not finditer: same matches, linear time on long lines. Only a pattern
+    #    with that property may be listed: the differential in
+    #    test_redaction_last_at_bounded.py checks every entry against finditer.
     # compute_ruleset_hash sorts PATTERNS by NAME and hashes only the strings,
     # so it cannot see dict order or this model (tracked in #263).
     #
     # Critical-Engineer: consulted for Redaction security and archive integrity
     # (#261 round 1 BLOCKED at 46f6108; separators, key headers, two URIs).
     OVERLAPPING: frozenset[str] = frozenset({"aws_key", "github_token"})
+    LAST_AT_BOUNDED: frozenset[str] = frozenset({"db_password"})
 
     PATTERNS: dict[str, tuple[Pattern[str], str]] = {
         # PEM private keys: entire BEGIN/END block.
@@ -231,6 +269,10 @@ class RedactionEngine:
         # so one long word is scanned once; plain ``\w+://`` retried every start
         # inside the word and was quadratic (40k chars: about 1s). The redacted
         # password span is unchanged; only the kept prefix can start earlier.
+        # Long lines (#266): finditer was still quadratic (every candidate's
+        # password ran to the end of the line), so this pattern is matched by
+        # _last_at_bounded (LAST_AT_BOUNDED). Same matches; this string is
+        # unchanged, so the engine version is too.
         "db_password": (
             re.compile(
                 rf"(\b\w++://[^:{_LINE_SEPARATORS}]+:)(?P<secret>[^{_LINE_SEPARATORS}]+)(@)"
@@ -294,7 +336,11 @@ class RedactionEngine:
             group: int | str = "secret" if "secret" in pattern.groupindex else 0
             if group == 0 and overlapping:
                 group = _OVERLAP_GROUP
-            for match in matcher.finditer(text):
+            if name in cls.LAST_AT_BOUNDED:
+                matches = _last_at_bounded(pattern, text)
+            else:
+                matches = matcher.finditer(text)
+            for match in matches:
                 start, end = match.span(group)
                 spans.append((start, end, end - start, rank, label))
                 counts[name] = counts.get(name, 0) + 1
