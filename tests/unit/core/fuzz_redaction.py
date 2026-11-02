@@ -84,7 +84,7 @@ _WINDOW = 8
 
 #: Chars used for negated classes and '.'; letters and digits only, so a
 #: generated token never contains a separator, quote or '@' by accident.
-#: STRICT edge sentinel (#265 cubic P2): every bounded-width secret body starts
+#: STRICT edge sentinel (#265 cubic P2): every token-family secret body starts
 #: and ends with it, and nothing else in the harness ever produces it (it is
 #: excluded from _SAFE and from every random class choice; noise, separators,
 #: markers and hand-written values never contain it). So ANY occurrence in an
@@ -105,9 +105,70 @@ def single_line_patterns() -> dict[str, Pattern[str]]:
     return {n: p for n, (p, _) in RedactionEngine.PATTERNS.items() if n != "private_key"}
 
 
-def is_bounded_width(pattern: Pattern[str]) -> bool:
-    """True when the pattern's maximum match width is finite (fixed/bounded)."""
-    return bool(sre_p.parse(pattern.pattern, pattern.flags).getwidth()[1] < sre_c.MAXREPEAT)
+#: PATTERNS entries that are NOT whole-match token families, each with its reason.
+#: Classification is TOTAL (#270 TMG): every PATTERNS entry is either a token
+#: family with derivable, non-empty anchors or named here; anything else fails.
+NON_TOKEN_PATTERNS: dict[str, str] = {
+    "private_key": "stage-1 DOTALL block pattern, redacted first by name; not single-line",
+    "bearer_token": "secret is the named group after a kept keyword; chains absorb a keyword",
+    "db_password": "secret is the named group before the line's last '@'; one match a line",
+}
+#: The token families the classifier must find, exactly: adding or removing one
+#: must be a deliberate change here, not something the guard silently adapts to.
+EXPECTED_TOKEN_FAMILIES: frozenset[str] = frozenset(
+    {"ai_api_key", "aws_key", "github_token", "github_pat"}
+)
+
+
+def classify_patterns() -> dict[str, str]:
+    """Total classification of PATTERNS: name -> "token" or "excluded". Fails closed.
+
+    Raises AssertionError for a pattern that is neither in NON_TOKEN_PATTERNS
+    nor a whole-match pattern whose anchors can all be derived (non-empty),
+    e.g. one led by a lookahead, and for a stale NON_TOKEN_PATTERNS entry.
+    """
+    classes: dict[str, str] = {}
+    problems: list[str] = []
+    for name, (pattern, _label) in RedactionEngine.PATTERNS.items():
+        if name in NON_TOKEN_PATTERNS:
+            classes[name] = "excluded"
+        elif "secret" in pattern.groupindex:
+            problems.append(f"{name}: has a secret group but is not in NON_TOKEN_PATTERNS")
+        elif not anchors(name) or not all(anchors(name)):
+            problems.append(
+                f"{name}: anchors cannot be derived {anchors(name)!r}; classify it explicitly"
+            )
+        else:
+            classes[name] = "token"
+    stale = sorted(set(NON_TOKEN_PATTERNS) - set(RedactionEngine.PATTERNS))
+    if stale:
+        problems.append(f"NON_TOKEN_PATTERNS names unknown patterns: {stale}")
+    assert not problems, "unclassifiable PATTERNS (fail closed): " + "; ".join(problems)
+    return classes
+
+
+def is_token_family(name: str) -> bool:
+    """A whole-match token pattern with a literal anchor (sk-, AKIA, gh?_, github_pat_)."""
+    return classify_patterns()[name] == "token"
+
+
+def run_class(name: str) -> tuple[frozenset[str], bool]:
+    """(chars, unbounded) of the pattern's trailing run, from the parse tree."""
+    pattern = single_line_patterns()[name]
+    op, av = list(sre_p.parse(pattern.pattern, pattern.flags))[-1]
+    if op not in (sre_c.MAX_REPEAT, sre_c.MIN_REPEAT, sre_c.POSSESSIVE_REPEAT):
+        raise AssertionError(f"{name}: no trailing run to analyse ({op})")
+    lo, hi, sub = av
+    (sub_op, sub_av), *rest = list(sub)
+    if rest or sub_op is not sre_c.IN:
+        raise AssertionError(f"{name}: trailing run is not a single character class")
+    return frozenset(_class_chars(sub_av)), hi >= sre_c.MAXREPEAT
+
+
+def absorbs_own_anchors(name: str) -> bool:
+    """True if the trailing run is unbounded and its class holds every anchor char."""
+    chars, unbounded = run_class(name)
+    return unbounded and all(set(anchor) <= chars for anchor in anchors(name))
 
 
 def _class_chars(items: list[tuple[Any, Any]]) -> list[str]:
@@ -168,6 +229,10 @@ def _emit(items: Any, rng: random.Random, out: list[str]) -> None:
                 count = lo
             elif hi < sre_c.MAXREPEAT:
                 count = rng.randint(lo, hi)
+            elif len(sub) == 1 and sub[0][0] is sre_c.LITERAL:
+                # A repeated single literal (e.g. '=' padding) carries no entropy:
+                # keep it short so its windows never stand in for a secret body.
+                count = rng.randint(lo, lo + 2)
             else:
                 floor = max(lo, _UNBOUNDED_MIN)
                 count = rng.randint(floor, floor + _UNBOUNDED_EXTRA)
@@ -246,11 +311,15 @@ def _with_sentinel_edges(token: Token) -> Token:
 
 
 @functools.cache
-def _token_pool(name: str, anchor: str) -> tuple[Token, ...]:
-    """A deterministic pool of tokens of ``name`` starting with ``anchor``."""
+def _token_pool(name: str, anchor: str, salt: str = "") -> tuple[Token, ...]:
+    """A deterministic pool of tokens of ``name`` starting with ``anchor``.
+
+    ``salt`` selects an independent pool (variants use their own, so a variant
+    body never coincides with a pair body and leak attribution stays exact).
+    """
     pattern = single_line_patterns()[name]
     parsed = sre_p.parse(pattern.pattern, pattern.flags)
-    rng = random.Random(f"pool-{name}-{anchor}")
+    rng = random.Random(f"pool-{name}-{anchor}-{salt}")
     pool: list[Token] = []
     for _ in range(_POOL_SIZE * 400):
         out: list[str] = []
@@ -259,7 +328,7 @@ def _token_pool(name: str, anchor: str) -> tuple[Token, ...]:
         match = pattern.fullmatch(text)
         if match and text.startswith(anchor):
             token = Token(name, anchor, text, _secret_span(name, match))
-            if is_bounded_width(pattern):
+            if is_token_family(name):
                 token = _with_sentinel_edges(token)
                 if not pattern.fullmatch(token.text):
                     continue
@@ -269,9 +338,9 @@ def _token_pool(name: str, anchor: str) -> tuple[Token, ...]:
     raise RuntimeError(f"cannot generate {name!r} with anchor {anchor!r}")
 
 
-def make_token(name: str, anchor: str, rng: random.Random) -> Token:
+def make_token(name: str, anchor: str, rng: random.Random, salt: str = "") -> Token:
     """A token of pattern ``name`` that starts with ``anchor`` (validated by fullmatch)."""
-    return rng.choice(_token_pool(name, anchor))
+    return rng.choice(_token_pool(name, anchor, salt))
 
 
 def body(token: Token, cut_tail: int = 0) -> str:
@@ -406,6 +475,59 @@ def overlap_pair(rng: random.Random) -> tuple[str, list[str], str]:
 
 
 # ---------------------------------------------------------------------------
+# Unrecognised-form variants (#269 U1/U2/U3), derived from PATTERNS tokens.
+# These shapes are NOT what PATTERNS defines (that is the point of #269):
+# - u1_userless_db: a generated db URI with its user part emptied ("scheme://:pw@")
+# - u2_bearer_case: a generated bearer value after the keyword in another casing
+#   (lower, upper or mixed, never exactly "Bearer"), sometimes chained
+#   ("bearer bearer X")
+# - u3_overwidth: a whole-match token (every anchored token family) followed by
+#   1-8 more chars of its class, ending in SENTINEL, so a surviving excess also
+#   fails the strict check
+# ---------------------------------------------------------------------------
+
+_U3_EXTRA = "".join(c for c in string.ascii_uppercase + string.digits if c != SENTINEL)
+VARIANT_KINDS = ("u1_userless_db", "u2_bearer_case", "u3_overwidth")
+
+
+def _case_variant(word: str, rng: random.Random) -> str:
+    """``word`` in lower, upper or mixed casing, never exactly ``word``."""
+    while True:
+        style = rng.choice(("lower", "upper", "mixed"))
+        if style == "lower":
+            variant = word.lower()
+        elif style == "upper":
+            variant = word.upper()
+        else:
+            variant = "".join(c.upper() if rng.random() < 0.5 else c.lower() for c in word)
+        if variant != word:
+            return variant
+
+
+def variant(rng: random.Random) -> tuple[str, list[str], str]:
+    """One unrecognised-form fragment (#269); kind is one of VARIANT_KINDS (+ detail)."""
+    form = rng.choice(VARIANT_KINDS)
+    if form == "u1_userless_db":
+        tok = make_token("db_password", "", rng, salt="variant")
+        password = tok.text[tok.secret[0] : tok.secret[1]]
+        scheme_end = tok.text.index("://") + 3
+        text = tok.text[:scheme_end] + ":" + password + "@cache.example.test/0"
+        return text, [password], form
+    if form == "u2_bearer_case":
+        tok = make_token("bearer_token", "Bearer ", rng, salt="variant")
+        value = tok.text[tok.secret[0] : tok.secret[1]]
+        prefix = _case_variant("Bearer", rng) + " "
+        if rng.random() < 0.3:
+            prefix = _case_variant("Bearer", rng) + " " + prefix
+        return prefix + value, [value], form
+    families = [(n, a) for n in single_line_patterns() if is_token_family(n) for a in anchors(n)]
+    name, alt = rng.choice(families)
+    tok = make_token(name, alt, rng, salt="variant")
+    extra = "".join(rng.choice(_U3_EXTRA) for _ in range(rng.randint(1, 8))) + SENTINEL
+    return tok.text + extra, [body(tok) + extra], f"{form}:{name}[{alt}]"
+
+
+# ---------------------------------------------------------------------------
 # Hand-written kinds
 # ---------------------------------------------------------------------------
 
@@ -475,7 +597,10 @@ def run(seed: int, n: int, mode: str, workdir: Path) -> FuzzReport:
             if roll < 0.2:
                 fragment, cores, kind = overlap_pair(rng)
                 report.generated[kind] += 1
-            elif roll < 0.45:
+            elif roll < 0.3:
+                fragment, cores, kind = variant(rng)
+                report.generated[kind] += 1
+            elif roll < 0.5:
                 fragment, cores, kind = _secret(rng, f"{i:05d}{j}")
             else:
                 parts.append(rng.choice(NOISE))

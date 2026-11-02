@@ -233,6 +233,7 @@ class TestRedactionEngineVersionBumpContract:
             "aws_key",
             "bearer_token",
             "db_password",
+            "github_pat",
             "github_token",
             "private_key",
         ], (
@@ -240,9 +241,9 @@ class TestRedactionEngineVersionBumpContract:
             "in core.redaction and update this snapshot."
         )
         # Version must be a non-empty string; bump cycle is human-driven
-        # (RISK_004). For issue #264 (S2 span-union redaction, bearer chain,
-        # possessive db scheme) the value is '4'.
-        assert REDACTION_ENGINE_VERSION == "4"
+        # (RISK_004). For issue #269 (userless db URI, case-insensitive bearer
+        # keyword, whole over-width runs, github_pat split) the value is '5'.
+        assert REDACTION_ENGINE_VERSION == "5"
         # Ruleset hash is computed from PATTERNS — assert it matches a
         # stored snapshot. We don't pin the exact hex here (it would
         # over-couple to regex internals); we assert that toggling a

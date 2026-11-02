@@ -46,7 +46,11 @@ REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
 #:          patterns all match the same text; the union of overlapping secret
 #:          spans is replaced), so no pattern can consume another's anchor
 #:          (v3 leaked on B1-B3, A1-A4); bearer chain; possessive db scheme.
-REDACTION_ENGINE_VERSION: str = "4"
+#:   '5' — issue #269: db_password allows an empty user part ("redis://:pw@");
+#:          bearer keyword case-insensitive (incl. the chain); over-width token
+#:          runs redacted whole (aws {16,}, github {36,}/{82,}); github_token
+#:          split (classic overlapping, github_pat non-overlapping).
+REDACTION_ENGINE_VERSION: str = "5"
 
 #: Every line boundary ``str.splitlines()`` honours, as a regex character-class
 #: body: LF, CR, VT, FF, FS, GS, RS, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR
@@ -172,14 +176,18 @@ class RedactionEngine:
     #    span (e.g. "Bearer ", "scheme://user:") is kept, so a kept prefix can
     #    never extend into another pattern's secret. Label of a merged span:
     #    the longest contributing span's label, ties broken by PATTERNS order.
-    # 3. OVERLAPPING (#265 C1): a bounded-width pattern (finite maximum width:
-    #    aws_key, github_token) can end partway into the anchor of a second
-    #    token of the SAME pattern, which plain finditer then skips. These run
-    #    as overlapping matchers (every start position) and the union above
-    #    merges the results. Unbounded patterns absorb a following anchor of
-    #    their own kind (their class covers it, bearer chains, db runs to the
-    #    line's last '@'). test_every_bounded_width_pattern_is_an_overlapping_matcher
-    #    derives the bounded set from PATTERNS and fails if one is missing here.
+    # 3. OVERLAPPING (#265 C1, #269): a token match that can END partway into
+    #    the anchor of a second token of the SAME pattern hides that token from
+    #    plain finditer. A whole-match token pattern is safe without overlap only
+    #    if it ABSORBS its own anchors: an unbounded run whose class contains
+    #    every anchor char (aws_key: AKIA/ASIA in [0-9A-Z]; github_pat: in
+    #    [A-Za-z0-9_]; ai_api_key: "sk-" in its class). Otherwise it must run as
+    #    an overlapping matcher: classic github_token ("_" is in its anchor but
+    #    not its class, so "ghp_<33>ghp" + "_<36>" stops at the "_"). Overlap is
+    #    never combined with an absorbing run: every start would rescan the run
+    #    (quadratic on repeated anchors, e.g. "AKIA" x 50,000).
+    #    test_token_patterns_absorb_own_anchors_or_are_overlapping derives this
+    #    from PATTERNS and fails if a pattern is on the wrong side.
     # 4. LAST_AT_BOUNDED (#266 HC ruling): a pattern whose every match ends at
     #    the LAST '@' of its line (db_password) runs through _last_at_bounded,
     #    not finditer: same matches, linear time on long lines. Only a pattern
@@ -190,7 +198,7 @@ class RedactionEngine:
     #
     # Critical-Engineer: consulted for Redaction security and archive integrity
     # (#261 round 1 BLOCKED at 46f6108; separators, key headers, two URIs).
-    OVERLAPPING: frozenset[str] = frozenset({"aws_key", "github_token"})
+    OVERLAPPING: frozenset[str] = frozenset({"github_token"})
     LAST_AT_BOUNDED: frozenset[str] = frozenset({"db_password"})
 
     PATTERNS: dict[str, tuple[Pattern[str], str]] = {
@@ -232,9 +240,12 @@ class RedactionEngine:
             re.compile(r"sk-[a-zA-Z0-9\-_]{20,}"),
             "[REDACTED_API_KEY]",
         ),
-        # AWS access keys: AKIA or ASIA followed by 16 uppercase alphanumeric
+        # AWS access keys: AKIA or ASIA followed by 16 or MORE uppercase
+        # alphanumerics. Over-width run (#269 U3, HC ruling (a)): the whole run is
+        # redacted, fail safe. The run's class covers AKIA/ASIA, so it absorbs a
+        # following anchor: NOT an overlapping matcher.
         "aws_key": (
-            re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}"),
+            re.compile(r"(AKIA|ASIA)[0-9A-Z]{16,}"),
             "[REDACTED_AWS_KEY]",
         ),
         # Bearer tokens: "Bearer " then base64-like characters; the value is the
@@ -243,15 +254,21 @@ class RedactionEngine:
         # continues through the following spaces and value instead of leaving
         # it unredacted. Linear: the value class, '=' and ' ' are disjoint and
         # the lookbehind is fixed-width.
+        # KEYWORD case-insensitive (#269 U2, HC ruling S-a), in the chain
+        # lookbehind too ("bearer bearer X"); the value class is unchanged and
+        # the keyword's own casing is kept. Accepted prose cost: ordinary
+        # English "bearer <word>" redacts <word> (6 files / 9 lines in the repo).
         "bearer_token": (
-            re.compile(rf"Bearer (?P<secret>{_BEARER_VALUE}(?:(?<=Bearer) +{_BEARER_VALUE})*)"),
+            re.compile(
+                rf"(?i:Bearer) (?P<secret>{_BEARER_VALUE}(?:(?<=(?i:Bearer)) +{_BEARER_VALUE})*)"
+            ),
             "[REDACTED_BEARER]",
         ),
         # Database passwords in connection strings.
         # Matches: scheme://user:password@host:port/db
         # Uses a lookahead to find the LAST @ ON THE LINE before host/port/path.
         # Pattern breakdown (S = _LINE_SEPARATORS, every str.splitlines() boundary):
-        #   (\b\w++://[^:S]+:)   - Keep scheme://user: (user part never crosses a line)
+        #   (\b\w++://[^:S]*:)   - Keep scheme://user: (user part may be EMPTY: #269 U1)
         #   (?P<secret>[^S]+)    - The password, the only redacted part (greedy, one line)
         #   (@)                  - Capture the @ separator
         #   (?=[^@S]*(?:[S]|\Z)) - Lookahead: no more @ before the END OF THIS LINE
@@ -271,24 +288,30 @@ class RedactionEngine:
         # password span is unchanged; only the kept prefix can start earlier.
         # Long lines (#266): finditer was still quadratic (every candidate's
         # password ran to the end of the line), so this pattern is matched by
-        # _last_at_bounded (LAST_AT_BOUNDED). Same matches; this string is
-        # unchanged, so the engine version is too.
+        # _last_at_bounded (LAST_AT_BOUNDED). Same matches as finditer: the
+        # strategy alone never changes output (the U1 change above is #269's).
         "db_password": (
             re.compile(
-                rf"(\b\w++://[^:{_LINE_SEPARATORS}]+:)(?P<secret>[^{_LINE_SEPARATORS}]+)(@)"
+                rf"(\b\w++://[^:{_LINE_SEPARATORS}]*:)(?P<secret>[^{_LINE_SEPARATORS}]+)(@)"
                 rf"(?=[^@{_LINE_SEPARATORS}]*(?:[{_LINE_SEPARATORS}]|\Z))"
             ),
             "[REDACTED_PASSWORD]",
         ),
-        # GitHub Personal Access Tokens (G2).
-        # Classic PATs (40-char alphanumeric tail, introduced 2021):
-        #   ghp_ (personal), gho_ (OAuth app), ghu_ (user-to-server),
-        #   ghs_ (server-to-server), ghr_ (refresh token)
-        # Fine-grained PATs (82-char alphanumeric+underscore tail):
-        #   github_pat_
-        # GitHub recommends these prefixes for secret scanning since 2021.
+        # GitHub Personal Access Tokens (G2), split in two (#269).
+        # Classic PATs: ghp_ (personal), gho_ (OAuth app), ghu_ (user-to-server),
+        # ghs_ (server-to-server), ghr_ (refresh token), then 36 or MORE
+        # alphanumerics. Over-width run (#269 U3, HC ruling (a)): whole run
+        # redacted. "_" is in the anchor but not the class, so this one stays an
+        # OVERLAPPING matcher (C1); its runs end at the next "_", so it is linear.
         "github_token": (
-            re.compile(r"gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}"),
+            re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"),
+            "[REDACTED_GITHUB_TOKEN]",
+        ),
+        # Fine-grained PATs: github_pat_ then 82 or MORE [A-Za-z0-9_]. The class
+        # covers the whole anchor, so the run absorbs a following github_pat_:
+        # NOT an overlapping matcher. Same label as classic tokens.
+        "github_pat": (
+            re.compile(r"github_pat_[A-Za-z0-9_]{82,}"),
             "[REDACTED_GITHUB_TOKEN]",
         ),
     }

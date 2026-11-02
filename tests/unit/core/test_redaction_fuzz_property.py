@@ -14,6 +14,7 @@ SYNTHETIC DATA ONLY: every secret is FAKE and assembled at runtime from parts.
 from __future__ import annotations
 
 import random
+import re
 import time
 from pathlib import Path
 
@@ -22,11 +23,13 @@ import pytest
 from hestai_context_mcp.core.redaction import RedactionEngine
 from hestai_context_mcp.tools.clock_out import _redact_text
 from tests.unit.core.fuzz_redaction import (
+    EXPECTED_TOKEN_FAMILIES,
     PATHS,
     PRIVATE_KEY_KINDS,
+    absorbs_own_anchors,
     build_pair,
+    classify_patterns,
     feasible_pair_kinds,
-    is_bounded_width,
     pair_label,
     run,
     single_line_patterns,
@@ -228,14 +231,78 @@ def test_c1_same_pattern_partial_overlap_redacted_on_every_path(
 # ---------------------------------------------------------------------------
 
 
-def test_every_bounded_width_pattern_is_an_overlapping_matcher() -> None:
-    bounded = {n for n, p in single_line_patterns().items() if is_bounded_width(p)}
-    assert bounded, "expected at least one bounded-width pattern"
-    overlapping = RedactionEngine.OVERLAPPING
+def test_token_patterns_absorb_own_anchors_or_are_overlapping() -> None:
+    """Structural C1 guard (#269 HC), derived from PATTERNS via the parse tree.
+
+    C1 can reopen exactly when a token match can END inside its own anchor and
+    the pattern is not an overlapping matcher. A whole-match token pattern must
+    therefore EITHER absorb its own anchors (unbounded trailing run whose class
+    holds every anchor char) OR be in OVERLAPPING. Never both: overlap on an
+    absorbing run rescans the run from every start (quadratic on repeated
+    anchors). No skip path: a parser change fails here, loudly.
+    """
+    classes = classify_patterns()  # total; fails closed on anything unclassifiable
+    families = sorted(n for n, c in classes.items() if c == "token")
     assert (
-        bounded <= overlapping
-    ), f"bounded-width patterns not overlapping: {bounded - overlapping}"
-    assert overlapping <= set(single_line_patterns()), "OVERLAPPING names an unknown pattern"
+        set(families) == EXPECTED_TOKEN_FAMILIES
+    ), f"token families changed: found {families}, expected {sorted(EXPECTED_TOKEN_FAMILIES)}"
+    wrong = []
+    for name in families:
+        absorbs, overlapping = absorbs_own_anchors(name), name in RedactionEngine.OVERLAPPING
+        if absorbs == overlapping:
+            wrong.append(f"{name}: absorbs={absorbs} overlapping={overlapping}")
+    assert not wrong, "C1 guard: " + "; ".join(wrong)
+    assert set(single_line_patterns()) >= RedactionEngine.OVERLAPPING
+
+
+# --- The guard must FAIL CLOSED (#270 TMG round 1, issuecomment-6585628022) ---
+
+#: TMG's probe: a whole-match token pattern whose anchor sits behind a leading
+#: lookahead. Anchor discovery used to return "" for it, so the guard skipped it.
+_PROBE_LOOKAHEAD_TOKEN = (re.compile(r"(?=AB_)AB_[A-Z]{16}"), "[REDACTED_PROBE]")
+
+
+def _guard_with_patterns(monkeypatch: pytest.MonkeyPatch, **changes: object) -> None:
+    """Run the structural guard against PATTERNS with ``changes`` (None removes)."""
+    for name, value in changes.items():
+        if value is None:
+            monkeypatch.delitem(RedactionEngine.PATTERNS, name)
+        else:
+            monkeypatch.setitem(RedactionEngine.PATTERNS, name, value)
+    test_token_patterns_absorb_own_anchors_or_are_overlapping()
+
+
+def test_guard_fails_on_a_lookahead_led_token_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stakes, reproduced: this pattern really does leak a second token's tail.
+    probe = RedactionEngine.PATTERNS.copy()
+    probe["probe_token"] = _PROBE_LOOKAHEAD_TOKEN
+    variant = type("Probe", (RedactionEngine,), {"PATTERNS": probe})
+    out = variant.redact_content("AB_" + "C" * 14 + "AB_" + "Y" * 16)
+    assert "Y" * 16 in out, "probe no longer leaks; the fixture no longer shows the risk"
+    with pytest.raises(AssertionError, match="anchors cannot be derived"):
+        _guard_with_patterns(monkeypatch, probe_token=_PROBE_LOOKAHEAD_TOKEN)
+
+
+def test_guard_fails_on_an_unclassified_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+    unknown = (re.compile(r"probe=(?P<secret>[A-Z]{12,})"), "[REDACTED_PROBE]")
+    with pytest.raises(AssertionError, match="not in NON_TOKEN_PATTERNS"):
+        _guard_with_patterns(monkeypatch, probe_secret_group=unknown)
+
+
+def test_guard_fails_on_an_unexpected_extra_token_family(monkeypatch: pytest.MonkeyPatch) -> None:
+    extra = (re.compile(r"xk-[A-Za-z0-9\-]{20,}"), "[REDACTED_PROBE]")
+    with pytest.raises(
+        AssertionError, match=r"token families changed: found .*'probe_extra_family'"
+    ):
+        _guard_with_patterns(monkeypatch, probe_extra_family=extra)
+
+
+def test_guard_fails_when_a_token_family_is_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(
+        AssertionError,
+        match=r"token families changed: found \['ai_api_key', 'aws_key', 'github_token'\],",
+    ):
+        _guard_with_patterns(monkeypatch, github_pat=None)
 
 
 def test_every_same_pattern_overlap_kind_redacted_on_every_path(tmp_path: Path) -> None:
@@ -290,3 +357,67 @@ def test_db_password_scheme_is_word_bounded_and_possessive() -> None:
     """Structural guard: plain "\\w+://" retries every start inside one word."""
     source = RedactionEngine.PATTERNS["db_password"][0].pattern
     assert source.startswith("(" + "\\b\\w++://"), "db_password scheme must be \\b\\w++://"
+
+
+# ---------------------------------------------------------------------------
+# #269 unrecognised credential forms (HC ruling issuecomment-6582850613).
+# Exact kept text is not pinned here; that is part of the design ruling.
+# ---------------------------------------------------------------------------
+
+
+def _pw269() -> str:
+    return "fkPw" + "269" + "zzK"
+
+
+def _tok269() -> str:
+    return "FAKEbearer" + "269" + "val"
+
+
+_U1_CASES = {
+    "redis_userless": "redis://:" + _pw269() + "@cache.example.test:6379/0",
+    "postgresql_userless": "postgresql://:" + _pw269() + "@db.example.test/app",
+}
+_U2_CASES = {
+    "lower": "bearer " + _tok269(),
+    "upper": "BEARER " + _tok269(),
+    "mixed": "bEaReR " + _tok269(),
+    "authorization_header_lower": "Authorization: bearer " + _tok269(),
+    "chain_lower": "bearer bearer " + _tok269(),
+    "chain_mixed": "BEARER Bearer " + _tok269(),
+}
+#: (input, excess that must not survive, marker). ghp_ + 40 and AKIA + 20.
+_U3_CASES = {
+    "ghp_plus_40": (
+        "ghp_" + ("TESTONLY" + "269" + "G" * 40)[:36] + "x9X8",
+        "x9X8",
+        "[REDACTED_GITHUB_" + "TOKEN]",
+    ),
+    "akia_plus_20": (
+        "AKIA" + ("TEST" + "269" + "Z" * 20)[:16] + "W7V6",
+        "W7V6",
+        "[REDACTED_AWS_" + "KEY]",
+    ),
+}
+
+
+@pytest.mark.parametrize("text", _U1_CASES.values(), ids=list(_U1_CASES))
+def test_u1_userless_db_uri_password_redacted_on_every_path(tmp_path: Path, text: str) -> None:
+    for path, out in zip(PATHS, _all_paths(text, tmp_path), strict=True):
+        assert _pw269() not in out, f"userless-URI password survived via {path}"
+        assert _PW in out, f"no password marker via {path}"
+
+
+@pytest.mark.parametrize("text", _U2_CASES.values(), ids=list(_U2_CASES))
+def test_u2_bearer_keyword_any_case_redacted_on_every_path(tmp_path: Path, text: str) -> None:
+    for path, out in zip(PATHS, _all_paths(text, tmp_path), strict=True):
+        assert _tok269() not in out, f"bearer value survived via {path}"
+        assert _BR in out, f"no bearer marker via {path}"
+
+
+@pytest.mark.parametrize(("text", "excess", "marker"), _U3_CASES.values(), ids=list(_U3_CASES))
+def test_u3_overwidth_run_redacted_whole_on_every_path(
+    tmp_path: Path, text: str, excess: str, marker: str
+) -> None:
+    for path, out in zip(PATHS, _all_paths(text, tmp_path), strict=True):
+        assert excess not in out, f"over-width excess survived via {path}"
+        assert marker in out, f"no marker via {path}"
