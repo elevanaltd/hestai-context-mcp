@@ -55,7 +55,7 @@ We decide on PSS as the design contract: LocalFilesystem remains the default Sto
 
 Classification is mandatory. Unknown state is treated as `LOCAL_MUTABLE` until explicitly classified. That fail-closed default protects PROD I2.
 
-**Live-copy location (v1.1).** `.hestai-state`, the target of `.hestai/state`, has exactly one live copy. Where that copy sits changes no classification above.
+**Live-copy location (v1.1).** `.hestai-state`, the target of `.hestai/state`, has exactly one live copy. Where that copy sits changes no classification above. The R1 claim that `LOCAL_MUTABLE` state preserves PROD I2 rests on the redaction pipeline, which is unchanged: credentials are redacted from transcripts before they are archived, and nothing raw is published. Encryption of the operator's own volumes, including the provider side of a LucidLink filespace, is local disk policy and outside this ADR, as the R2 encryption row already states.
 
 1. **Allowed.** The live copy may sit on any operator-mounted volume: the internal disk, an external drive, or a LucidLink filespace mounted as a drive. For this operator that is `/Volumes/elevana-av/hestai-shared-spaces/<repo>/.hestai-state`, reached by a symlink at `<repo>/.hestai-state`, so the operator's MacBook Pro and Mac Pro use the same copy.
 2. **Still banned (Class S stays rejected).** Syncing or copying the raw folder between locations (Dropbox, iCloud, OneDrive, rsync jobs, git or any cloud sync service). Also banned: two machines writing the same live copy at the same time.
@@ -71,7 +71,7 @@ Classification is mandatory. Unknown state is treated as `LOCAL_MUTABLE` until e
 6. **`clock_in`/`clock_out` on the second machine.** These are allowed only after two fixes merge: the worktree-link fix (#197), and `clock_out` tolerating ENOTEMPTY when it removes the active session directory (files held open on the mount), with a later sweep (#199). Until then the second machine uses the shared live copy as plain files only. Making `learnings-index.jsonl` one file per writer is not required while rule 4 holds.
 7. **Gitignore.** Each repo's `.gitignore` ignores `.hestai-state` with no trailing slash, because a trailing-slash pattern does not match a symlink. The change goes in the same PR that introduces the link, or earlier. For this repo that is PR #198, merged 2026-10-04.
 8. **Retroactive.** This covers the `hestai-workbench` link to the filespace that has existed since 2026-09-30.
-9. **Rollback.** Each machine keeps a `.pre-lucidlink-<date>` copy of its local state for two weeks after its link goes in. To roll back, remove the link and restore that copy.
+9. **Rollback.** Each machine keeps a `.pre-lucidlink-<date>` copy of its local state for two weeks after its link goes in. The copy lives outside the repository working tree, so git can never stage it. To roll back, remove the link and restore that copy.
 
 *Evidence:* the 2026-10-02 SMB probe on the mount, summarised in the ruling PR. Also the operator-reported 2026-10-04 two-Mac taking-turns test (`hestai-shared-spaces/_probe-crossmac-20261002/shared-append.log`): the Mac Pro wrote 100 lines at 09:12:24–35 UTC and the MacBook 100 lines at 09:25:59 UTC, each through its own mount. The result was 200/200 lines, none lost, torn or duplicated, and each machine's lines in order. Neither test covered simultaneous writes or upload lag; rule 4 covers both.
 
