@@ -35,7 +35,10 @@ REDACTION_ENGINE_NAME: str = "hestai-context-mcp.redaction"
 #:   '2' — Phase 1 hardening (issue #43): G1 stream-mode PEM fix (full-buffer
 #:          copy_and_redact), G2 GitHub PAT patterns (classic + fine-grained),
 #:          G7 sk- character class widened to include hyphens/underscores.
-REDACTION_ENGINE_VERSION: str = "2"
+#:   '3' — issue #256: db_password line-bounded (v2 could keep a password on
+#:          multi-line input when a later line held '@'); private_key redacts
+#:          a BEGIN with no END to the end of the input (fail safe).
+REDACTION_ENGINE_VERSION: str = "3"
 
 
 @dataclass(frozen=True)

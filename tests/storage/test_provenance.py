@@ -240,8 +240,9 @@ class TestRedactionEngineVersionBumpContract:
             "in core.redaction and update this snapshot."
         )
         # Version must be a non-empty string; bump cycle is human-driven
-        # (RISK_004). For issue #43 Phase 1 (G1+G2+G7 hardening) the value is '2'.
-        assert REDACTION_ENGINE_VERSION == "2"
+        # (RISK_004). For issue #256 (db_password line-bounded, unterminated
+        # private key fail-safe) the value is '3'.
+        assert REDACTION_ENGINE_VERSION == "3"
         # Ruleset hash is computed from PATTERNS — assert it matches a
         # stored snapshot. We don't pin the exact hex here (it would
         # over-couple to regex internals); we assert that toggling a
