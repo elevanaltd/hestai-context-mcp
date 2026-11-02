@@ -275,3 +275,70 @@ class TestCopyAndRedactEndToEnd:
             assert line not in out, "archive kept private key material"
         assert _KEY_MARKER in out
         assert out.endswith(_jsonl("after"))
+
+
+# ---------------------------------------------------------------------------
+# (g) every line separator Python honours bounds db_password (#261 round 1)
+# ---------------------------------------------------------------------------
+
+#: Every boundary ``str.splitlines()`` honours except '\n' (covered above) and
+#: '\r\n' (covered by the CRLF test). A lone '\r' or U+2028 inside a record
+#: must end the "line" exactly like '\n' does.
+_OTHER_SEPARATORS = {
+    "CR": "\r",
+    "VT": "\x0b",
+    "FF": "\x0c",
+    "FS": "\x1c",
+    "GS": "\x1d",
+    "RS": "\x1e",
+    "NEL": "\x85",
+    "LS": " ",
+    "PS": " ",
+}
+
+
+class TestEverySeparatorBoundsDbPassword:
+    """db_password must not run past any line separator (#261 CE + TMG)."""
+
+    @pytest.mark.parametrize("sep", _OTHER_SEPARATORS.values(), ids=_OTHER_SEPARATORS.keys())
+    def test_password_then_separator_then_email(self, sep: str) -> None:
+        pw = _fake_password("G1")
+        text = _db_uri(pw) + sep + "contact " + _email() + sep
+        out = RedactionEngine.redact_content(text)
+        expected = (
+            "postgresql://svcuser:"
+            + _PW_MARKER
+            + "@db.example.test:5432/app"
+            + sep
+            + "contact "
+            + _email()
+            + sep
+        )
+        assert out == expected
+
+    @pytest.mark.parametrize("sep", _OTHER_SEPARATORS.values(), ids=_OTHER_SEPARATORS.keys())
+    def test_url_then_separator_then_email_unchanged(self, sep: str) -> None:
+        text = "see https://example.com/docs" + sep + "contact: " + _email("bob") + sep
+        result = RedactionEngine().redact(text)
+        assert result.redacted_text == text
+        assert result.redaction_count == 0
+
+    @pytest.mark.parametrize("sep", _OTHER_SEPARATORS.values(), ids=_OTHER_SEPARATORS.keys())
+    def test_password_with_at_then_separator_then_email(self, sep: str) -> None:
+        pw = "fk" + "@" + "Pw" + "G2"
+        text = _db_uri(pw) + sep + _email() + sep
+        out = RedactionEngine.redact_content(text)
+        assert "Pw" + "G2" not in out, "password fragment leaked"
+        assert out.endswith("@db.example.test:5432/app" + sep + _email() + sep)
+
+    @pytest.mark.parametrize("sep", [" ", " ", "\x85"], ids=["LS", "PS", "NEL"])
+    def test_archive_password_record_with_separator_keeps_email(
+        self, tmp_path: Path, sep: str
+    ) -> None:
+        pw = _fake_password("G3")
+        src, dst = tmp_path / "g.jsonl", tmp_path / "g-redacted.jsonl"
+        src.write_text(_jsonl("use " + _db_uri(pw) + sep + "mail " + _email()), encoding="utf-8")
+        RedactionEngine.copy_and_redact(src, dst)
+        out = dst.read_text(encoding="utf-8")
+        assert pw not in out, "archive kept a connection-string password"
+        assert sep + "mail " + _email() in out
