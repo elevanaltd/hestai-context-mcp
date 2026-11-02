@@ -28,6 +28,7 @@ import json
 import logging
 import re
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -113,27 +114,48 @@ def _extract_learnings(
     }
 
 
-def _redact_learnings(extracted: dict[str, list[str]]) -> dict[str, list[str]]:
-    """Redact credentials from extracted DECISION/BLOCKER/LEARNING values.
+def _extract_redacted_learnings(
+    messages: list[TranscriptMessage],
+) -> dict[str, list[str]]:
+    """Extract DECISION/BLOCKER/LEARNING values with credentials redacted.
 
     #255 / PROD::I2: the values come from the raw parsed transcript, so they
     must be redacted before they reach the learnings index, the tool response
-    or the portable payload. Applied once, at extraction; every sink consumes
-    the returned dict.
+    or the portable payload. This is the one redaction stage; every sink
+    consumes the returned dict.
+
+    Two passes, because each sees what the other cannot:
+
+    - Each assistant message is redacted whole BEFORE extraction. The
+      extraction patterns stop at a newline, so a private key that starts on
+      a LEARNING line would otherwise reach the engine without its END line
+      and escape the BEGIN...END pattern.
+    - Each extracted value is redacted again. The db_password pattern only
+      fires when no ``@`` follows it in the string, so a later ``@`` line in
+      the same message defeats the whole-message pass.
 
     Args:
-        extracted: Output of ``_extract_learnings``.
+        messages: Parsed transcript messages (unredacted).
 
     Returns:
-        Same keys and ordering, each value passed through
-        ``RedactionEngine.redact_content``.
+        Dict with 'decisions', 'blockers', and 'learnings' string lists.
 
     Raises:
         Exception: Whatever the engine raises. The caller fails closed.
     """
+    # Only assistant messages are scanned by _extract_learnings, so only
+    # they need the whole-message pass.
+    redacted_messages = [
+        (
+            replace(msg, content=RedactionEngine.redact_content(msg.content))
+            if msg.role == "assistant"
+            else msg
+        )
+        for msg in messages
+    ]
     return {
         key: [RedactionEngine.redact_content(value) for value in values]
-        for key, values in extracted.items()
+        for key, values in _extract_learnings(redacted_messages).items()
     }
 
 
@@ -281,15 +303,17 @@ def clock_out(
     redaction_failed: bool = False
     redaction_failure_reason: str = ""
 
-    # Extract learnings from assistant messages, then redact them once here
+    # Extract learnings from assistant messages, redacted at extraction
     # (#255, PROD::I2). The learnings index, the response and the portable
-    # payload all consume this one redacted dict. If redaction raises, fail
-    # closed: drop the raw values and block publish. The reason names only
-    # the exception type — its message could echo the unredacted input, and
-    # the reason is written to the response and the on-disk skip record.
-    extracted_learnings = _extract_learnings(messages)
+    # payload all consume this one redacted dict. The caller-supplied
+    # description also lands in the portable payload, so it is redacted here
+    # too. If redaction raises, fail closed: drop the raw values and block
+    # publish. The reason names only the exception type — its message could
+    # echo the unredacted input, and the reason is written to the response
+    # and the on-disk skip record.
     try:
-        extracted_learnings = _redact_learnings(extracted_learnings)
+        extracted_learnings = _extract_redacted_learnings(messages)
+        description = RedactionEngine.redact_content(description)
     except Exception as e:
         logger.error("Redaction of extracted learnings failed: %s", type(e).__name__)
         redaction_failed = True
@@ -298,6 +322,7 @@ def clock_out(
             "publish blocked fail-closed"
         )
         extracted_learnings = {"decisions": [], "blockers": [], "learnings": []}
+        description = ""
 
     # Archive: redact and save transcript.
     archive_path: str | None = None
