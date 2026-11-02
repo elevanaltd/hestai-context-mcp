@@ -25,7 +25,7 @@ No live model call: the AIClient is a scripted in-process stub.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -90,16 +90,64 @@ class TestOperatorTokenIsNeverRewritten:
     async def test_operator_token_with_other_date_fails_gate_a_and_is_kept(
         self, tmp_path: Path, scripted, clock  # noqa: F811
     ) -> None:
+        # The stale-dated TOKEN is in the operator's PROSE; the stub echoes it.
+        prose = f"File a decision to keep the review gate strict, filed under {RECORD_ID}."
         clock(_NOW)
         client = scripted(_compiled(TOKEN=RECORD_ID), _compiled(TOKEN=RECORD_ID))
-        result = await run_intake_pipeline(tmp_path, _ctx())
-        assert _DATE_LINE in client.requests[0].system_prompt
+        result = await run_intake_pipeline(tmp_path, _ctx(prose))
+        assert RECORD_ID in prose
         assert result["ok"] is False
         assert result["octave"] is None
+        assert result["attempts"] == 2
+        assert len(client.requests) == 2
+        # Loud on EVERY attempt: attempt 1's error is fed back into attempt 2's prompt,
+        # attempt 2's error is the final result; both name the operator's suffix.
+        assert "TOKEN date suffix '20260601'" in client.requests[1].system_prompt
         joined = "\n".join(result["validation_errors"])
         assert "TOKEN date suffix '20260601'" in joined, joined
         assert _TOKEN_SUFFIX in joined, joined
+        # Not rewritten: the compiler was told the stamped date on both attempts, yet no
+        # prompt, feedback or error ever carries the TOKEN re-dated to it.
+        for request in client.requests:
+            assert _DATE_LINE in request.system_prompt
+            assert _TODAY_TOKEN not in request.system_prompt
         assert _TODAY_TOKEN not in joined
+
+
+@pytest.mark.parametrize(
+    ("instant", "utc_date", "utc_stamp"),
+    [
+        # Local 2026-11-02 23:30 (UTC-5) is already 2026-11-03 in UTC.
+        (
+            datetime(2026, 11, 2, 23, 30, 0, tzinfo=timezone(timedelta(hours=-5))),
+            "2026-11-03",
+            "2026-11-03T04:30:00Z",
+        ),
+        # Local 2026-11-03 01:00 (UTC+5) is still 2026-11-02 in UTC.
+        (
+            datetime(2026, 11, 3, 1, 0, 0, tzinfo=timezone(timedelta(hours=5))),
+            "2026-11-02",
+            "2026-11-02T20:00:00Z",
+        ),
+    ],
+    ids=["local-behind-utc", "local-ahead-of-utc"],
+)
+class TestUtcDateBoundary:
+    async def test_prompt_date_stamp_and_token_agree_on_the_utc_date(
+        self, tmp_path: Path, scripted, clock, instant, utc_date, utc_stamp  # noqa: F811
+    ) -> None:
+        suffix = utc_date.replace("-", "")
+        token = f"{RECORD_ID[:-8]}{suffix}"
+        clock(instant)
+        client = scripted(_compiled(TOKEN=token))
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is True, result["validation_errors"]
+        prompt = client.requests[0].system_prompt
+        assert f"Today's UTC date is {utc_date}" in prompt, prompt
+        assert f"-{suffix}" in prompt, prompt
+        octave = result["octave"] or ""
+        assert f'authored_at: "{utc_stamp}"' in octave
+        assert f'token: "{token}"' in octave
 
 
 class TestOneClockReadFeedsPromptAndStamp:
