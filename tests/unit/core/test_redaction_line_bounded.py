@@ -477,3 +477,54 @@ class TestTwoUrisOnOneLineFailSafe:
         out = RedactionEngine.redact_content(text)
         assert "I4" + "zz" not in out, "password fragment leaked"
         assert out == "mysql://root:" + _PW_MARKER + "@db.example.test/app"
+
+
+# ---------------------------------------------------------------------------
+# (j) pattern ORDER: a single-line token must not eat a key's armour (#261)
+# ---------------------------------------------------------------------------
+
+
+def _fake_sk_token() -> str:
+    """A FAKE sk- API-key-shaped token, assembled from parts."""
+    return "sk-" + "TESTONLY" + "0" * 20
+
+
+class TestPatternOrderPrivateKeyFirst:
+    """ai_api_key's class includes '-', so an abutting sk- token ate '-----BEGIN'.
+
+    private_key must run before every single-line pattern, or the armour is
+    consumed and the key body survives (whole-text path, i.e. copy_and_redact).
+    """
+
+    def _key(self, terminated: bool) -> tuple[str, list[str]]:
+        body = _fake_key_body("J1")
+        text = _pem_line("BEGIN") + "\n" + "\n".join(body)
+        if terminated:
+            text += "\n" + _pem_line("END")
+        return text, body
+
+    @pytest.mark.parametrize("terminated", [True, False], ids=["terminated", "unterminated"])
+    def test_abutting_sk_token_redact_content(self, terminated: bool) -> None:
+        key, body = self._key(terminated)
+        out = RedactionEngine.redact_content(_fake_sk_token() + key + "\n")
+        for line in body:
+            assert line not in out, "key material leaked"
+        assert "TESTONLY" not in out, "sk token leaked"
+
+    @pytest.mark.parametrize("terminated", [True, False], ids=["terminated", "unterminated"])
+    def test_abutting_sk_token_copy_and_redact(self, tmp_path: Path, terminated: bool) -> None:
+        key, body = self._key(terminated)
+        src, dst = tmp_path / "j.txt", tmp_path / "j-redacted.txt"
+        src.write_text("first\n" + _fake_sk_token() + key + "\nlast\n", encoding="utf-8")
+        RedactionEngine.copy_and_redact(src, dst)
+        out = dst.read_text(encoding="utf-8")
+        for line in body:
+            assert line not in out, "archive kept private key material"
+        assert out.startswith("first\n")
+
+    def test_private_key_is_the_first_pattern(self) -> None:
+        """Order pin: compute_ruleset_hash sorts by name and cannot see order (#263)."""
+        assert next(iter(RedactionEngine.PATTERNS)) == "private_key", (
+            "private_key must run before every single-line pattern; a reorder "
+            "lets an abutting token consume the key armour (#261)"
+        )
