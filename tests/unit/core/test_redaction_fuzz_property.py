@@ -23,12 +23,13 @@ import pytest
 from hestai_context_mcp.core.redaction import RedactionEngine
 from hestai_context_mcp.tools.clock_out import _redact_text
 from tests.unit.core.fuzz_redaction import (
+    EXPECTED_TOKEN_FAMILIES,
     PATHS,
     PRIVATE_KEY_KINDS,
     absorbs_own_anchors,
     build_pair,
+    classify_patterns,
     feasible_pair_kinds,
-    is_token_family,
     pair_label,
     run,
     single_line_patterns,
@@ -240,8 +241,11 @@ def test_token_patterns_absorb_own_anchors_or_are_overlapping() -> None:
     absorbing run rescans the run from every start (quadratic on repeated
     anchors). No skip path: a parser change fails here, loudly.
     """
-    families = [n for n in single_line_patterns() if is_token_family(n)]
-    assert {"ai_api_key", "aws_key", "github_token", "github_pat"} <= set(families)
+    classes = classify_patterns()  # total; fails closed on anything unclassifiable
+    families = sorted(n for n, c in classes.items() if c == "token")
+    assert (
+        set(families) == EXPECTED_TOKEN_FAMILIES
+    ), f"token families changed: found {families}, expected {sorted(EXPECTED_TOKEN_FAMILIES)}"
     wrong = []
     for name in families:
         absorbs, overlapping = absorbs_own_anchors(name), name in RedactionEngine.OVERLAPPING

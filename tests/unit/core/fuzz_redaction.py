@@ -105,10 +105,51 @@ def single_line_patterns() -> dict[str, Pattern[str]]:
     return {n: p for n, (p, _) in RedactionEngine.PATTERNS.items() if n != "private_key"}
 
 
+#: PATTERNS entries that are NOT whole-match token families, each with its reason.
+#: Classification is TOTAL (#270 TMG): every PATTERNS entry is either a token
+#: family with derivable, non-empty anchors or named here; anything else fails.
+NON_TOKEN_PATTERNS: dict[str, str] = {
+    "private_key": "stage-1 DOTALL block pattern, redacted first by name; not single-line",
+    "bearer_token": "secret is the named group after a kept keyword; chains absorb a keyword",
+    "db_password": "secret is the named group before the line's last '@'; one match a line",
+}
+#: The token families the classifier must find, exactly: adding or removing one
+#: must be a deliberate change here, not something the guard silently adapts to.
+EXPECTED_TOKEN_FAMILIES: frozenset[str] = frozenset(
+    {"ai_api_key", "aws_key", "github_token", "github_pat"}
+)
+
+
+def classify_patterns() -> dict[str, str]:
+    """Total classification of PATTERNS: name -> "token" or "excluded". Fails closed.
+
+    Raises AssertionError for a pattern that is neither in NON_TOKEN_PATTERNS
+    nor a whole-match pattern whose anchors can all be derived (non-empty),
+    e.g. one led by a lookahead, and for a stale NON_TOKEN_PATTERNS entry.
+    """
+    classes: dict[str, str] = {}
+    problems: list[str] = []
+    for name, (pattern, _label) in RedactionEngine.PATTERNS.items():
+        if name in NON_TOKEN_PATTERNS:
+            classes[name] = "excluded"
+        elif "secret" in pattern.groupindex:
+            problems.append(f"{name}: has a secret group but is not in NON_TOKEN_PATTERNS")
+        elif not anchors(name) or not all(anchors(name)):
+            problems.append(
+                f"{name}: anchors cannot be derived {anchors(name)!r}; classify it explicitly"
+            )
+        else:
+            classes[name] = "token"
+    stale = sorted(set(NON_TOKEN_PATTERNS) - set(RedactionEngine.PATTERNS))
+    if stale:
+        problems.append(f"NON_TOKEN_PATTERNS names unknown patterns: {stale}")
+    assert not problems, "unclassifiable PATTERNS (fail closed): " + "; ".join(problems)
+    return classes
+
+
 def is_token_family(name: str) -> bool:
     """A whole-match token pattern with a literal anchor (sk-, AKIA, gh?_, github_pat_)."""
-    pattern = single_line_patterns()[name]
-    return "secret" not in pattern.groupindex and all(anchors(name))
+    return classify_patterns()[name] == "token"
 
 
 def run_class(name: str) -> tuple[frozenset[str], bool]:
