@@ -9,9 +9,10 @@ ACCEPTED
 - **Type**: ADR
 - **Author**: requirements-steward (codex, via control-room session)
 - **Created**: 2026-04-25
-- **Version**: 1.1
+- **Version**: 1.2
 - **Revision**: 1.0→1.1 2026-10-04: `.hestai-state` may be a single live copy on an operator-mounted volume, including the LucidLink filespace `hestai-shared-spaces`, used from one machine at a time; carve-out made consistently in Context, Decision, R1, Consequences and Alternatives (ruling `HO-HESTAI-STATE-LUCIDLINK-SHARED-STORE-20261004`)
-- **Updated**: 2026-10-04
+- **Revision**: 1.1→1.2 2026-11-02: Live-copy location note: for entries written after hestai-context-mcp #255 was fixed by PR #257, the PROD I2 claim extends to the learnings index, the `clock_out` response and the portable payload only to the extent of the RedactionEngine patterns; earlier entries are not rewritten and stay outside the claim (HC ruling issuecomment-6575923070)
+- **Updated**: 2026-11-02
 - **Ratified**: 2026-04-26 (human authority via control-room session)
 - **Phase**: D2 design
 - **GitHub Issue**: [#13](https://github.com/elevanaltd/hestai-context-mcp/issues/13)
@@ -55,7 +56,7 @@ We decide on PSS as the design contract: LocalFilesystem remains the default Sto
 
 Classification is mandatory. Unknown state is treated as `LOCAL_MUTABLE` until explicitly classified. That fail-closed default protects PROD I2.
 
-**Live-copy location (v1.1).** `.hestai-state`, the target of `.hestai/state`, has exactly one live copy. Where that copy sits changes no classification above. The R1 claim that `LOCAL_MUTABLE` state preserves PROD I2 holds only for the archived transcript, which `clock_out` redacts before writing it. The learnings index (`learnings-index.jsonl`), the extracted learnings in the `clock_out` response and the portable payload built from them are not redacted (hestai-context-mcp #255), so this ADR does not claim PROD I2 for them. Until #255 lands, a live copy on any volume may hold credentials in those fields. Encryption of the operator's own volumes, including the provider side of a LucidLink filespace, is local disk policy and outside this ADR, as the R2 encryption row already states.
+**Live-copy location (v1.1).** `.hestai-state`, the target of `.hestai/state`, has exactly one live copy. Where that copy sits changes no classification above. The R1 claim that `LOCAL_MUTABLE` state preserves PROD I2 holds for the archived transcript, which `clock_out` redacts before writing it. For entries written after hestai-context-mcp #255 was fixed by PR #257, `clock_out` applies the RedactionEngine to the extracted learnings, the description and the session role and focus before they reach the learnings index (`learnings-index.jsonl`), the `clock_out` response and the portable payload built from them, so the claim extends to those entries only to the extent of the engine's patterns: a credential the patterns do not match is not removed (#256), and this ADR does not claim PROD I2 for them absolutely. Entries written before that fix are not rewritten and stay outside the claim, so a live copy on any volume may still hold credentials in them. Encryption of the operator's own volumes, including the provider side of a LucidLink filespace, is local disk policy and outside this ADR, as the R2 encryption row already states.
 
 1. **Allowed.** The live copy may sit on any operator-mounted volume: the internal disk, an external drive, or a LucidLink filespace mounted as a drive. For this operator that is `/Volumes/elevana-av/hestai-shared-spaces/<repo>/.hestai-state`, reached by a symlink at `<repo>/.hestai-state`, so the operator's MacBook Pro and Mac Pro use the same copy.
 2. **Still banned (Class S stays rejected).** Syncing or copying the raw folder between locations (Dropbox, iCloud, OneDrive, rsync jobs, git or any cloud sync service). Also banned: two machines writing the same live copy at the same time.

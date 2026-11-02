@@ -145,7 +145,11 @@ class ClaudeTranscriptParser(TranscriptParser):
                     )
 
         except OSError as e:
-            logger.warning("Could not read transcript file %s: %s", path, e)
+            # Critical-Engineer: consulted for Security vulnerability assessment
+            # (#255, PR #257 round 2). Type only, no path: callers such as
+            # clock_out parse before redacting, the path is supplied externally
+            # (session.json) and the OSError message can echo it (PROD::I2).
+            logger.warning("Could not read transcript file: %s", type(e).__name__)
 
         return messages
 
