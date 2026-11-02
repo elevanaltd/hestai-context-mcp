@@ -279,24 +279,29 @@ def test_guard_fails_on_a_lookahead_led_token_pattern(monkeypatch: pytest.Monkey
     variant = type("Probe", (RedactionEngine,), {"PATTERNS": probe})
     out = variant.redact_content("AB_" + "C" * 14 + "AB_" + "Y" * 16)
     assert "Y" * 16 in out, "probe no longer leaks; the fixture no longer shows the risk"
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="anchors cannot be derived"):
         _guard_with_patterns(monkeypatch, probe_token=_PROBE_LOOKAHEAD_TOKEN)
 
 
 def test_guard_fails_on_an_unclassified_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
     unknown = (re.compile(r"probe=(?P<secret>[A-Z]{12,})"), "[REDACTED_PROBE]")
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="not in NON_TOKEN_PATTERNS"):
         _guard_with_patterns(monkeypatch, probe_secret_group=unknown)
 
 
 def test_guard_fails_on_an_unexpected_extra_token_family(monkeypatch: pytest.MonkeyPatch) -> None:
     extra = (re.compile(r"xk-[A-Za-z0-9\-]{20,}"), "[REDACTED_PROBE]")
-    with pytest.raises(AssertionError):
+    with pytest.raises(
+        AssertionError, match=r"token families changed: found .*'probe_extra_family'"
+    ):
         _guard_with_patterns(monkeypatch, probe_extra_family=extra)
 
 
 def test_guard_fails_when_a_token_family_is_removed(monkeypatch: pytest.MonkeyPatch) -> None:
-    with pytest.raises(AssertionError):
+    with pytest.raises(
+        AssertionError,
+        match=r"token families changed: found \['ai_api_key', 'aws_key', 'github_token'\],",
+    ):
         _guard_with_patterns(monkeypatch, github_pat=None)
 
 
