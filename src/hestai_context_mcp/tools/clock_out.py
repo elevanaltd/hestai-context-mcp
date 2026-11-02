@@ -126,13 +126,18 @@ def _extract_redacted_learnings(
 
     Two passes, because each sees what the other cannot:
 
-    - Each assistant message is redacted whole BEFORE extraction. The
-      extraction patterns stop at a newline, so a private key that starts on
-      a LEARNING line would otherwise reach the engine without its END line
-      and escape the BEGIN...END pattern.
-    - Each extracted value is redacted again. The db_password pattern only
-      fires when no ``@`` follows it in the string, so a later ``@`` line in
-      the same message defeats the whole-message pass.
+    - Before extraction, each assistant message is passed whole through the
+      engine's multi-line (DOTALL) patterns. The extraction patterns stop at
+      a newline, so a private key that starts on a LEARNING line would
+      otherwise reach the engine without its END line and escape the
+      BEGIN...END pattern. Only the DOTALL patterns run here: the
+      single-line patterns are not line-bounded (db_password's user part
+      crosses newlines), so on a whole message they would turn a URL on one
+      line plus an ``@`` on a later learning into a fake password marker.
+    - After extraction, every engine pattern runs on each extracted value
+      via ``RedactionEngine.redact_content``.
+
+    The engine's patterns are used as-is; none are added or changed here.
 
     Args:
         messages: Parsed transcript messages (unredacted).
@@ -143,14 +148,21 @@ def _extract_redacted_learnings(
     Raises:
         Exception: Whatever the engine raises. The caller fails closed.
     """
+    multiline_patterns = [
+        (pattern, replacement)
+        for pattern, replacement in RedactionEngine.PATTERNS.values()
+        if pattern.flags & re.DOTALL
+    ]
+
+    def _redact_multiline(text: str) -> str:
+        for pattern, replacement in multiline_patterns:
+            text = pattern.sub(replacement, text)
+        return text
+
     # Only assistant messages are scanned by _extract_learnings, so only
     # they need the whole-message pass.
     redacted_messages = [
-        (
-            replace(msg, content=RedactionEngine.redact_content(msg.content))
-            if msg.role == "assistant"
-            else msg
-        )
+        (replace(msg, content=_redact_multiline(msg.content)) if msg.role == "assistant" else msg)
         for msg in messages
     ]
     return {
@@ -318,7 +330,7 @@ def clock_out(
         logger.error("Redaction of extracted learnings failed: %s", type(e).__name__)
         redaction_failed = True
         redaction_failure_reason = (
-            f"extracted learnings redaction failed ({type(e).__name__}); "
+            f"redaction of extracted learnings or description failed ({type(e).__name__}); "
             "publish blocked fail-closed"
         )
         extracted_learnings = {"decisions": [], "blockers": [], "learnings": []}
