@@ -355,7 +355,9 @@ def _stamp_authored_at(record: str, authored_at: str) -> str:
     caller runs Gate A on the result, which re-emits the canonical bytes (key order).
     Unchanged when there is no closing fence (Gate A then rejects it).
     """
-    if not is_yaml_front_matter(record):
+    # A leading BOM is rejected at line 1 as invalid_key (§1.1); leave it unstamped so
+    # it still fails loudly rather than being made acceptable.
+    if not is_yaml_front_matter(record) or record.startswith("\ufeff"):
         return record
     lines = record.split("\n")
     # The reader's fence rule (``_is_fence_line``): ``---`` plus at most one CR.
