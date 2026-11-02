@@ -137,6 +137,30 @@ def _redact_text(text: str) -> str:
     return "\n".join(RedactionEngine.redact_content(line) for line in text.split("\n"))
 
 
+#: session.json fields clock_out writes to its sinks: the learnings index,
+#: the archive filename (and so ``archive_path`` in the response and the
+#: payload) and the portable payload.
+_SESSION_TEXT_FIELDS: tuple[str, ...] = ("role", "focus")
+
+
+def _redact_session_metadata(session_data: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of session_data with role and focus redacted (#255).
+
+    A present non-string value is converted with ``str()`` before redaction so
+    nothing unredacted reaches a sink; ``None`` is kept (the archive step
+    treats a ``None`` focus as a structured failure).
+
+    Raises:
+        Exception: Whatever the engine raises. The caller fails closed.
+    """
+    redacted = dict(session_data)
+    for key in _SESSION_TEXT_FIELDS:
+        value = redacted.get(key)
+        if value is not None:
+            redacted[key] = _redact_text(value if isinstance(value, str) else str(value))
+    return redacted
+
+
 def _extract_redacted_learnings(
     messages: list[TranscriptMessage],
 ) -> dict[str, list[str]]:
@@ -281,7 +305,7 @@ def clock_out(
             "extracted_learnings": {"decisions": [], "blockers": [], "learnings": []},
             "portable_publication": _skipped_publication("session_metadata_unreadable"),
             "unpublished_memory_exists": _outbox_has_entries(wd),
-            "message": f"Could not read session metadata: {e}",
+            "message": f"Could not read session metadata ({type(e).__name__})",
         }
 
     # Find transcript file
@@ -293,9 +317,10 @@ def clock_out(
         parser = detect_parser(transcript_path)
         if parser:
             messages = parser.parse(transcript_path)
-            logger.info("Parsed %d messages from %s", len(messages), transcript_path)
+            # transcript_path is supplied externally via session.json: not logged.
+            logger.info("Parsed %d transcript messages", len(messages))
         else:
-            logger.warning("No parser detected for transcript: %s", transcript_path)
+            logger.warning("No parser detected for the session transcript")
 
     # RISK_010 fail-closed (CE rework): redaction failure is structurally
     # distinct from "no transcript" — the former MUST block publish; the
@@ -307,23 +332,28 @@ def clock_out(
     # Extract learnings from assistant messages, redacted at extraction
     # (#255, PROD::I2). The learnings index, the response and the portable
     # payload all consume this one redacted dict. The caller-supplied
-    # description also lands in the portable payload, so it is redacted here
-    # too. If redaction raises, fail closed: drop the raw values and block
+    # description and session.json's role/focus also reach those sinks, so
+    # they are redacted here too. If redaction raises, fail closed: drop the raw values and block
     # publish. The reason names only the exception type — its message could
     # echo the unredacted input, and the reason is written to the response
     # and the on-disk skip record.
     try:
+        session_data = _redact_session_metadata(session_data)
         extracted_learnings = _extract_redacted_learnings(messages)
         description = _redact_text(description)
     except Exception as e:
         logger.error("Redaction of extracted learnings failed: %s", type(e).__name__)
         redaction_failed = True
         redaction_failure_reason = (
-            f"redaction of extracted learnings or description failed ({type(e).__name__}); "
-            "publish blocked fail-closed"
+            "redaction of extracted learnings, description or session metadata failed "
+            f"({type(e).__name__}); publish blocked fail-closed"
         )
         extracted_learnings = {"decisions": [], "blockers": [], "learnings": []}
         description = ""
+        # Drop the unredacted metadata fields; the sinks' defaults apply.
+        session_data = {
+            key: value for key, value in session_data.items() if key not in _SESSION_TEXT_FIELDS
+        }
 
     # Archive: redact and save transcript.
     archive_path: str | None = None
@@ -413,7 +443,7 @@ def clock_out(
         shutil.rmtree(session_dir)
         logger.info("Removed active session: %s", session_dir)
     except OSError as e:
-        logger.warning("Could not remove active session directory: %s", e)
+        logger.warning("Could not remove active session directory: %s", type(e).__name__)
 
     return {
         "status": "success",
@@ -487,7 +517,7 @@ def _record_skip_status(
         )
         return target
     except OSError as e:  # pragma: no cover - defensive
-        logger.warning("skip-status record write failed: %s", e)
+        logger.warning("skip-status record write failed: %s", type(e).__name__)
         return None
 
 
@@ -679,12 +709,12 @@ def _publish_portable_memory(
             input_text = Path(archive_path).read_text(encoding="utf-8")
         except OSError as e:
             publication = _skipped_publication("archive_unreadable")
-            publication["error_message"] = str(e)
+            publication["error_message"] = f"archive unreadable ({type(e).__name__})"
             _record_skip_status(
                 working_dir_path,
                 session_id=session_id,
                 reason_code="archive_unreadable",
-                reason_message=str(e),
+                reason_message=publication["error_message"],
             )
             return publication, True
     else:
@@ -723,7 +753,9 @@ def _publish_portable_memory(
             queued = outbox.enqueue(ack=ack, error_code=e.code, error_message=e.message)
             publication["queued_path"] = str(queued)
         except Exception as enqueue_err:  # pragma: no cover - defensive
-            logger.warning("outbox enqueue for provenance skip failed: %s", enqueue_err)
+            logger.warning(
+                "outbox enqueue for provenance skip failed: %s", type(enqueue_err).__name__
+            )
         _record_skip_status(
             working_dir_path,
             session_id=session_id,
@@ -796,9 +828,12 @@ def _publish_portable_memory(
     except Exception as e:  # noqa: BLE001 — adapter contract is broad; we
         # capture every failure into the structured publication shape and
         # enqueue an outbox entry so unpublished_memory_exists flips True.
-        logger.warning("LocalFilesystemAdapter publish failed: %s", e)
+        # Type only (#255): the adapter's message could echo payload or path
+        # content, and it reaches the response, the outbox and the log.
+        adapter_error = f"adapter write failed ({type(e).__name__})"
+        logger.warning("LocalFilesystemAdapter publish failed: %s", type(e).__name__)
         publication = _skipped_publication("adapter_write_failed")
-        publication["error_message"] = str(e)
+        publication["error_message"] = adapter_error
         try:
             failed_ack = PublishAck(
                 artifact_id=artifact.artifact_id,
@@ -810,16 +845,18 @@ def _publish_portable_memory(
                 queued_path=None,
                 published_at=None,
                 error_code="adapter_write_failed",
-                error_message=str(e),
+                error_message=adapter_error,
             )
             queued = outbox.enqueue(
                 ack=failed_ack,
                 error_code="adapter_write_failed",
-                error_message=str(e),
+                error_message=adapter_error,
             )
             publication["queued_path"] = str(queued)
         except Exception as enqueue_err:  # pragma: no cover - defensive
-            logger.warning("outbox enqueue after adapter failure failed: %s", enqueue_err)
+            logger.warning(
+                "outbox enqueue after adapter failure failed: %s", type(enqueue_err).__name__
+            )
         return publication, outbox.unpublished_memory_exists()
 
     publication = _ack_to_publication(ack)
@@ -834,7 +871,7 @@ def _publish_portable_memory(
             )
             publication["queued_path"] = str(queued)
         except Exception as enqueue_err:  # pragma: no cover - defensive
-            logger.warning("outbox enqueue after FAILED ack failed: %s", enqueue_err)
+            logger.warning("outbox enqueue after FAILED ack failed: %s", type(enqueue_err).__name__)
 
     return publication, outbox.unpublished_memory_exists()
 
@@ -856,5 +893,6 @@ def _resolve_transcript_path(session_data: dict[str, Any]) -> Path | None:
         path = Path(transcript_path_str)
         if path.exists():
             return path
-        logger.warning("Transcript path from session.json not found: %s", path)
+        # The path is supplied externally via session.json: not logged.
+        logger.warning("Transcript path from session.json not found")
     return None
