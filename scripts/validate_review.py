@@ -373,6 +373,14 @@ _SECURITY_PATTERNS = [
     r"(^|/)session/",
     r"(^|/)config/env",
     r"(^|/)path_utils",
+    # Credential-safety code (PROD::I2, issue #258): fail-closed redaction,
+    # provenance and the clock_out lifecycle tool that invokes redaction.
+    # Start-of-segment PREFIX matches (like the entries above), so redaction_*.py
+    # also qualifies -- intentional over-trigger, never an under-trigger.
+    # Path-only: never labels or titles.
+    r"(^|/)redaction",
+    r"(^|/)provenance",
+    r"(^|/)clock_out",
 ]
 
 # Security-load-bearing basenames (issue #1833): leading-dot, extensionless

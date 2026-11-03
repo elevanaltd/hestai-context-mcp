@@ -179,6 +179,86 @@ class TestFacetClassification:
 
 
 # ---------------------------------------------------------------------------
+# Issue #258: credential-safety paths (PROD::I2) classify as SECURITY by path
+# ---------------------------------------------------------------------------
+def _classify_one(path: str) -> tuple[set[str], set[str]]:
+    files = [{"path": path, "added": 10, "deleted": 2, "total_changed": 12}]
+    facets, roles, _tier, _ = validate_review.classify_pr_facets(files)
+    return set(facets), set(roles)
+
+
+@pytest.mark.unit
+class TestCredentialSafetyPathsAreSecurity:
+    """Redaction, provenance and clock_out paths must require CIV (#258)."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/hestai_context_mcp/core/redaction.py",
+            "src/hestai_context_mcp/storage/provenance.py",
+            "src/hestai_context_mcp/tools/clock_out.py",
+        ],
+    )
+    def test_credential_safety_path_is_security(self, path: str) -> None:
+        facets, roles = _classify_one(path)
+        assert "SECURITY" in facets, f"{path} should be SECURITY, got {facets}"
+        assert "CIV" in roles, f"{path} should require CIV, got {roles}"
+
+    def test_redaction_only_pr_requires_civ_among_roles(self) -> None:
+        facets, roles = _classify_one("src/hestai_context_mcp/core/redaction.py")
+        assert facets == {"SECURITY"}
+        assert roles == validate_review.FACET_ROLE_MAP["SECURITY"]
+        assert "CIV" in roles
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            # Start-anchored: a name that merely CONTAINS the stem must not match.
+            ("src/hestai_context_mcp/core/unredaction.py", {"ROUTINE_CODE"}),
+            ("src/hestai_context_mcp/storage/unprovenance.py", {"ROUTINE_CODE"}),
+            ("src/hestai_context_mcp/tools/xclock_out.py", {"ROUTINE_CODE"}),
+            ("src/hestai_context_mcp/core/reduction.py", {"ROUTINE_CODE"}),
+            ("src/hestai_context_mcp/tools/clock_in.py", {"ROUTINE_CODE"}),
+            # Exempt classes still win before the SECURITY path check.
+            ("docs/redactions_notes.md", set()),
+            ("tests/unit/core/test_redaction.py", set()),
+            ("tests/unit/storage/test_provenance.py", set()),
+            ("tests/unit/tools/test_clock_out.py", set()),
+        ],
+    )
+    def test_unrelated_paths_stay_as_before(self, path: str, expected: set[str]) -> None:
+        facets, _roles = _classify_one(path)
+        assert facets == expected, f"{path}: expected {expected}, got {facets}"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # Prefix matching is intentional: related modules inherit the facet.
+            "src/hestai_context_mcp/core/redaction_helpers.py",
+            "src/hestai_context_mcp/core/redaction/patterns.py",
+            "src/hestai_context_mcp/storage/provenance_report.py",
+        ],
+    )
+    def test_prefix_variants_also_security(self, path: str) -> None:
+        facets, _roles = _classify_one(path)
+        assert "SECURITY" in facets, f"{path} should be SECURITY, got {facets}"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/hestai_mcp/auth/handler.py",
+            "src/hestai_mcp/session/store.py",
+            "src/hestai_mcp/config/env.py",
+            "src/hestai_mcp/path_utils.py",
+        ],
+    )
+    def test_existing_security_patterns_unchanged(self, path: str) -> None:
+        facets, roles = _classify_one(path)
+        assert "SECURITY" in facets, f"{path} should remain SECURITY, got {facets}"
+        assert "CIV" in roles
+
+
+# ---------------------------------------------------------------------------
 # 1b. Functional EXECUTABLE_SPEC gate tests
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
