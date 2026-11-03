@@ -785,3 +785,95 @@ class TestGovernanceIsNotSelfReview:
         assert tier != "TIER_1_SELF", f"governance-only change self-cleared: {reason}"
         assert "SR" in roles, f"governance change must require SR, got {roles}"
         assert roles == validate_review.FACET_ROLE_MAP["GOVERNANCE"]
+
+
+# ---------------------------------------------------------------------------
+# 9. Issue #259: markdown decision records / ADRs are GOVERNANCE by path
+# ---------------------------------------------------------------------------
+_YAML_RECORD = ".hestai/decisions/HO-EXAMPLE-RULING-20261101.md"
+_RFC_ARCH_ADR = ".hestai/decisions/rfc-arch/ADR-RFC-ARCH-004-EXAMPLE.md"
+_DOCS_ADR = "docs/adr/adr-0099-example.md"
+
+
+def _rec(path: str, total: int = 40) -> dict[str, object]:
+    return {"path": path, "added": total, "deleted": 0, "total_changed": total, "status": "A"}
+
+
+@pytest.mark.unit
+class TestMarkdownDecisionRecordsAreGovernance:
+    """The markdown exemption must not swallow decision records or ADRs (#259)."""
+
+    @pytest.mark.parametrize("path", [_YAML_RECORD, _RFC_ARCH_ADR, _DOCS_ADR])
+    def test_markdown_record_or_adr_is_governance(self, path: str) -> None:
+        assert validate_review._classify_file_facet(path) == "GOVERNANCE"
+
+    def test_oct_md_record_unchanged(self) -> None:
+        path = ".hestai/decisions/X-20261101.oct.md"
+        assert validate_review._classify_file_facet(path) == "GOVERNANCE"
+
+    @pytest.mark.parametrize(
+        "path", ["README.md", "docs/tools.md", ".hestai/MANIFEST.md", "docs/adrs-notes.md"]
+    )
+    def test_unrelated_markdown_stays_exempt(self, path: str) -> None:
+        assert validate_review._classify_file_facet(path) is None
+
+    def test_yaml_record_plus_manifest_requires_sr(self) -> None:
+        files = [_rec(_YAML_RECORD), _rec(".hestai/MANIFEST.md", 2)]
+        facets, roles, tier, _ = validate_review.classify_pr_facets(files)
+        assert facets == {"GOVERNANCE"}
+        assert "SR" in roles
+        assert tier != "TIER_0_EXEMPT"
+
+    def test_manifest_alone_stays_tier0_exempt(self) -> None:
+        facets, roles, tier, _ = validate_review.classify_pr_facets([_rec(".hestai/MANIFEST.md")])
+        assert facets == set()
+        assert roles == set()
+        assert tier == "TIER_0_EXEMPT"
+
+    @pytest.mark.parametrize("path", [".HESTAI/Decisions/X.md", "Docs/ADR/x.md"])
+    def test_prefix_match_is_casefolded(self, path: str) -> None:
+        assert validate_review._classify_file_facet(path) == "GOVERNANCE"
+
+    @pytest.mark.parametrize("path", [".hestai/decisions.md", "sub/docs/adr/x.md", "docs/adr.md"])
+    def test_prefix_boundary_and_root_anchor_stay_exempt(self, path: str) -> None:
+        assert validate_review._classify_file_facet(path) is None
+
+    def test_non_markdown_under_docs_adr_is_routine_code(self) -> None:
+        assert validate_review._classify_file_facet("docs/adr/x.txt") == "ROUTINE_CODE"
+
+    def test_deleted_record_still_requires_sr(self) -> None:
+        record = _rec(_YAML_RECORD)
+        record["status"] = "D"
+        facets, roles, tier, _ = validate_review.classify_pr_facets([record])
+        assert facets == {"GOVERNANCE"}
+        assert "SR" in roles
+        assert tier != "TIER_0_EXEMPT"
+
+    def test_rename_out_of_decisions_still_requires_sr(self) -> None:
+        record = _rec("archive/old-ruling.md")
+        record["status"] = "R"
+        record["previous_path"] = _YAML_RECORD
+        _, roles, tier, _ = validate_review.classify_pr_facets([record])
+        assert "SR" in roles
+        assert tier != "TIER_0_EXEMPT"
+
+    def test_rename_between_records_with_unreadable_old_side_is_governance_only(self) -> None:
+        """A plain .md record cannot hide an .oct.md TYPE; unreadable old side needs only SR."""
+        record = _rec(".hestai/decisions/B.md")
+        record["status"] = "R"
+        record["previous_path"] = ".hestai/decisions/A.md"
+        record["old_content"] = validate_review.CONTENT_UNAVAILABLE
+        facets, roles, tier, _ = validate_review.classify_pr_facets([record])
+        assert facets == {"GOVERNANCE"}
+        assert roles == {"SR"}
+        assert tier != "TIER_0_EXEMPT"
+
+    def test_rename_from_unreadable_oct_md_record_still_escalates(self) -> None:
+        """Pin: an unreadable .oct.md old side keeps the EXECUTABLE_SPEC escalation."""
+        record = _rec(".hestai/decisions/B.md")
+        record["status"] = "R"
+        record["previous_path"] = ".hestai/decisions/A.oct.md"
+        record["old_content"] = validate_review.CONTENT_UNAVAILABLE
+        facets, roles, _, _ = validate_review.classify_pr_facets([record])
+        assert "EXECUTABLE_SPEC" in facets
+        assert {"CE", "CRS", "SR"} <= roles
