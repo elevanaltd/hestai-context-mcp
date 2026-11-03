@@ -460,3 +460,36 @@ class TestOnlyALowercaseKeyIsReplaced:
         result = await run_intake_pipeline(tmp_path, _ctx())
         assert result["ok"] is False
         assert result["octave"] is None
+
+
+class TestMalformedLineIsNotRepaired:
+    """cubic 4454614282: unquoted, trailing-garbage or oddly spaced lines stay for Gate A."""
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "authored_at: 2026-11-03",
+            'authored_at: "2026-11-03" junk',
+            'authored_at: "2026-11-03',
+            'authored_at:"2026-11-03"',
+            'authored_at : "2026-11-03"',
+            'authored_at:  "2026-11-03"',
+        ],
+    )
+    def test_malformed_authored_at_line_is_returned_unchanged(self, line: str) -> None:
+        rec = _with_line(line)
+        assert mod._stamp_authored_at(rec, _NOW_STAMP, "") == rec
+
+    async def test_unquoted_value_is_rejected_by_gate_a_not_repaired(
+        self, tmp_path: Path, scripted, clock
+    ) -> None:
+        clock(_NOW)
+        scripted(_with_line("authored_at: 2026-11-03"))
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is False
+        assert result["octave"] is None
+
+    def test_well_formed_line_is_still_replaced(self) -> None:
+        out = mod._stamp_authored_at(_with_line('authored_at: "2026-11-03"'), _NOW_STAMP, "")
+        assert f'authored_at: "{_NOW_STAMP}"' in out
+        assert out.count("authored_at:") == 1
