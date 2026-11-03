@@ -403,6 +403,10 @@ def _stamp_authored_at(record: str, authored_at: str, prose: str = "") -> str:
     if len(existing) > 1:
         return record
     if existing:
+        # Only an exact lowercase key is ours to replace; ``AUTHORED_AT:`` and other
+        # spellings stay as written so Gate A rejects them (#275).
+        if not lines[existing[0]].startswith("authored_at"):
+            return record
         if _operator_wrote_timestamp(lines[existing[0]], prose):
             return record
         lines[existing[0]] = stamp
