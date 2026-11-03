@@ -493,3 +493,36 @@ class TestMalformedLineIsNotRepaired:
         out = mod._stamp_authored_at(_with_line('authored_at: "2026-11-03"'), _NOW_STAMP, "")
         assert f'authored_at: "{_NOW_STAMP}"' in out
         assert out.count("authored_at:") == 1
+
+
+class TestKeptTimestampMustMatchAsAWholeToken:
+    """cubic 4454614267: the prose timestamp must not be a fragment of a longer one."""
+
+    @pytest.mark.parametrize(
+        ("value", "prose"),
+        [
+            ("2026-11-01T10:00:00", "Authored 2026-11-01T10:00:00Z."),
+            ("2026-11-01T10:00:00Z", "Authored 2026-11-01T10:00:00Z+01:00."),
+            ("2026-11-01T10:00:00Z", "Authored 2026-11-01T10:00:00.5Z."),
+            ("2026-11-01T10:00:00Z", "Authored x2026-11-01T10:00:00Z."),
+            ("2026-11-01T10:00:00Z", "Authored 2026-11-01T10:00:00Zulu."),
+        ],
+    )
+    def test_fragment_of_a_longer_token_is_stamped_over(self, value: str, prose: str) -> None:
+        out = mod._stamp_authored_at(_compiled_with(value), _NOW_STAMP, prose)
+        assert f'authored_at: "{_NOW_STAMP}"' in out
+        assert value not in out
+
+    @pytest.mark.parametrize(
+        "prose",
+        [
+            "Authored 2026-11-01T10:00:00Z.",
+            "Authored (2026-11-01T10:00:00Z), then filed.",
+            "2026-11-01T10:00:00Z",
+            'Authored "2026-11-01T10:00:00Z"\nnext line',
+            "Authored 2026-11-01T10:00:00Z, ok",
+        ],
+    )
+    def test_whole_token_is_kept(self, prose: str) -> None:
+        rec = _compiled_with("2026-11-01T10:00:00Z")
+        assert mod._stamp_authored_at(rec, _NOW_STAMP, prose) == rec
