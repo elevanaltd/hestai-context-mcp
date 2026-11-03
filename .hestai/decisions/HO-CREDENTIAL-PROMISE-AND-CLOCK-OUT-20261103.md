@@ -1,0 +1,18 @@
+---
+type: "DECISION_RECORD"
+version: "1.4"
+token: "HO-CREDENTIAL-PROMISE-AND-CLOCK-OUT-20261103"
+status: "RATIFIED"
+tier: "STRATEGIC"
+authored_at: "2026-11-03T12:04:15Z"
+decision: "Reword PROD I2 so it promises what is true, and leave clock_out unwired in real sessions, with no raw transcript archiving started."
+because: "Pattern redaction cannot catch every credential, so the absolute promise is false; archiving transcripts would also store client data the state folder must not hold."
+issue_ref: "repo:hestai-context-mcp#271"
+scope: "I2 direction: known credential forms are always removed, archiving still fails closed, and the North Star and ADR-0013 state the remaining risk. clock_out code stays in place, unwired. The North Star text needs its own PR and operator approval, including PROD I1, which also assumes every session archives."
+ratified_by: "human:operator<shaunbuswell>"
+ratified_at: "2026-11-03T11:56:47Z"
+compression_tier: "CONSERVATIVE"
+confirmation_context: "Operator answered in the HC control room session on 2026-11-03T11:56:47Z. I2 option A is the operator's choice. The clock_out outcome is HC's decision under the operator's delegation in the same message."
+loss_profile: "[preserve:operator_quote∧I2_option∧clock_out_outcome∧remaining_approval,drop:narrative_filler]"
+operator_ruling: "\"1. No one has used clock_out so I don't think it's set up in the workflow we use currently, so we have flexibility to do whatever is best here. 2. Go with A\""
+---
