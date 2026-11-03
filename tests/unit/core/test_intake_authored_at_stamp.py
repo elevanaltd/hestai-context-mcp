@@ -432,3 +432,31 @@ class TestContractTellsTheCompilerToOmitAuthoredAt:
         assert "tier, authored_at, decision" not in text
         # The existing instruction not to invent dates stays.
         assert "do NOT copy its dates" in text
+
+
+# --- #275 review: only a strictly formed lowercase key line is ever replaced -------------
+# The planted values below differ from ``_NOW_STAMP`` (2026-06-01T09:30:15Z) and from the
+# pinned clock of the sibling modules, so a replace can never pass by coincidence.
+
+
+def _with_line(authored_line: str) -> str:
+    """A compiled record whose authored_at line is exactly ``authored_line``."""
+    return _compiled_with("2026-11-03").replace('authored_at: "2026-11-03"', authored_line)
+
+
+class TestOnlyALowercaseKeyIsReplaced:
+    """cubic 4454614260: a non-lowercase key is left for Gate A, never rewritten."""
+
+    @pytest.mark.parametrize("key", ["AUTHORED_AT", "Authored_At", "Authored_at"])
+    def test_non_lowercase_key_is_returned_unchanged(self, key: str) -> None:
+        rec = _with_line(f'{key}: "2026-11-03"')
+        assert mod._stamp_authored_at(rec, _NOW_STAMP, "") == rec
+
+    async def test_non_lowercase_key_is_rejected_by_gate_a_not_repaired(
+        self, tmp_path: Path, scripted, clock
+    ) -> None:
+        clock(_NOW)
+        scripted(_with_line('AUTHORED_AT: "2026-11-03"'))
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is False
+        assert result["octave"] is None
