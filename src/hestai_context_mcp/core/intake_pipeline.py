@@ -362,16 +362,27 @@ def _is_full_timestamp(value: str) -> bool:
     return True
 
 
-def _operator_wrote_timestamp(line: str, prose: str) -> bool:
-    """True when the ``authored_at`` ``line`` holds a full timestamp present in ``prose``.
+def _strict_authored_at_value(line: str) -> str | None:
+    """The decoded value of a strictly formed ``authored_at: "<scalar>"`` line, else None.
+
+    Exactly the lowercase key, one space, then one valid double-quoted scalar and nothing
+    after it. Anything else (unquoted, trailing text, odd spacing) is Gate A's to reject.
+    """
+    text = line.removesuffix("\r")
+    if not text.startswith('authored_at: "'):
+        return None
+    try:
+        return decode_yaml_scalar(text.removeprefix("authored_at: "))
+    except YamlSyntaxError:
+        return None
+
+
+def _operator_wrote_timestamp(value: str, prose: str) -> bool:
+    """True when ``value`` is a full timestamp present in ``prose``.
 
     Literal match only (#273): a time the operator wrote in another format is not
     normalised, so it is stamped over.
     """
-    try:
-        value = decode_yaml_scalar(line.split(":", 1)[1].removesuffix("\r"))
-    except YamlSyntaxError:
-        return False
     return _is_full_timestamp(value) and value in prose
 
 
@@ -403,11 +414,10 @@ def _stamp_authored_at(record: str, authored_at: str, prose: str = "") -> str:
     if len(existing) > 1:
         return record
     if existing:
-        # Only an exact lowercase key is ours to replace; ``AUTHORED_AT:`` and other
-        # spellings stay as written so Gate A rejects them (#275).
-        if not lines[existing[0]].startswith("authored_at"):
-            return record
-        if _operator_wrote_timestamp(lines[existing[0]], prose):
+        # Only a strictly formed lowercase line is ours to replace (#275); every other
+        # spelling or shape stays as written so Gate A rejects it.
+        value = _strict_authored_at_value(lines[existing[0]])
+        if value is None or _operator_wrote_timestamp(value, prose):
             return record
         lines[existing[0]] = stamp
         return "\n".join(lines)
