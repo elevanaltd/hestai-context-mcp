@@ -112,7 +112,7 @@ jobs:
       # a branch name from the wrong repo.
       #
       # PINNED TO A COMMIT (#170): `ref` is the full SHA of the commit tagged
-      # review-gate-v1, per HO-REVIEW-GATE-PIN-RELEASE-20261025.  A branch or
+      # review-gate-v2, per HO-REVIEW-GATE-PIN-RELEASE-20261025.  A branch or
       # tag name is mutable, so a merge here would silently change the judge
       # of every consuming repo.  tests/test_review_gate_workflow_pin.py
       # enforces the full-SHA shape.
@@ -130,7 +130,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: elevanaltd/hestai-context-mcp
-          ref: 7153bfd1e788f342617d258e978edbf577550e8f
+          ref: 7634feb87298b77c507cade2e6b0f40a6a04d911
           path: .review-gate-tools
           sparse-checkout: |
             scripts/validate_review.py
