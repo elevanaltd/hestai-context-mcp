@@ -14,6 +14,7 @@ NO new git code is introduced by T4 — it reuses ``run_linker`` verbatim.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,18 @@ import hestai_context_mcp.core.intake_pipeline as mod
 from hestai_context_mcp.core.intake_pipeline import run_intake_to_pr
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
 from hestai_context_mcp.tools.governance.type_checker import ValidationResult
+
+
+@pytest.fixture(autouse=True)
+def _fixed_pipeline_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the pipeline clock to the fixtures' AUTHORED_AT instant (#273).
+
+    The compiled fixtures carry ``AUTHORED_AT 2026-06-01T00:00:00Z`` that the operator
+    prose does not contain, so the pipeline now stamps over it; pinning the one clock
+    read to that same instant keeps the TOKEN date consistent and the output unchanged.
+    """
+    monkeypatch.setattr(mod, "_now_utc", lambda: datetime(2026, 6, 1, tzinfo=UTC))
+
 
 # Non-secret AGR governance TOKEN fixture. Defined as a plainly-named module
 # constant (NOT token/secret/key-named) and referenced everywhere so no quoted
