@@ -383,7 +383,12 @@ def _operator_wrote_timestamp(value: str, prose: str) -> bool:
     Literal match only (#273): a time the operator wrote in another format is not
     normalised, so it is stamped over.
     """
-    return _is_full_timestamp(value) and value in prose
+    if not _is_full_timestamp(value):
+        return False
+    # Whole token (#275): not flanked by other timestamp characters, so a longer
+    # timestamp, a dropped ``Z`` or a trailing fraction is not a match. One linear scan.
+    pattern = rf"(?<![0-9A-Za-z:+-]){re.escape(value)}(?![0-9A-Za-z:+-])(?!\.\d)"
+    return re.search(pattern, prose) is not None
 
 
 def _stamp_authored_at(record: str, authored_at: str, prose: str = "") -> str:
