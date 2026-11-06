@@ -27,6 +27,7 @@ No live model call: the AIClient is a scripted in-process stub.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,18 @@ from hestai_context_mcp.core.agent_readable_governance_parser import (
 from hestai_context_mcp.core.intake_pipeline import run_intake_pipeline, run_intake_to_pr
 from hestai_context_mcp.ports.ai_client import CompletionRequest, CompletionResult
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
+
+
+@pytest.fixture(autouse=True)
+def _fixed_pipeline_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the pipeline clock to the fixtures' AUTHORED_AT instant (#273).
+
+    The compiled fixtures carry ``AUTHORED_AT 2026-06-01T00:00:00Z`` that the operator
+    prose does not contain, so the pipeline now stamps over it; pinning the one clock
+    read to that same instant keeps the TOKEN date consistent and the output unchanged.
+    """
+    monkeypatch.setattr(mod, "_now_utc", lambda: datetime(2026, 6, 1, tzinfo=UTC))
+
 
 pytestmark = pytest.mark.unit
 

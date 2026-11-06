@@ -39,7 +39,9 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from hestai_context_mcp.core.agent_readable_governance_parser import (
+    YamlSyntaxError,
     collect_topic_blocks,
+    decode_yaml_pair,
     encode_yaml_scalar,
     is_yaml_front_matter,
     parse_decision_record,
@@ -343,13 +345,61 @@ def _now_utc() -> datetime:
 
 
 _AUTHORED_AT_KEY_RE = re.compile(r"authored_at\s*:", re.IGNORECASE)
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _stamp_authored_at(record: str, authored_at: str) -> str:
-    """Add ``authored_at`` to a compiled quoted-YAML ``record`` that omits it (#249).
+def _is_full_timestamp(value: str) -> bool:
+    """True when ``value`` is a full ISO-8601 timestamp (a date AND a time), not a date."""
+    text = value.strip()
+    if _DATE_ONLY_RE.match(text) or "T" not in text.upper():
+        return False
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
 
-    ADR-RFC-ARCH-004 §1.2: UTC, set once at record creation, never edited. An
-    ``authored_at`` already in the front matter (operator-supplied) is kept as is.
+
+def _strict_authored_at_value(line: str) -> str | None:
+    """The decoded value of an ``authored_at`` line Gate A's reader accepts, else None.
+
+    "Well formed" is exactly what the reader accepts (``decode_yaml_pair``): the lowercase
+    key, one or more spaces, then one valid double-quoted scalar and nothing after it.
+    Extra spaces are valid to the reader, so such a line is ours to replace (#275, else a
+    fabricated value would survive canonicalisation). Anything the reader rejects (tab or
+    no space after the colon, unquoted, trailing text, uppercase) is Gate A's to reject.
+    """
+    try:
+        key, value = decode_yaml_pair(line.removesuffix("\r"))
+    except YamlSyntaxError:
+        return None
+    return value if key == "authored_at" else None
+
+
+def _operator_wrote_timestamp(value: str, prose: str) -> bool:
+    """True when ``value`` is a full timestamp present in ``prose``.
+
+    Literal match only (#273): a time the operator wrote in another format is not
+    normalised, so it is stamped over.
+    """
+    if not _is_full_timestamp(value):
+        return False
+    # Whole token (#275): not flanked by other timestamp characters, so a longer
+    # timestamp, a dropped ``Z`` or a trailing fraction is not a match. One linear scan.
+    pattern = rf"(?<![0-9A-Za-z:+-]){re.escape(value)}(?![0-9A-Za-z:+-])(?!\.\d)"
+    return re.search(pattern, prose) is not None
+
+
+def _stamp_authored_at(record: str, authored_at: str, prose: str = "") -> str:
+    """Stamp ``authored_at`` on a compiled quoted-YAML ``record`` (#249, #273).
+
+    ADR-RFC-ARCH-004 §1.2: UTC, set once at record creation, never edited. A compiler
+    cannot know the creation time, so the stamp REPLACES any ``authored_at`` it wrote;
+    the one value kept is a full ISO-8601 timestamp that appears verbatim in the
+    operator's ``prose`` (a value the operator actually wrote). A record with several
+    ``authored_at`` keys is left alone so Gate A rejects it (no silent dedupe).
     Only a quoted-YAML record is touched, and only this one field; the TOKEN is never
     re-dated, so a TOKEN-date mismatch is left for Gate A's §1.3 check to reject. The
     caller runs Gate A on the result, which re-emits the canonical bytes (key order).
@@ -362,10 +412,21 @@ def _stamp_authored_at(record: str, authored_at: str) -> str:
     lines = record.split("\n")
     # The reader's fence rule (``_is_fence_line``): ``---`` plus at most one CR.
     close = next((i for i in range(1, len(lines)) if lines[i].removesuffix("\r") == "---"), None)
-    if close is None or any(_AUTHORED_AT_KEY_RE.match(line) for line in lines[1:close]):
+    if close is None:
         return record
     eol = "\r" if lines[0].endswith("\r") else ""  # the record's own line ending
     stamp = f"authored_at: {encode_yaml_scalar(authored_at)}{eol}"
+    existing = [i for i in range(1, close) if _AUTHORED_AT_KEY_RE.match(lines[i])]
+    if len(existing) > 1:
+        return record
+    if existing:
+        # Only a strictly formed lowercase line is ours to replace (#275); every other
+        # spelling or shape stays as written so Gate A rejects it.
+        value = _strict_authored_at_value(lines[existing[0]])
+        if value is None or _operator_wrote_timestamp(value, prose):
+            return record
+        lines[existing[0]] = stamp
+        return "\n".join(lines)
     return "\n".join([lines[0], stamp, *lines[1:]])
 
 
@@ -469,8 +530,8 @@ async def run_intake_pipeline(
 
         # Stamped before Gate A, the fidelity guard and canonicalisation (#249), so each
         # judges the exact final bytes.
-        octave = _stamp_authored_at(compiled["octave"], authored_at)
         prose = intake_context.prose_input
+        octave = _stamp_authored_at(compiled["octave"], authored_at, prose)
         passed, regex_result, errors, last_available = _gate(working_dir, octave, prose)
         if passed and write_adr:
             # Critical-Engineer: consulted for fidelity and corruption risk (CE on #246).

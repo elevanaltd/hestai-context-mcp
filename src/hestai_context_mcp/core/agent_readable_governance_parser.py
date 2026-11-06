@@ -1083,6 +1083,17 @@ def _split_yaml_pair(line: str) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
+def decode_yaml_pair(line: str) -> tuple[str, str]:
+    """Read one top-level ``key: "scalar"`` line exactly as the Gate A reader does.
+
+    Returns ``(key, decoded value)`` or raises :class:`YamlSyntaxError`. It is the reader's
+    own ``_split_yaml_pair`` + :func:`decode_yaml_scalar`, so a caller asking "would Gate A
+    accept this line?" shares one definition with the reader instead of a second regex.
+    """
+    key, rest = _split_yaml_pair(line)
+    return key, decode_yaml_scalar(rest)
+
+
 # Keys that must never appear inside a topic block (lowercase twins of Gate A's
 # TOPIC_BLOCK_RESERVED_KEYS): a nested copy could otherwise shadow a META field.
 _YAML_RESERVED_BLOCK_KEYS = frozenset(

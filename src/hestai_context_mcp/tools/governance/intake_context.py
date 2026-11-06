@@ -232,12 +232,14 @@ _COMPRESSION_CONTRACT = (
     "OUTPUT FORM:\n"
     "- A DECISION_RECORD is quoted YAML, never OCTAVE: a first line ---, then one line "
     'per field written key: "value" with the field name in lowercase (type, version, '
-    "token, status, tier, authored_at, decision, because, then any optional field), then "
+    "token, status, tier, decision, because, then any optional field), then "
     "a closing line --- with nothing after it. Every value is one double-quoted line; "
     'inside it write \\" for a double quote and \\\\ for a backslash. No lists, comments '
     "or flow syntax.\n"
     # #253: the YAML form is a v1.4 feature (ADR-RFC-ARCH-004 §1.1); the pipeline never
     # rewrites a version, so the compiler is told the fact up front.
+    "- Do NOT write an authored_at field: omit it. The pipeline stamps the creation time "
+    "itself, so never invent or copy a date or timestamp for it.\n"
     '- A quoted-YAML DECISION_RECORD declares version "1.4" (the YAML form is a v1.4 '
     'feature), written version: "1.4"; never an earlier version.\n'
     "- A facet card stays one OCTAVE block.\n"
