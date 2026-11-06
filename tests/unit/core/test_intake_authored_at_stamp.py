@@ -462,23 +462,46 @@ class TestOnlyALowercaseKeyIsReplaced:
         assert result["octave"] is None
 
 
+# A fabricated FULL timestamp (same date as the TOKEN): the value a repair must never keep.
+_FABRICATED = "2026-06-01T08:00:00Z"
+
+
+def _with_value_line(value: str, authored_line: str) -> str:
+    """A compiled record whose authored_at line is ``authored_line`` (built around ``value``)."""
+    return _compiled_with(value).replace(f'authored_at: "{value}"', authored_line)
+
+
+# Lines Gate A's reader REJECTS: each is left for Gate A, never repaired. Built over BOTH a
+# date-only and a full timestamp so the class cannot pass vacuously on a value Gate A would
+# reject anyway (the date-only value is rejected for its own reasons).
+_MALFORMED_SHAPES = [
+    "authored_at: {v}",
+    'authored_at: "{v}" junk',
+    'authored_at: "{v}',
+    'authored_at:"{v}"',
+    'authored_at : "{v}"',
+    'authored_at:\t"{v}"',
+]
+
+
 class TestMalformedLineIsNotRepaired:
     """cubic 4454614282: unquoted, trailing-garbage or oddly spaced lines stay for Gate A."""
 
-    @pytest.mark.parametrize(
-        "line",
-        [
-            "authored_at: 2026-11-03",
-            'authored_at: "2026-11-03" junk',
-            'authored_at: "2026-11-03',
-            'authored_at:"2026-11-03"',
-            'authored_at : "2026-11-03"',
-            'authored_at:  "2026-11-03"',
-        ],
-    )
-    def test_malformed_authored_at_line_is_returned_unchanged(self, line: str) -> None:
-        rec = _with_line(line)
+    @pytest.mark.parametrize("value", ["2026-11-03", _FABRICATED])
+    @pytest.mark.parametrize("shape", _MALFORMED_SHAPES)
+    def test_malformed_authored_at_line_is_returned_unchanged(self, shape: str, value: str) -> None:
+        rec = _with_value_line(value, shape.format(v=value))
         assert mod._stamp_authored_at(rec, _NOW_STAMP, "") == rec
+
+    @pytest.mark.parametrize("shape", _MALFORMED_SHAPES)
+    async def test_malformed_full_timestamp_is_rejected_by_gate_a_not_repaired(
+        self, shape: str, tmp_path: Path, scripted, clock
+    ) -> None:
+        clock(_NOW)
+        scripted(_with_value_line(_FABRICATED, shape.format(v=_FABRICATED)))
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is False
+        assert result["octave"] is None
 
     async def test_unquoted_value_is_rejected_by_gate_a_not_repaired(
         self, tmp_path: Path, scripted, clock
@@ -493,6 +516,46 @@ class TestMalformedLineIsNotRepaired:
         out = mod._stamp_authored_at(_with_line('authored_at: "2026-11-03"'), _NOW_STAMP, "")
         assert f'authored_at: "{_NOW_STAMP}"' in out
         assert out.count("authored_at:") == 1
+
+
+class TestLineGateAAcceptsIsReplaced:
+    """CRS at 51acec99: a line Gate A's reader ACCEPTS is well formed, so it is replaced.
+
+    Extra spaces after the colon are valid to the reader (``_split_yaml_pair`` +
+    ``decode_yaml_scalar`` strip them) and canonicalisation would then normalise the line,
+    letting a fabricated timestamp survive (#273 again). Replacing it is not YAML repair.
+    """
+
+    @pytest.mark.parametrize("spaces", [2, 3, 8])
+    async def test_double_spaced_fabricated_timestamp_is_stamped_over(
+        self, spaces: int, tmp_path: Path, scripted, clock
+    ) -> None:
+        clock(_NOW)
+        line = f'authored_at:{" " * spaces}"{_FABRICATED}"'
+        scripted(_with_value_line(_FABRICATED, line))
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is True, result["validation_errors"]
+        assert result["octave"] == _expected(_NOW_STAMP)
+        assert _FABRICATED not in result["octave"]
+
+    @pytest.mark.parametrize("spaces", [2, 3])
+    def test_double_spaced_line_is_replaced(self, spaces: int) -> None:
+        line = f'authored_at:{" " * spaces}"{_FABRICATED}"'
+        out = mod._stamp_authored_at(_with_value_line(_FABRICATED, line), _NOW_STAMP, "")
+        assert f'authored_at: "{_NOW_STAMP}"' in out
+        assert _FABRICATED not in out
+        assert out.count("authored_at:") == 1
+
+    async def test_double_spaced_timestamp_the_operator_wrote_is_kept(
+        self, tmp_path: Path, scripted, clock
+    ) -> None:
+        clock(_NOW)
+        line = f'authored_at:  "{_OPERATOR_AT}"'
+        scripted(_with_value_line(_OPERATOR_AT, line))
+        prose = f"Keep the review gate strict, authored {_OPERATOR_AT}."
+        result = await run_intake_pipeline(tmp_path, _ctx(prose))
+        assert result["ok"] is True, result["validation_errors"]
+        assert result["octave"] == _expected(_OPERATOR_AT)
 
 
 class TestKeptTimestampMustMatchAsAWholeToken:
