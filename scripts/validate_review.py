@@ -373,6 +373,14 @@ _SECURITY_PATTERNS = [
     r"(^|/)session/",
     r"(^|/)config/env",
     r"(^|/)path_utils",
+    # Credential-safety code (PROD::I2, issue #258): fail-closed redaction,
+    # provenance and the clock_out lifecycle tool that invokes redaction.
+    # Start-of-segment PREFIX matches (like the entries above), so redaction_*.py
+    # also qualifies -- intentional over-trigger, never an under-trigger.
+    # Path-only: never labels or titles.
+    r"(^|/)redaction",
+    r"(^|/)provenance",
+    r"(^|/)clock_out",
 ]
 
 # Security-load-bearing basenames (issue #1833): leading-dot, extensionless
@@ -515,6 +523,10 @@ def _sniff_octave_type(text: str) -> str:
     return ""
 
 
+# Root-anchored directories whose ``.md`` files are governance records (#259).
+_MD_GOVERNANCE_PATH_PREFIXES: tuple[str, ...] = (".hestai/decisions/", "docs/adr/")
+
+
 def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) -> str | None:
     """Classify a single file path into a content facet.
 
@@ -579,6 +591,15 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
         if octave_type in _EXECUTABLE_SPEC_TYPES:
             return "EXECUTABLE_SPEC"
         # All other .oct.md (RULE, STANDARD, NORTH_STAR_SUMMARY, unknown) -> GOVERNANCE
+        return "GOVERNANCE"
+
+    # Markdown decision records and ADRs are governance by PATH (#259). Decision
+    # records are quoted YAML in ``<token>.md`` files, so the markdown exemption
+    # below would otherwise return None and the GOVERNANCE facet (SR) would never
+    # apply to them. Checked before that exemption; casefolded because the same
+    # on-disk directory can reach here under a different casing on macOS.
+    folded = path.casefold()
+    if folded.endswith(".md") and folded.startswith(_MD_GOVERNANCE_PATH_PREFIXES):
         return "GOVERNANCE"
 
     # Exempt patterns
@@ -666,7 +687,7 @@ def _classify_old_side(record: dict[str, Any]) -> str | None:
         return None  # not a rename
     content = _recorded_content(record, "old_content")
     facet = _classify_file_facet(previous_path, content)
-    if content is CONTENT_UNAVAILABLE and facet == "GOVERNANCE":
+    if content is CONTENT_UNAVAILABLE and facet == "GOVERNANCE" and _is_octave_path(previous_path):
         return "EXECUTABLE_SPEC"
     return facet
 
