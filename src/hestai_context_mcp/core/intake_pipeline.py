@@ -41,7 +41,7 @@ from typing import Any, TypedDict
 from hestai_context_mcp.core.agent_readable_governance_parser import (
     YamlSyntaxError,
     collect_topic_blocks,
-    decode_yaml_scalar,
+    decode_yaml_pair,
     encode_yaml_scalar,
     is_yaml_front_matter,
     parse_decision_record,
@@ -363,18 +363,19 @@ def _is_full_timestamp(value: str) -> bool:
 
 
 def _strict_authored_at_value(line: str) -> str | None:
-    """The decoded value of a strictly formed ``authored_at: "<scalar>"`` line, else None.
+    """The decoded value of an ``authored_at`` line Gate A's reader accepts, else None.
 
-    Exactly the lowercase key, one space, then one valid double-quoted scalar and nothing
-    after it. Anything else (unquoted, trailing text, odd spacing) is Gate A's to reject.
+    "Well formed" is exactly what the reader accepts (``decode_yaml_pair``): the lowercase
+    key, one or more spaces, then one valid double-quoted scalar and nothing after it.
+    Extra spaces are valid to the reader, so such a line is ours to replace (#275, else a
+    fabricated value would survive canonicalisation). Anything the reader rejects (tab or
+    no space after the colon, unquoted, trailing text, uppercase) is Gate A's to reject.
     """
-    text = line.removesuffix("\r")
-    if not text.startswith('authored_at: "'):
-        return None
     try:
-        return decode_yaml_scalar(text.removeprefix("authored_at: "))
+        key, value = decode_yaml_pair(line.removesuffix("\r"))
     except YamlSyntaxError:
         return None
+    return value if key == "authored_at" else None
 
 
 def _operator_wrote_timestamp(value: str, prose: str) -> bool:
