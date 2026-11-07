@@ -1,7 +1,7 @@
 ===NORTH_STAR_SUMMARY===
 META:
   TYPE::NORTH_STAR_SUMMARY
-  VERSION::"1.0"
+  VERSION::"1.1"
   NAMESPACE::PROD
   STATUS::APPROVED
   APPROVED_BY::"Human operator (2026-04-17)"
@@ -17,8 +17,8 @@ META:
   TRANSPORT::"stdio JSON-RPC (python -m hestai_context_mcp)"
   PHASE::B1_FOUNDATION_COMPLETE
 §2::IMMUTABLES
-  I1::"SESSION_LIFECYCLE_INTEGRITY<PRINCIPLE::every_session_has_clean_create_and_archive_lifecycle,WHY::memory_accumulation_collapses_if_sessions_orphan_or_lose_provenance,STATUS::IMPLEMENTED>"
-  I2::"CREDENTIAL_SAFETY<PRINCIPLE::zero_credentials_persist_in_archives_fail_closed_redaction,WHY::single_leaked_credential_is_security_incident_data_loss_over_data_exposure,STATUS::IMPLEMENTED>"
+  I1::"SESSION_LIFECYCLE_INTEGRITY<PRINCIPLE::every_session_has_a_clean_create_lifecycle_and_archive_via_clock_out_is_optional_and_explicit_never_automatic,WHY::memory_accumulation_collapses_if_sessions_orphan_or_lose_provenance,STATUS::IMPLEMENTED>"
+  I2::"CREDENTIAL_SAFETY<PRINCIPLE::known_credential_forms_always_removed_from_what_is_persisted_redaction_fails_closed_no_write_on_error_patterns_cannot_catch_every_credential_residual_risk_A4,WHY::single_leaked_credential_is_security_incident_data_loss_over_data_exposure,STATUS::IMPLEMENTED>"
   I3::"PROVIDER_AGNOSTIC_CONTEXT<PRINCIPLE::context_synthesis_identical_regardless_of_AI_provider_or_CLI,WHY::three_service_separation_collapses_if_context_engine_couples_to_provider,STATUS::IMPLEMENTED>"
   I4::"STRUCTURED_RETURN_SHAPES<PRINCIPLE::all_tools_return_structured_dicts_with_defined_fields_not_blobs,WHY::Payload_Compiler_programmatically_extracts_fields_for_KVAEPH_Position_3,STATUS::IMPLEMENTED>"
   I5::"READ_ONLY_CONTEXT_QUERY<PRINCIPLE::get_context_has_zero_side_effects_pure_read,WHY::Payload_Compiler_calls_freely_repeatedly_in_parallel_must_be_safe,STATUS::IMPLEMENTED>"

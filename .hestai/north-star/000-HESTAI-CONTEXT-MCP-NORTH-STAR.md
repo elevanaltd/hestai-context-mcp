@@ -1,7 +1,7 @@
 ---
 type: NORTH_STAR
 id: hestai-context-mcp-north-star
-version: 1.0
+version: 1.1
 status: APPROVED
 purpose: Product North Star for hestai-context-mcp — the Memory and Environment service
 inherits: system-hestai-north-star
@@ -26,6 +26,8 @@ This North Star document establishes the immutable requirements for **hestai-con
 **Authority**: All work on this product (B0-B5 phases) must align with these requirements. Any detected misalignment triggers immediate escalation per the Protection Clause below.
 
 **Amendment Process**: Changes to immutables require formal review and re-approval. This is a binding commitment, not a living suggestion.
+
+**Amendment note (v1.0 to v1.1)**: PROD I1 and I2 were reworded to promise only what the service does (rulings `HO-CREDENTIAL-PROMISE-AND-CLOCK-OUT-20261103` and `HO-PROD-I1-REWORD-AND-SCAN-20261107`). Under the Amendment Process above, this change needs formal review and operator re-approval of the final text before it is binding.
 
 **Inheritance**: This document inherits from and must satisfy the System North Star (SYS::I1-I6). Where a PROD immutable conflicts with a SYS immutable, the SYS immutable takes precedence per System Standard section 4.
 
@@ -97,7 +99,7 @@ These requirements are **binding for the entire product**. Each has been evaluat
 
 ### I1: SESSION LIFECYCLE INTEGRITY
 
-**Requirement**: Every agent session must have a clean, complete lifecycle: creation (clock_in) and archival (clock_out). A session that is created must be archivable. A session that is archived must have been created. Orphaned sessions are a system failure.
+**Requirement**: Every agent session must have a clean lifecycle: creation (clock_in), and optionally archival (clock_out). Archiving via clock_out is explicit and optional, never automatic for every session. A session that is created must be archivable. A session that is archived must have been created. Orphaned sessions are a system failure.
 
 **Technology-Neutral Expression**: Work sessions produce persistent records with defined start and end boundaries. The recording mechanism may change; the lifecycle completeness requirement cannot.
 
@@ -106,16 +108,16 @@ These requirements are **binding for the entire product**. Each has been evaluat
 **Validation Plan**:
 - Every clock_in returns a session_id that clock_out can consume
 - Active sessions are discoverable via directory scan
-- Archived sessions contain session metadata, redacted transcript, and extracted learnings
+- Archived sessions (when clock_out is called) contain session metadata, redacted transcript, and extracted learnings
 - No code path allows session creation without a corresponding archival mechanism
 
 ---
 
 ### I2: CREDENTIAL SAFETY
 
-**Requirement**: No credentials (API keys, tokens, passwords, secrets) may persist in archived session data. The RedactionEngine operates fail-closed: if redaction fails, archival is blocked rather than proceeding with unredacted content.
+**Requirement**: Known credential forms (API keys, tokens, passwords, secrets) are always removed from what the service persists. Redaction fails closed: if redaction errors, nothing is written. Patterns cannot catch every credential; an unrecognised credential form can persist. This is the residual risk (assumption A4).
 
-**Technology-Neutral Expression**: Sensitive authentication material must be removed from persistent records before storage. The removal mechanism may evolve; the fail-closed behavior and zero-persistence guarantee cannot.
+**Technology-Neutral Expression**: Sensitive authentication material must be removed from persistent records before storage. The removal mechanism may evolve; the removal of known forms and the fail-closed behavior cannot.
 
 **Rationale**: Session transcripts contain whatever the agent and user discussed, including environment variables, API keys pasted in error, and token values. A single leaked credential in an archived transcript is a security incident. The fail-closed design means the system chooses data loss (no archive) over data exposure (unredacted archive). This is the correct trade-off and it is not negotiable.
 
@@ -233,20 +235,20 @@ These aspects are important but negotiable within the constraints of the immutab
 ### This service is succeeding when:
 
 1. **Context continuity**: An agent clocking into a project immediately knows what happened in the last session without human explanation.
-2. **Zero credential exposure**: No archived session transcript contains detectable credentials. Ever.
+2. **Known credentials removed**: No archived session transcript contains a credential in a known form. Forms the patterns do not recognise are the residual risk (A4).
 3. **Provider blindness**: Claude, Codex, Gemini, and Goose agents all receive identical context from get_context.
 4. **Payload Compiler integration**: The Workbench calls get_context at KVAEPH Position 3 and programmatically extracts fields without special-case handling.
 5. **Learnings accumulation**: The learnings index grows with each session. Decisions, blockers, and learnings from past sessions are discoverable.
-6. **Clean lifecycle**: Active sessions count stays bounded. clock_out reliably archives and cleans up. No orphaned session directories accumulate.
+6. **Clean lifecycle**: Active sessions count stays bounded. When clock_out is called it reliably archives and cleans up. No orphaned session directories accumulate.
 7. **Independence proven**: The service runs, tests pass, and agents work without hestai-mcp installed anywhere.
 
 ### This service has failed when:
 
-1. A credential appears in an archived transcript.
+1. A credential in a known form appears in an archived transcript, or redaction errors and data is still written.
 2. get_context produces different results for different providers.
 3. get_context creates files or directories as a side effect.
 4. The Payload Compiler cannot programmatically extract context fields from tool responses.
-5. Session directories accumulate without archival.
+5. Session directories accumulate with no way to archive or clean them.
 6. A change to hestai-mcp breaks this service.
 
 ---
