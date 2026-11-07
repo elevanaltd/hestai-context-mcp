@@ -1,0 +1,16 @@
+---
+type: "DECISION_RECORD"
+version: "1.4"
+token: "HO-REVIEW-GATE-MAIN-REF-20261107"
+status: "PROPOSED"
+tier: "OPERATIONAL"
+authored_at: "2026-11-07T02:46:51Z"
+decision: "Set org ruleset 12626210 workflow ref to refs/heads/main without sha; review-gate releases need no operator ruleset edit, while the tooling ref remains a full commit SHA updated per release."
+because: "Re-pointing the ruleset to each pin-PR merge commit costs operator time, the friction named by the existing record's re-review trigger."
+extends: "HO-REVIEW-GATE-PIN-RELEASE-20261025"
+scope: "Only the ruleset-sha-pin part of HO-REVIEW-GATE-PIN-RELEASE-20261025 is superseded; the rest is unchanged. The operator set org ruleset 12626210 to serve hestai-context-mcp .github/workflows/review-gate.yml from refs/heads/main with no sha on 2026-11-07, measured with gh api orgs/elevanaltd/rulesets/12626210, where workflows[0] has ref refs/heads/main and no sha. Previously, the operator re-pointed the ruleset sha to each pin-PR merge commit. The tooling ref inside review-gate.yml remains a full commit SHA, moved by each release PR."
+compression_tier: "CONSERVATIVE"
+consequence: "Any merge to hestai-context-mcp main touching .github/workflows/review-gate.yml goes live in all nine ruleset repos upon merge, with no staging; raise such PRs with HC before merge."
+loss_profile: "[preserve:operator_quote∧ruleset_ID∧ref∧no_sha∧measurement∧supersession_scope∧release_effect∧nine_repos∧HC_gate∧tooling_SHA∧rationale,drop:narrative_filler]"
+operator_ruling: "Operator ruling, first-party in the ho-records-1 session on 2026-11-07: \"Follow main on purpose so we don't habe to keep updating.\""
+---
