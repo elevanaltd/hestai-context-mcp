@@ -115,17 +115,18 @@ These requirements are **binding for the entire product**. Each has been evaluat
 
 ### I2: CREDENTIAL SAFETY
 
-**Requirement**: Known credential forms (API keys, tokens, passwords, secrets) are always removed from what the service persists. Redaction fails closed: if redaction errors, nothing is written. Patterns cannot catch every credential; an unrecognised credential form can persist. This is the residual risk (assumption A4).
+**Requirement**: Known credential forms (API keys, tokens, passwords, secrets) are removed from what clock_out writes: the archived transcript, the learnings index, its response and the portable payload. Redaction fails closed: if redaction errors, no unredacted content is written: the affected values are dropped, a partial archive is removed and publication is blocked. Active session metadata (session.json, with the caller-supplied role and focus) is not redacted and is outside this promise. Patterns cannot catch every credential; an unrecognised credential form can persist. This is the residual risk (assumption A4). The promise covers entries written after #255 was fixed by #257; earlier entries are not rewritten and are outside it.
 
-**Technology-Neutral Expression**: Known forms of sensitive authentication material must be removed from persistent records before storage, and a failure to remove them must stop the write. The removal mechanism may evolve; the removal of known forms and the fail-closed behavior cannot.
+**Technology-Neutral Expression**: Known forms of sensitive authentication material must be removed from archived and indexed records before they are written, and a failure to remove them must not let unredacted content through. The removal mechanism may evolve; the removal of known forms and the fail-closed behavior cannot.
 
 **Rationale**: Session transcripts contain whatever the agent and user discussed, including environment variables, API keys pasted in error, and token values. A single leaked credential in an archived transcript is a security incident. The fail-closed design means the system chooses data loss (no archive) over data exposure (unredacted archive). This is the correct trade-off and it is not negotiable.
 
 **Validation Plan**:
 - RedactionEngine detects all credential pattern categories (AI API keys, AWS keys, database URIs, generic tokens, etc.)
 - Redaction replaces matched content with non-reversible markers
-- If RedactionEngine.copy_and_redact raises an exception, clock_out does NOT write an archive file
-- The same holds for the other persisted outputs (learnings index, clock_out response, portable payload): if redaction errors, nothing is written
+- If RedactionEngine.copy_and_redact raises an exception, clock_out removes any partial archive and blocks publication
+- If redaction of the extracted learnings, description or session metadata errors, clock_out drops the affected values, appends a learnings index entry with empty lists, and blocks publication
+- Active session metadata in session.json (caller-supplied role and focus) is not redacted; it is outside this promise
 - Patterns cannot catch every credential (A4); the tests show known forms are removed, not that no credential can persist
 - Credential patterns are tested against real-world format examples
 
@@ -237,7 +238,7 @@ These aspects are important but negotiable within the constraints of the immutab
 ### This service is succeeding when:
 
 1. **Context continuity**: An agent clocking into a project immediately knows what happened in the last session without human explanation.
-2. **Known credentials removed**: No archived session transcript, learnings index entry, clock_out response or portable payload contains a credential in a known form. Forms the patterns do not recognise are the residual risk (A4).
+2. **Known credentials removed**: For entries written after #255 was fixed by #257, no archived session transcript, learnings index entry, clock_out response or portable payload contains a credential in a known form. Earlier entries are not rewritten and are outside this criterion. Forms the patterns do not recognise are the residual risk (A4).
 3. **Provider blindness**: Claude, Codex, Gemini, and Goose agents all receive identical context from get_context.
 4. **Payload Compiler integration**: The Workbench calls get_context at KVAEPH Position 3 and programmatically extracts fields without special-case handling.
 5. **Learnings accumulation**: The learnings index grows with each archived session. Decisions, blockers, and learnings from past sessions are discoverable.
@@ -246,7 +247,7 @@ These aspects are important but negotiable within the constraints of the immutab
 
 ### This service has failed when:
 
-1. A credential in a known form appears in an archived transcript, learnings index entry, clock_out response or portable payload, or redaction errors and data is still written.
+1. A credential in a known form appears in an archived transcript, learnings index entry, clock_out response or portable payload, or redaction errors and unredacted content is still written.
 2. get_context produces different results for different providers.
 3. get_context creates files or directories as a side effect.
 4. The Payload Compiler cannot programmatically extract context fields from tool responses.
