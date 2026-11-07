@@ -2,7 +2,7 @@
 type: NORTH_STAR
 id: hestai-context-mcp-north-star
 version: 1.1
-status: APPROVED
+status: v1.0 APPROVED 2026-04-17; v1.1 PENDING operator re-approval
 purpose: Product North Star for hestai-context-mcp — the Memory and Environment service
 inherits: system-hestai-north-star
 created: 2026-04-17
@@ -14,8 +14,8 @@ namespace: PROD
 **Product**: hestai-context-mcp
 **Purpose**: Persistent memory and environmental context for AI-assisted development sessions
 **Phase**: B1 (Phase 1 harvest complete, 4 tools operational)
-**Status**: APPROVED
-**Approved By**: Human operator (2026-04-17)
+**Status**: v1.0 APPROVED (2026-04-17); v1.1 PENDING operator re-approval of the final text on PR #281
+**Approved By**: Human operator (v1.0, 2026-04-17); v1.1 not yet approved
 
 ---
 
@@ -66,14 +66,14 @@ The destination: any AI agent, on any provider, dispatched by any mechanism, can
 hestai-context-mcp is **the institutional memory of the development environment**.
 
 It is:
-- **A session lifecycle manager**: Clean create-and-archive lifecycle for agent work sessions (clock_in / clock_out)
+- **A session lifecycle manager**: Clean create lifecycle for agent work sessions, with optional explicit archival (clock_in / clock_out)
 - **A context synthesis engine**: Reads .hestai/ state, North Stars, git state, and project context to return structured environmental awareness
 - **A learnings extraction pipeline**: Parses transcripts, redacts credentials, indexes decisions/blockers/learnings for future sessions
 - **A review infrastructure**: Structured PR review verdicts with CI gate clearing, multi-role review, dry-run validation
 - **A read-only context provider**: The Payload Compiler (Workbench) calls get_context at KVAEPH Position 3 for zero-side-effect context synthesis
 - **A stdio MCP server**: Python, JSON-RPC, subprocess transport. The "Git/VS Code" pattern -- no daemon, no ports, no monitoring
 
-**Core Metaphor**: The project's long-term memory. Each session reads from it (context synthesis) and writes back to it (learnings extraction). The memory accumulates. The next agent is smarter than the last because this service remembers what happened.
+**Core Metaphor**: The project's long-term memory. Each session reads from it (context synthesis), and each archived session writes back to it (learnings extraction). The memory accumulates. The next agent is smarter than the last because this service remembers what happened.
 
 ### What hestai-context-mcp IS NOT
 
@@ -99,11 +99,11 @@ These requirements are **binding for the entire product**. Each has been evaluat
 
 ### I1: SESSION LIFECYCLE INTEGRITY
 
-**Requirement**: Every agent session must have a clean lifecycle: creation (clock_in), and optionally archival (clock_out). Archiving via clock_out is explicit and optional, never automatic for every session. A session that is created must be archivable. A session that is archived must have been created. Orphaned sessions are a system failure.
+**Requirement**: Every agent session must have a clean lifecycle: creation (clock_in), and optionally archival (clock_out). Archiving via clock_out is explicit and optional, never automatic for every session. A session that is created must be archivable: clock_out can close it and clean up its session folder. A session that is archived must have been created. An orphan is a session folder that can be neither archived nor cleaned; orphaned sessions are a system failure.
 
 **Technology-Neutral Expression**: Work sessions produce persistent records with defined start and end boundaries. The recording mechanism may change; the lifecycle completeness requirement cannot.
 
-**Rationale**: Without lifecycle integrity, the memory accumulation model collapses. If sessions can be created without archival, learnings are lost. If sessions can be archived without creation, the provenance chain breaks. The entire value proposition of this service depends on sessions being complete units of work with discoverable outcomes.
+**Rationale**: Without lifecycle integrity, the memory accumulation model collapses. Archiving is the explicit way to keep learnings; a session that is not archived is not kept. If sessions can be archived without creation, the provenance chain breaks. The entire value proposition of this service depends on sessions being complete units of work with discoverable outcomes.
 
 **Validation Plan**:
 - Every clock_in returns a session_id that clock_out can consume
@@ -117,7 +117,7 @@ These requirements are **binding for the entire product**. Each has been evaluat
 
 **Requirement**: Known credential forms (API keys, tokens, passwords, secrets) are always removed from what the service persists. Redaction fails closed: if redaction errors, nothing is written. Patterns cannot catch every credential; an unrecognised credential form can persist. This is the residual risk (assumption A4).
 
-**Technology-Neutral Expression**: Sensitive authentication material must be removed from persistent records before storage. The removal mechanism may evolve; the removal of known forms and the fail-closed behavior cannot.
+**Technology-Neutral Expression**: Known forms of sensitive authentication material must be removed from persistent records before storage, and a failure to remove them must stop the write. The removal mechanism may evolve; the removal of known forms and the fail-closed behavior cannot.
 
 **Rationale**: Session transcripts contain whatever the agent and user discussed, including environment variables, API keys pasted in error, and token values. A single leaked credential in an archived transcript is a security incident. The fail-closed design means the system chooses data loss (no archive) over data exposure (unredacted archive). This is the correct trade-off and it is not negotiable.
 
@@ -125,6 +125,8 @@ These requirements are **binding for the entire product**. Each has been evaluat
 - RedactionEngine detects all credential pattern categories (AI API keys, AWS keys, database URIs, generic tokens, etc.)
 - Redaction replaces matched content with non-reversible markers
 - If RedactionEngine.copy_and_redact raises an exception, clock_out does NOT write an archive file
+- The same holds for the other persisted outputs (learnings index, clock_out response, portable payload): if redaction errors, nothing is written
+- Patterns cannot catch every credential (A4); the tests show known forms are removed, not that no credential can persist
 - Credential patterns are tested against real-world format examples
 
 ---
@@ -235,16 +237,16 @@ These aspects are important but negotiable within the constraints of the immutab
 ### This service is succeeding when:
 
 1. **Context continuity**: An agent clocking into a project immediately knows what happened in the last session without human explanation.
-2. **Known credentials removed**: No archived session transcript contains a credential in a known form. Forms the patterns do not recognise are the residual risk (A4).
+2. **Known credentials removed**: No archived session transcript, learnings index entry, clock_out response or portable payload contains a credential in a known form. Forms the patterns do not recognise are the residual risk (A4).
 3. **Provider blindness**: Claude, Codex, Gemini, and Goose agents all receive identical context from get_context.
 4. **Payload Compiler integration**: The Workbench calls get_context at KVAEPH Position 3 and programmatically extracts fields without special-case handling.
-5. **Learnings accumulation**: The learnings index grows with each session. Decisions, blockers, and learnings from past sessions are discoverable.
+5. **Learnings accumulation**: The learnings index grows with each archived session. Decisions, blockers, and learnings from past sessions are discoverable.
 6. **Clean lifecycle**: Active sessions count stays bounded. When clock_out is called it reliably archives and cleans up. No orphaned session directories accumulate.
 7. **Independence proven**: The service runs, tests pass, and agents work without hestai-mcp installed anywhere.
 
 ### This service has failed when:
 
-1. A credential in a known form appears in an archived transcript, or redaction errors and data is still written.
+1. A credential in a known form appears in an archived transcript, learnings index entry, clock_out response or portable payload, or redaction errors and data is still written.
 2. get_context produces different results for different providers.
 3. get_context creates files or directories as a side effect.
 4. The Payload Compiler cannot programmatically extract context fields from tool responses.
@@ -299,7 +301,7 @@ These are the specific failure modes this North Star is designed to prevent:
 
 **Date**: 2026-04-17
 **Approver**: Human operator
-**Status**: APPROVED
+**Status**: APPROVED (v1.0 only; v1.1 is pending operator re-approval)
 
 **Ceremony Transcript**:
 > **Architect**: "Do you approve these 6 Immutables as the binding North Star for hestai-context-mcp? Each has been evaluated against the Immutability Oath. The service identity, boundary clarity, and assumption register are documented above."

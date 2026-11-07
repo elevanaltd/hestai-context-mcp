@@ -3,8 +3,8 @@ META:
   TYPE::NORTH_STAR_SUMMARY
   VERSION::"1.1"
   NAMESPACE::PROD
-  STATUS::APPROVED
-  APPROVED_BY::"Human operator (2026-04-17)"
+  STATUS::"v1.0 APPROVED; v1.1 PENDING operator re-approval"
+  APPROVED_BY::"Human operator (v1.0, 2026-04-17); v1.1 not yet approved"
   FULL_DOCUMENT::"000-HESTAI-CONTEXT-MCP-NORTH-STAR.md"
   COMPRESSION::"311 to 95 lines (3.3:1)"
   LAST_UPDATED::"2026-04-30"
