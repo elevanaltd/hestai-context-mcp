@@ -108,7 +108,7 @@ These requirements are **binding for the entire product**. Each has been evaluat
 **Validation Plan**:
 - Every clock_in returns a session_id that clock_out can consume
 - Active sessions are discoverable via directory scan
-- Archived sessions (when clock_out is called) contain session metadata, redacted transcript, and extracted learnings
+- Archived sessions (when clock_out is called) contain session metadata and extracted learnings; when a transcript is available to clock_out, the archive also contains it, redacted; when none is available, its absence is recorded and the archive does not fail
 - No code path allows session creation without a corresponding archival mechanism
 
 ---
