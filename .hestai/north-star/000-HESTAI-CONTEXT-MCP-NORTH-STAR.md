@@ -1,8 +1,8 @@
 ---
 type: NORTH_STAR
 id: hestai-context-mcp-north-star
-version: 1.0
-status: APPROVED
+version: 1.1
+status: v1.0 APPROVED 2026-04-17; v1.1 PENDING operator re-approval
 purpose: Product North Star for hestai-context-mcp — the Memory and Environment service
 inherits: system-hestai-north-star
 created: 2026-04-17
@@ -14,8 +14,8 @@ namespace: PROD
 **Product**: hestai-context-mcp
 **Purpose**: Persistent memory and environmental context for AI-assisted development sessions
 **Phase**: B1 (Phase 1 harvest complete, 4 tools operational)
-**Status**: APPROVED
-**Approved By**: Human operator (2026-04-17)
+**Status**: v1.0 APPROVED (2026-04-17); v1.1 PENDING operator re-approval of the final text on PR #281
+**Approved By**: Human operator (v1.0, 2026-04-17); v1.1 not yet approved
 
 ---
 
@@ -26,6 +26,8 @@ This North Star document establishes the immutable requirements for **hestai-con
 **Authority**: All work on this product (B0-B5 phases) must align with these requirements. Any detected misalignment triggers immediate escalation per the Protection Clause below.
 
 **Amendment Process**: Changes to immutables require formal review and re-approval. This is a binding commitment, not a living suggestion.
+
+**Amendment note (v1.0 to v1.1)**: PROD I1 and I2 were reworded to promise only what the service does (rulings `HO-CREDENTIAL-PROMISE-AND-CLOCK-OUT-20261103` and `HO-PROD-I1-REWORD-AND-SCAN-20261107`). Under the Amendment Process above, this change needs formal review and operator re-approval of the final text before it is binding.
 
 **Inheritance**: This document inherits from and must satisfy the System North Star (SYS::I1-I6). Where a PROD immutable conflicts with a SYS immutable, the SYS immutable takes precedence per System Standard section 4.
 
@@ -64,14 +66,14 @@ The destination: any AI agent, on any provider, dispatched by any mechanism, can
 hestai-context-mcp is **the institutional memory of the development environment**.
 
 It is:
-- **A session lifecycle manager**: Clean create-and-archive lifecycle for agent work sessions (clock_in / clock_out)
+- **A session lifecycle manager**: Clean create lifecycle for agent work sessions, with optional explicit archival (clock_in / clock_out)
 - **A context synthesis engine**: Reads .hestai/ state, North Stars, git state, and project context to return structured environmental awareness
 - **A learnings extraction pipeline**: Parses transcripts, redacts credentials, indexes decisions/blockers/learnings for future sessions
 - **A review infrastructure**: Structured PR review verdicts with CI gate clearing, multi-role review, dry-run validation
 - **A read-only context provider**: The Payload Compiler (Workbench) calls get_context at KVAEPH Position 3 for zero-side-effect context synthesis
 - **A stdio MCP server**: Python, JSON-RPC, subprocess transport. The "Git/VS Code" pattern -- no daemon, no ports, no monitoring
 
-**Core Metaphor**: The project's long-term memory. Each session reads from it (context synthesis) and writes back to it (learnings extraction). The memory accumulates. The next agent is smarter than the last because this service remembers what happened.
+**Core Metaphor**: The project's long-term memory. Each session reads from it (context synthesis), and each archived session writes back to it (learnings extraction). The memory accumulates. The next agent is smarter than the last because this service remembers what happened.
 
 ### What hestai-context-mcp IS NOT
 
@@ -97,32 +99,35 @@ These requirements are **binding for the entire product**. Each has been evaluat
 
 ### I1: SESSION LIFECYCLE INTEGRITY
 
-**Requirement**: Every agent session must have a clean, complete lifecycle: creation (clock_in) and archival (clock_out). A session that is created must be archivable. A session that is archived must have been created. Orphaned sessions are a system failure.
+**Requirement**: Every agent session must have a clean lifecycle: creation (clock_in), and optionally archival (clock_out). Archiving via clock_out is explicit and optional, never automatic for every session. A session that is created must be archivable: clock_out can close it and clean up its session folder. A session that is archived must have been created. An orphan is a session folder that can be neither archived nor cleaned; orphaned sessions are a system failure.
 
 **Technology-Neutral Expression**: Work sessions produce persistent records with defined start and end boundaries. The recording mechanism may change; the lifecycle completeness requirement cannot.
 
-**Rationale**: Without lifecycle integrity, the memory accumulation model collapses. If sessions can be created without archival, learnings are lost. If sessions can be archived without creation, the provenance chain breaks. The entire value proposition of this service depends on sessions being complete units of work with discoverable outcomes.
+**Rationale**: Without lifecycle integrity, the memory accumulation model collapses. Archiving is the explicit way to keep learnings; a session that is not archived is not kept. If sessions can be archived without creation, the provenance chain breaks. The entire value proposition of this service depends on sessions being complete units of work with discoverable outcomes.
 
 **Validation Plan**:
 - Every clock_in returns a session_id that clock_out can consume
 - Active sessions are discoverable via directory scan
-- Archived sessions contain session metadata, redacted transcript, and extracted learnings
+- Archived sessions (when clock_out is called) contain session metadata and extracted learnings; when a transcript is available to clock_out, the archive also contains it, redacted; when none is available, its absence is recorded and the archive does not fail
 - No code path allows session creation without a corresponding archival mechanism
 
 ---
 
 ### I2: CREDENTIAL SAFETY
 
-**Requirement**: No credentials (API keys, tokens, passwords, secrets) may persist in archived session data. The RedactionEngine operates fail-closed: if redaction fails, archival is blocked rather than proceeding with unredacted content.
+**Requirement**: Known credential forms (API keys, tokens, passwords, secrets) are removed from what clock_out writes: the archived transcript, the learnings index, its response and the portable payload. Redaction fails closed: if redaction errors, no unredacted content is written: the affected values are dropped, a partial archive is removed and publication is blocked. Active session metadata (session.json, with the caller-supplied role and focus) is not redacted and is outside this promise. Patterns cannot catch every credential; an unrecognised credential form can persist. This is the residual risk (assumption A4). The promise covers entries written after #255 was fixed by #257; earlier entries are not rewritten and are outside it.
 
-**Technology-Neutral Expression**: Sensitive authentication material must be removed from persistent records before storage. The removal mechanism may evolve; the fail-closed behavior and zero-persistence guarantee cannot.
+**Technology-Neutral Expression**: Known forms of sensitive authentication material must be removed from what clock_out writes (the archived transcript, the learnings index, the clock_out response and the portable payload) before it is written, and a failure to remove them must not let unredacted content through. The removal mechanism may evolve; the removal of known forms and the fail-closed behavior cannot.
 
 **Rationale**: Session transcripts contain whatever the agent and user discussed, including environment variables, API keys pasted in error, and token values. A single leaked credential in an archived transcript is a security incident. The fail-closed design means the system chooses data loss (no archive) over data exposure (unredacted archive). This is the correct trade-off and it is not negotiable.
 
 **Validation Plan**:
 - RedactionEngine detects all credential pattern categories (AI API keys, AWS keys, database URIs, generic tokens, etc.)
 - Redaction replaces matched content with non-reversible markers
-- If RedactionEngine.copy_and_redact raises an exception, clock_out does NOT write an archive file
+- If RedactionEngine.copy_and_redact raises an exception, clock_out removes any partial archive and blocks publication
+- If redaction of the extracted learnings, description or session metadata errors, clock_out drops the affected values, appends a learnings index entry with empty lists, and blocks publication
+- Active session metadata in session.json (caller-supplied role and focus) is not redacted; it is outside this promise
+- Patterns cannot catch every credential (A4); the tests show known forms are removed, not that no credential can persist
 - Credential patterns are tested against real-world format examples
 
 ---
@@ -233,20 +238,20 @@ These aspects are important but negotiable within the constraints of the immutab
 ### This service is succeeding when:
 
 1. **Context continuity**: An agent clocking into a project immediately knows what happened in the last session without human explanation.
-2. **Zero credential exposure**: No archived session transcript contains detectable credentials. Ever.
+2. **Known credentials removed**: For entries written after #255 was fixed by #257, no archived session transcript, learnings index entry, clock_out response or portable payload contains a credential in a known form. Earlier entries are not rewritten and are outside this criterion. Forms the patterns do not recognise are the residual risk (A4).
 3. **Provider blindness**: Claude, Codex, Gemini, and Goose agents all receive identical context from get_context.
 4. **Payload Compiler integration**: The Workbench calls get_context at KVAEPH Position 3 and programmatically extracts fields without special-case handling.
-5. **Learnings accumulation**: The learnings index grows with each session. Decisions, blockers, and learnings from past sessions are discoverable.
-6. **Clean lifecycle**: Active sessions count stays bounded. clock_out reliably archives and cleans up. No orphaned session directories accumulate.
+5. **Learnings accumulation**: The learnings index grows with each archived session. Decisions, blockers, and learnings from past sessions are discoverable.
+6. **Clean lifecycle**: Active sessions count stays bounded. When clock_out is called it reliably archives and cleans up. No orphaned session directories accumulate.
 7. **Independence proven**: The service runs, tests pass, and agents work without hestai-mcp installed anywhere.
 
 ### This service has failed when:
 
-1. A credential appears in an archived transcript.
+1. A credential in a known form appears in an archived transcript, learnings index entry, clock_out response or portable payload, or redaction errors and unredacted content is still written.
 2. get_context produces different results for different providers.
 3. get_context creates files or directories as a side effect.
 4. The Payload Compiler cannot programmatically extract context fields from tool responses.
-5. Session directories accumulate without archival.
+5. Session directories accumulate with no way to archive or clean them.
 6. A change to hestai-mcp breaks this service.
 
 ---
@@ -297,7 +302,7 @@ These are the specific failure modes this North Star is designed to prevent:
 
 **Date**: 2026-04-17
 **Approver**: Human operator
-**Status**: APPROVED
+**Status**: APPROVED (v1.0 only; v1.1 is pending operator re-approval)
 
 **Ceremony Transcript**:
 > **Architect**: "Do you approve these 6 Immutables as the binding North Star for hestai-context-mcp? Each has been evaluated against the Immutability Oath. The service identity, boundary clarity, and assumption register are documented above."
