@@ -34,7 +34,12 @@ import pytest
 
 import hestai_context_mcp.core.intake_compiler as compiler_mod
 import hestai_context_mcp.core.intake_pipeline as mod
-from hestai_context_mcp.core.agent_readable_governance_parser import emit_yaml_record
+from hestai_context_mcp.core.agent_readable_governance_parser import (
+    YamlSyntaxError,
+    decode_yaml_pair,
+    diagnose_yaml_record,
+    emit_yaml_record,
+)
 from hestai_context_mcp.core.intake_pipeline import run_intake_pipeline
 from hestai_context_mcp.ports.ai_client import CompletionRequest, CompletionResult
 from hestai_context_mcp.tools.governance.intake_context import IntakeContext
@@ -589,3 +594,47 @@ class TestKeptTimestampMustMatchAsAWholeToken:
     def test_whole_token_is_kept(self, prose: str) -> None:
         rec = _compiled_with("2026-11-01T10:00:00Z")
         assert mod._stamp_authored_at(rec, _NOW_STAMP, prose) == rec
+
+
+class TestLoneSurrogateLineIsLeftForGateA:
+    """#278: a lone surrogate on the authored_at line is Gate A's to reject (invalid_utf8).
+
+    The reader loop checks every fenced line for a lone surrogate BEFORE it splits the
+    pair. The stamp's "would Gate A accept this line?" question (``decode_yaml_pair``)
+    must share that check, or the stamp overwrites the line and hides the defect.
+    """
+
+    _SURROGATE_LINES = [
+        'authored_at: "2026-06-01T08:00:00Z\udc80"',
+        'authored_at: "\ud800"',
+        'authored_at: "2026-06-01\udfff08:00:00Z"',
+    ]
+
+    @pytest.mark.parametrize("line", _SURROGATE_LINES)
+    def test_stamp_leaves_a_lone_surrogate_line_unchanged(self, line: str) -> None:
+        rec = _with_line(line)
+        assert mod._stamp_authored_at(rec, _NOW_STAMP, "") == rec
+
+    @pytest.mark.parametrize("line", _SURROGATE_LINES)
+    async def test_pipeline_rejects_with_invalid_utf8_and_does_not_stamp_over_it(
+        self, line: str, tmp_path: Path, scripted, clock
+    ) -> None:
+        clock(_NOW)
+        scripted(_with_line(line))
+        result = await run_intake_pipeline(tmp_path, _ctx())
+        assert result["ok"] is False, result["octave"]
+        assert result["octave"] is None
+        assert "invalid_utf8" in "\n".join(result["validation_errors"])
+
+    def test_decode_yaml_pair_rejects_a_lone_surrogate_like_the_reader(self) -> None:
+        with pytest.raises(YamlSyntaxError) as exc:
+            decode_yaml_pair('authored_at: "x\udc80"')
+        assert exc.value.construct == "invalid_utf8"
+
+    def test_reader_still_reports_invalid_utf8_on_other_lines(self) -> None:
+        # Behaviour pin (passes before and after): same surrogate on the decision line.
+        rec = _compiled_with("2026-06-01T08:00:00Z").replace(
+            "decision: ", 'decision: "\udc80" #', 1
+        )
+        diagnostic = diagnose_yaml_record(rec)
+        assert diagnostic is not None and diagnostic["construct"] == "invalid_utf8"
