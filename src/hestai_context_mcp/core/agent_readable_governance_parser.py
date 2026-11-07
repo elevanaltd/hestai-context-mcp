@@ -1069,6 +1069,16 @@ def parse_supersedes_list(value: str) -> list[str]:
     return entries
 
 
+def _reject_lone_surrogate(line: str) -> None:
+    """Raise ``invalid_utf8`` when ``line`` holds a lone surrogate (it has no UTF-8 form).
+
+    The one definition shared by the reader loop and :func:`decode_yaml_pair` (#278), so
+    the ``authored_at`` stamp can never accept a line the reader would reject.
+    """
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in line):
+        raise YamlSyntaxError("invalid_utf8")
+
+
 def _split_yaml_pair(line: str) -> tuple[str, str]:
     """Split a top-level fenced line into ``(key, rest-after-colon)`` or raise."""
     if line[:1] in (" ", "\t"):
@@ -1090,6 +1100,7 @@ def decode_yaml_pair(line: str) -> tuple[str, str]:
     own ``_split_yaml_pair`` + :func:`decode_yaml_scalar`, so a caller asking "would Gate A
     accept this line?" shares one definition with the reader instead of a second regex.
     """
+    _reject_lone_surrogate(line)
     key, rest = _split_yaml_pair(line)
     return key, decode_yaml_scalar(rest)
 
@@ -1184,8 +1195,7 @@ def _parse_yaml(text: str) -> tuple[DecisionRecord | None, YamlReject | None]:
         if not line.strip():
             continue
         try:
-            if any(0xD800 <= ord(ch) <= 0xDFFF for ch in line):
-                raise YamlSyntaxError("invalid_utf8")
+            _reject_lone_surrogate(line)
             if state.name is not None and line[:1] in (" ", "\t"):
                 _check_block_line(state, line)
                 continue
