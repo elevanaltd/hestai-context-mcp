@@ -302,7 +302,7 @@ These are the specific failure modes this North Star is designed to prevent:
 
 **Date**: 2026-04-17
 **Approver**: Human operator
-**Status**: v1.1 APPROVED 2026-11-08 (PR #281)
+**Status**: APPROVED (v1.0 at this 2026-04-17 ceremony; v1.1 approved 2026-11-08, PR #281)
 
 **Ceremony Transcript**:
 > **Architect**: "Do you approve these 6 Immutables as the binding North Star for hestai-context-mcp? Each has been evaluated against the Immutability Oath. The service identity, boundary clarity, and assumption register are documented above."
