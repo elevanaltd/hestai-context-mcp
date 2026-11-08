@@ -2,7 +2,7 @@
 type: NORTH_STAR
 id: hestai-context-mcp-north-star
 version: 1.1
-status: v1.0 APPROVED 2026-04-17; v1.1 PENDING operator re-approval
+status: v1.1 APPROVED 2026-11-08 (PR #281)
 purpose: Product North Star for hestai-context-mcp — the Memory and Environment service
 inherits: system-hestai-north-star
 created: 2026-04-17
@@ -14,8 +14,8 @@ namespace: PROD
 **Product**: hestai-context-mcp
 **Purpose**: Persistent memory and environmental context for AI-assisted development sessions
 **Phase**: B1 (Phase 1 harvest complete, 4 tools operational)
-**Status**: v1.0 APPROVED (2026-04-17); v1.1 PENDING operator re-approval of the final text on PR #281
-**Approved By**: Human operator (v1.0, 2026-04-17); v1.1 not yet approved
+**Status**: v1.1 APPROVED 2026-11-08 (PR #281)
+**Approved By**: Human operator (v1.0 2026-04-17; v1.1 2026-11-08, PR #281)
 
 ---
 
@@ -302,7 +302,7 @@ These are the specific failure modes this North Star is designed to prevent:
 
 **Date**: 2026-04-17
 **Approver**: Human operator
-**Status**: APPROVED (v1.0 only; v1.1 is pending operator re-approval)
+**Status**: v1.1 APPROVED 2026-11-08 (PR #281)
 
 **Ceremony Transcript**:
 > **Architect**: "Do you approve these 6 Immutables as the binding North Star for hestai-context-mcp? Each has been evaluated against the Immutability Oath. The service identity, boundary clarity, and assumption register are documented above."
