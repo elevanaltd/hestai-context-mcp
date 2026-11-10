@@ -120,8 +120,9 @@ jobs:
       # RELEASE PROCEDURE (to change the judge):
       #   1. Tag the new gate commit on main as review-gate-vN.
       #   2. Open a PR here moving this `ref` to that commit's full SHA.
-      #   3. After it merges, the operator re-points org ruleset 12626210
-      #      (workflows[0].sha) at the merge commit.
+      #   Org ruleset 12626210 serves review-gate.yml from refs/heads/main
+      #   with no SHA (HO-RULESET-TRACKS-MAIN-20261107), so a release is the
+      #   tag plus the ref PR, with no operator step.
       #
       # COUPLING RULE: a review_formats.py verdict-format change ships with a
       # re-pin.  The gate parses verdicts with the review_formats.py at this
