@@ -120,9 +120,13 @@ jobs:
       # RELEASE PROCEDURE (to change the judge):
       #   1. Tag the new gate commit on main as review-gate-vN.
       #   2. Open a PR here moving this `ref` to that commit's full SHA.
-      #   Org ruleset 12626210 serves review-gate.yml from refs/heads/main
-      #   with no SHA (HO-RULESET-TRACKS-MAIN-20261107), so a release is the
-      #   tag plus the ref PR, with no operator step.
+      #
+      #   Note: org ruleset 12626210 serves review-gate.yml from
+      #   refs/heads/main with no SHA (HO-RULESET-TRACKS-MAIN-20261107), so a
+      #   release is the tag plus the ref PR, with no operator step.  Because
+      #   the ruleset serves this file from main, the step-2 ref PR, and any
+      #   change to this file, goes live in all nine ruleset repos at merge,
+      #   so it gets HC review before merge (HO-RULESET-TRACKS-MAIN-20261107).
       #
       # COUPLING RULE: a review_formats.py verdict-format change ships with a
       # re-pin.  The gate parses verdicts with the review_formats.py at this
