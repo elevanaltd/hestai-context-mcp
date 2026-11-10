@@ -5,8 +5,9 @@ to org ruleset 12626210. Its "Checkout review-gate tooling" step fetches the
 judge (``validate_review.py`` + ``review_formats.py``) from this repository.
 When that step tracked a branch (``ref: main``), every merge here changed the
 judge of other repos with no release step in between.
-HO-REVIEW-GATE-PIN-RELEASE-20261025 pins it to the commit tagged
-``review-gate-v1``.
+HO-REVIEW-GATE-PIN-RELEASE-20261025 pins the tooling ref to a full commit SHA;
+the release tag it resolves to (currently ``review-gate-v2``) is named in the
+workflow comment, not asserted here, so a re-pin does not stale this guard.
 
 These tests read the workflow as text with the stdlib only. The repository has
 no YAML library and this guard does not justify adding one, so the step is
@@ -17,8 +18,10 @@ edits to the real workflow and asserts the named guard catches each one;
 ``EQUIVALENT_EDITS`` asserts that harmless rewrites are not rejected.
 
 This is a regression tripwire, not a sandbox: variable indirection or obfuscation
-of the path is out of scope. Containment is the ruleset 12626210 sha pin plus the
-five-role review of every change to this workflow.
+of the path is out of scope. Containment is the tooling SHA pin in the workflow,
+the five-role review of every change to this workflow, and HC sign-off before
+merge: org ruleset 12626210 serves review-gate.yml from main (HO-RULESET-TRACKS-
+MAIN-20261107), so any merge to it goes live in all nine ruleset repos at merge.
 """
 
 from __future__ import annotations
@@ -476,6 +479,13 @@ def _before_run(line: str) -> Mutation:
     return _sub(_RUN, f"          {line}\n" + _RUN)
 
 
+def _live_tooling_sha() -> str:
+    """The SHA the live workflow's tooling step is pinned to now (same ``_REF`` the mutants use)."""
+    match = re.search(_REF, _workflow_text(), re.MULTILINE)
+    assert match is not None, "live workflow has no full-SHA ref line"
+    return match["sha"]
+
+
 def _checkout_into(path_line: str, *, ref: str = "main") -> str:
     return (
         "      - name: Replace tooling checkout\n"
@@ -682,9 +692,7 @@ MUTATIONS = [
     pytest.param(
         _step_before(
             _SETUP,
-            _checkout_into(
-                "path: .review-gate-tools", ref="7153bfd1e788f342617d258e978edbf577550e8f"
-            ),
+            _checkout_into("path: .review-gate-tools", ref=_live_tooling_sha()),
         ),
         "single_writer",
         id="second-checkout-same-sha",
