@@ -268,3 +268,72 @@ class TestMainCheckoutUnchanged:
         link = main / ".hestai" / "state"
         assert os.readlink(str(link)) == "../.hestai-state"
         assert (main / ".hestai-state" / "sessions" / "active").is_dir()
+
+
+class TestWorktreeEdgeCases:
+    """Pre-review findings on #197: detection failure, missing link, symlink loop."""
+
+    def test_unresolved_worktree_leaves_link_untouched(self, repo_pair, monkeypatch, caplog):
+        """If main-root detection fails in a worktree (.git is a file), nothing is rewritten.
+
+        Falling back to the main-checkout path would rewrite the link to
+        ../.hestai-state: the #197 fork, triggered by a git failure.
+        """
+        main, worktree = repo_pair
+        shared = main / ".hestai-state"
+        shared.mkdir()
+        (worktree / ".hestai").mkdir()
+        link = worktree / ".hestai" / "state"
+        link.symlink_to(str(shared))
+        monkeypatch.setattr(
+            "hestai_context_mcp.core.session.get_main_checkout_root", lambda _wd: None
+        )
+
+        with caplog.at_level(logging.WARNING, logger="hestai_context_mcp.core.session"):
+            SessionManager(str(worktree)).ensure_hestai_structure()
+
+        assert os.readlink(str(link)) == str(shared)
+        assert not (worktree / ".hestai-state").exists()
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_worktree_of_bare_repo_is_not_given_a_guessed_main_root(self, tmp_path, repo_pair):
+        """A bare repo's common dir is not <main>/.git, so its parent is not a checkout."""
+        main, _ = repo_pair
+        bare = tmp_path / "proj.git"
+        _git(tmp_path, "clone", "-q", "--bare", str(main), str(bare))
+        bare_wt = tmp_path / "bare-wt"
+        _git(bare, "worktree", "add", "-q", "-b", "other", str(bare_wt))
+
+        assert git_state.get_main_checkout_root(bare_wt.resolve()) is None
+        SessionManager(str(bare_wt)).ensure_hestai_structure()
+        assert not (tmp_path / ".hestai-state").exists()
+        assert not (bare_wt / ".hestai-state").exists()
+
+    def test_missing_link_beside_stray_local_state_links_to_main(self, repo_pair, caplog):
+        """No link to leave alone: link to main so create_session cannot mkdir a real dir."""
+        main, worktree = repo_pair
+        local = worktree / ".hestai-state"
+        local.mkdir()
+        (local / "learnings-index.jsonl").write_text("{}\n")
+        (worktree / ".hestai").mkdir()
+
+        with caplog.at_level(logging.WARNING, logger="hestai_context_mcp.core.session"):
+            result = SessionManager(str(worktree)).create_session(role="r", focus="f")
+
+        link = worktree / ".hestai" / "state"
+        assert os.readlink(str(link)) == str(main / ".hestai-state")
+        session_dir = main / ".hestai-state" / "sessions" / "active" / result["session_id"]
+        assert (session_dir / "session.json").is_file()
+        assert (local / "learnings-index.jsonl").read_text() == "{}\n"
+        assert any(str(local) in r.getMessage() for r in caplog.records)
+
+    def test_symlink_loop_at_link_path_is_repointed_to_main(self, repo_pair):
+        """A self-referential link must not crash clock_in."""
+        main, worktree = repo_pair
+        (worktree / ".hestai").mkdir()
+        link = worktree / ".hestai" / "state"
+        link.symlink_to("state")
+
+        SessionManager(str(worktree)).ensure_hestai_structure()
+
+        assert os.readlink(str(link)) == str(main / ".hestai-state")
