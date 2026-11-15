@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
+from hestai_context_mcp.core.git_state import get_main_checkout_root
+
 logger = logging.getLogger(__name__)
 
 
@@ -255,28 +257,88 @@ class SessionManager:
             .hestai-state/   - uncommitted working state (sessions, context)
             .hestai/state    - symlink to ../.hestai-state
 
+        In a linked git worktree (issue #197) the state lives in the MAIN
+        checkout: ``.hestai/state`` links to ``<main>/.hestai-state`` and no
+        local ``<worktree>/.hestai-state`` is created. See
+        ``_ensure_worktree_state_link``.
+
         Returns:
             'present' if .hestai/ already existed, 'created' if newly created.
         """
         hestai_dir = self.working_dir / ".hestai"
         state_link = hestai_dir / "state"
-        state_real = self.working_dir / ".hestai-state"
+        existed = hestai_dir.is_dir()
+        hestai_dir.mkdir(parents=True, exist_ok=True)
 
-        if hestai_dir.exists() and hestai_dir.is_dir():
-            # Already exists, ensure subdirs and symlink
+        main_root = get_main_checkout_root(self.working_dir)
+        if main_root is None:
+            state_real = self.working_dir / ".hestai-state"
             self._ensure_state_directory(state_real)
             self._ensure_state_symlink(state_link, state_real)
-            (hestai_dir / "north-star").mkdir(parents=True, exist_ok=True)
-            return "present"
+        else:
+            self._ensure_worktree_state_link(state_link, main_root / ".hestai-state")
 
-        # Create new structure
-        hestai_dir.mkdir(parents=True, exist_ok=True)
-        self._ensure_state_directory(state_real)
-        self._ensure_state_symlink(state_link, state_real)
         (hestai_dir / "north-star").mkdir(parents=True, exist_ok=True)
-
+        if existed:
+            return "present"
         logger.info(f"Created .hestai/ directory structure at {self.working_dir}")
         return "created"
+
+    def _ensure_worktree_state_link(self, state_link: Path, shared_state: Path) -> None:
+        """Point a linked worktree's .hestai/state at the main checkout's state.
+
+        Issue #197. ``shared_state`` is ``<main>/.hestai-state``.
+
+        - A link that already resolves to ``shared_state`` is left verbatim.
+        - An existing fork is warned about and left untouched for the operator
+          to clean up: a local ``<worktree>/.hestai-state`` that is not the
+          shared state, or a real directory at ``.hestai/state``.
+        - Otherwise a wrong, broken or missing link, or a plain file, is
+          replaced with an absolute link to ``shared_state`` (the target the
+          SessionStart hook writes).
+
+        A local ``<worktree>/.hestai-state`` is never created.
+
+        Args:
+            state_link: Path of the worktree's .hestai/state.
+            shared_state: The main checkout's .hestai-state.
+        """
+        local_state = self.working_dir / ".hestai-state"
+        stray_local = local_state.exists() and local_state.resolve() != shared_state.resolve()
+
+        if state_link.is_symlink() and state_link.resolve() == shared_state.resolve():
+            if stray_local:
+                logger.warning(
+                    f"Worktree has local state at {local_state} that is not shared with the "
+                    f"main checkout; left untouched for operator cleanup (#197)"
+                )
+            self._ensure_state_directory(shared_state)
+            return
+
+        if stray_local:
+            logger.warning(
+                f"Worktree state is forked into {local_state}; {state_link} left untouched "
+                f"for operator cleanup. Session state will not reach {shared_state} (#197)"
+            )
+            return
+
+        if state_link.is_dir() and not state_link.is_symlink():
+            logger.warning(
+                f"Real directory at {state_link} holds worktree-local state; left untouched "
+                f"for operator cleanup. Session state will not reach {shared_state} (#197)"
+            )
+            return
+
+        if state_link.is_symlink() or state_link.exists():
+            logger.warning(
+                f"Replacing {state_link} with a link to the main checkout's state "
+                f"{shared_state} (#197)"
+            )
+            state_link.unlink()
+
+        self._ensure_state_directory(shared_state)
+        state_link.symlink_to(str(shared_state))
+        logger.info(f"Created symlink {state_link} -> {shared_state} (worktree, #197)")
 
     def _ensure_state_directory(self, state_real: Path) -> None:
         """Create .hestai-state/ with required subdirectories.

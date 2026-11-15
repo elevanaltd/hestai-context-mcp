@@ -39,6 +39,45 @@ def get_current_branch(working_dir: Path) -> str:
     return "unknown"
 
 
+def get_main_checkout_root(working_dir: Path) -> Path | None:
+    """Return the main checkout's root when working_dir is a linked git worktree.
+
+    A linked worktree has its own git dir (``<main>/.git/worktrees/<name>``)
+    while ``--git-common-dir`` names the main checkout's ``.git``. When the two
+    differ, the main root is the common dir's parent, the same rule the
+    SessionStart hook uses. Issue #197: worktrees must share the main
+    checkout's ``.hestai-state`` instead of forking a local one.
+
+    Args:
+        working_dir: Directory to inspect.
+
+    Returns:
+        The resolved main checkout root, or None for a main checkout, a
+        directory outside git, or when git is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(working_dir),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines()
+    if len(lines) != 2:
+        return None
+    # rev-parse may print either path relative to working_dir.
+    git_dir = (working_dir / lines[0]).resolve()
+    common_dir = (working_dir / lines[1]).resolve()
+    if git_dir == common_dir:
+        return None
+    return common_dir.parent
+
+
 def get_git_state(working_dir: Path) -> dict[str, Any] | None:
     """Get full git state: branch, ahead/behind, modified files.
 
