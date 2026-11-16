@@ -856,14 +856,8 @@ _spec.loader.exec_module(_review_formats)
 _matches_approval_pattern = _review_formats.matches_approval_pattern
 _has_crs_approval = _review_formats.has_crs_approval
 _has_crs_model_approval = _review_formats.has_crs_model_approval
-_has_ce_approval = _review_formats.has_ce_approval
 _has_ho_review = _review_formats.has_ho_review
-_has_tmg_approval = _review_formats.has_tmg_approval
-_has_civ_approval = _review_formats.has_civ_approval
-_has_pe_approval = _review_formats.has_pe_approval
 _has_self_review = _review_formats.has_self_review
-_has_sr_approval = _review_formats.has_sr_approval
-_has_gr_approval = _review_formats.has_gr_approval
 _parse_review_metadata = _review_formats.parse_review_metadata
 _VALID_ROLES = _review_formats.VALID_ROLES
 

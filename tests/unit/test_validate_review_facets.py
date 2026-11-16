@@ -675,7 +675,7 @@ class TestFailClosedUnknownRoles:
     """Unknown roles in required_roles must cause the gate to FAIL, not silently pass."""
 
     def test_unknown_role_causes_failure(self, ci_environment, monkeypatch) -> None:
-        """A required role not in _role_checkers must fail the gate."""
+        """A required role not in the peer-role set (_PEER_ROLES) must fail the gate."""
         import subprocess
 
         def mock_run(cmd, *args, **kwargs):

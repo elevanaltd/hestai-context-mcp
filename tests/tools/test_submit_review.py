@@ -3171,7 +3171,7 @@ class TestGrAliasForeignGateGap:
 # to those six roles: IL and HO are verified through a STRUCTURALLY
 # DIFFERENT mechanism in validate_review.py -- the TIER_1_SELF self-review
 # branch (checked only when tier=="TIER_1_SELF" and required_roles is
-# empty), not the _role_checkers/required_roles dispatch this test
+# empty), not the _PEER_ROLES/required_roles dispatch this test
 # exercises -- so they are out of scope for this particular parity check
 # by design, not silently dropped from coverage.
 #
@@ -3208,7 +3208,7 @@ class TestSubmitReviewCiParity:
     }
 
     # Roles validate_review.py's check_pr_comments() actually verifies via
-    # its required_roles / _role_checkers dispatch. IL and HO are excluded
+    # its required_roles / _PEER_ROLES dispatch. IL and HO are excluded
     # deliberately -- see module-level comment above.
     _CI_CHECKED_ROLES = ["TMG", "CRS", "CE", "CIV", "PE", "SR"]
 
