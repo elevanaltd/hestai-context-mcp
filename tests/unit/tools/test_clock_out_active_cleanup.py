@@ -392,15 +392,15 @@ class TestLeftoverActiveDirectorySweep:
         """CE on 7354d01: content that appears between eligibility and deletion is kept."""
         _setup_active_session(tmp_path)
         leftover = _leftover(tmp_path, "old-racing", [".smbdeleteFFF1"], TWO_HOURS)
-        real_check = clock_out_module._is_sweepable_leftover
+        real_check = clock_out_module._sweepable_placeholders
 
         def check_then_race(entry, now):
             eligible = real_check(entry, now)
-            if eligible and entry == leftover:
+            if eligible is not None and entry == leftover:
                 (leftover / "session.json").write_text('{"session_id": "late"}')
             return eligible
 
-        monkeypatch.setattr(clock_out_module, "_is_sweepable_leftover", check_then_race)
+        monkeypatch.setattr(clock_out_module, "_sweepable_placeholders", check_then_race)
 
         result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
 

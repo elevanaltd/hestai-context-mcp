@@ -542,25 +542,28 @@ def _is_session_id_name(name: str) -> bool:
     return parsed.version == 4 and str(parsed) == name
 
 
-def _is_sweepable_leftover(entry: Path, now: float) -> bool:
-    """True for an old, uuid4-named real directory holding only SMB placeholder files.
+def _sweepable_placeholders(entry: Path, now: float) -> list[Path] | None:
+    """The placeholder files to remove if entry is a sweepable leftover, else None.
 
-    A directory with session.json (or any other content) may be a live
-    session, possibly the other machine's, and is never swept.
+    Sweepable: an old, uuid4-named real directory holding nothing or only
+    regular ``.smbdelete*`` files. A directory with session.json (or any other
+    content) may be a live session, possibly the other machine's.
     """
     if not _is_session_id_name(entry.name):
-        return False
+        return None
     st = entry.lstat()
     if not stat.S_ISDIR(st.st_mode):
-        return False
+        return None
     if now - st.st_mtime < _LEFTOVER_MIN_AGE_SECONDS:
-        return False
+        return None
+    placeholders = []
     for child in entry.iterdir():
         if not child.name.startswith(_SMB_PLACEHOLDER_PREFIX):
-            return False
+            return None
         if not stat.S_ISREG(child.lstat().st_mode):
-            return False
-    return True
+            return None
+        placeholders.append(child)
+    return placeholders
 
 
 def _sweep_leftover_active_dirs(active_dir: Path, exclude: str) -> None:
@@ -569,7 +572,12 @@ def _sweep_leftover_active_dirs(active_dir: Path, exclude: str) -> None:
     Best-effort: a leftover that is still held open stays for a later sweep,
     and no failure here affects the clock_out result. ``exclude`` is the
     session just clocked out, which is reported rather than swept.
+
+    Deletion is never recursive: only the placeholder files that were checked
+    are unlinked, then ``rmdir`` runs, which fails if anything (e.g. a
+    session.json) appeared after the check, so new content is kept.
     """
+    # Critical-Engineer: consulted for shared-mount cleanup and data-loss boundary
     now = time.time()
     try:
         entries = list(active_dir.iterdir())
@@ -579,9 +587,12 @@ def _sweep_leftover_active_dirs(active_dir: Path, exclude: str) -> None:
         if entry.name == exclude:
             continue
         try:
-            if not _is_sweepable_leftover(entry, now):
+            placeholders = _sweepable_placeholders(entry, now)
+            if placeholders is None:
                 continue
-            shutil.rmtree(entry)
+            for placeholder in placeholders:
+                placeholder.unlink(missing_ok=True)
+            entry.rmdir()
             logger.info("Swept leftover active session directory: %s", entry)
         except OSError as e:
             logger.info(
