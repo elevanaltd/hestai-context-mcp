@@ -345,7 +345,8 @@ class TestLeftoverActiveDirectorySweep:
         self, tmp_path, monkeypatch, no_sleep
     ):
         """The session just left pending is reported, not deleted behind the report."""
-        session_dir = _setup_active_session(tmp_path)
+        own_id = _session_name("own-session")  # uuid4, so only the exclusion keeps it
+        session_dir = _setup_active_session(tmp_path, session_id=own_id)
         real_rmtree = shutil.rmtree
 
         def smb_rmtree(path, *args, **kwargs):
@@ -361,22 +362,50 @@ class TestLeftoverActiveDirectorySweep:
 
         monkeypatch.setattr(clock_out_module.shutil, "rmtree", smb_rmtree)
 
-        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+        result = clock_out(session_id=own_id, working_dir=str(tmp_path))
 
         assert result["active_session_cleanup"] == "pending"
         assert (session_dir / ".smbdeleteOWN0001").exists()
 
     def test_sweep_failure_does_not_fail_clock_out(self, tmp_path, monkeypatch, no_sleep):
-        """A leftover that is still held open stays for a later sweep."""
+        """A leftover whose placeholder is still held stays for a later sweep."""
         _setup_active_session(tmp_path)
         leftover = _leftover(tmp_path, "old-held", [".smbdeleteEEE1"], TWO_HOURS)
-        _enotempty_rmtree(monkeypatch, leftover, failures=None)
+        real_unlink = Path.unlink
+
+        def held_unlink(self, *args, **kwargs):
+            if self.parent == leftover:
+                raise PermissionError(errno.EACCES, "Permission denied", str(self))
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", held_unlink)
 
         result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
 
         assert result["status"] == "success"
         assert result["active_session_cleanup"] == "removed"
-        assert leftover.exists()
+        assert (leftover / ".smbdeleteEEE1").exists()
+
+    def test_session_json_written_after_the_check_survives_the_sweep(
+        self, tmp_path, monkeypatch, no_sleep
+    ):
+        """CE on 7354d01: content that appears between eligibility and deletion is kept."""
+        _setup_active_session(tmp_path)
+        leftover = _leftover(tmp_path, "old-racing", [".smbdeleteFFF1"], TWO_HOURS)
+        real_check = clock_out_module._is_sweepable_leftover
+
+        def check_then_race(entry, now):
+            eligible = real_check(entry, now)
+            if eligible and entry == leftover:
+                (leftover / "session.json").write_text('{"session_id": "late"}')
+            return eligible
+
+        monkeypatch.setattr(clock_out_module, "_is_sweepable_leftover", check_then_race)
+
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["status"] == "success"
+        assert (leftover / "session.json").read_text() == '{"session_id": "late"}'
 
     def test_old_empty_directory_not_named_like_a_session_is_kept(self, tmp_path, no_sleep):
         """Pre-review high on 0775f43: only uuid4 session-id names are sweep candidates."""
@@ -389,6 +418,26 @@ class TestLeftoverActiveDirectorySweep:
         clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
 
         assert helper.is_dir()
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            str(uuid.uuid1()),  # a uuid, but not version 4
+            str(uuid.uuid4()).upper(),  # version 4, but not create_session's canonical form
+        ],
+    )
+    def test_old_empty_directory_with_non_canonical_uuid4_name_is_kept(
+        self, tmp_path, no_sleep, name
+    ):
+        _setup_active_session(tmp_path)
+        d = _active_dir(tmp_path) / name
+        d.mkdir()
+        then = time.time() - TWO_HOURS
+        os.utime(d, (then, then))
+
+        clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert d.is_dir()
 
     def test_error_return_does_not_sweep(self, tmp_path, no_sleep):
         """Only a successful clock_out sweeps; an unknown session id touches nothing."""
