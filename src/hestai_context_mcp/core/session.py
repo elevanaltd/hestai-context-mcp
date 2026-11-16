@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
-from hestai_context_mcp.core.git_state import get_main_checkout_root
+from hestai_context_mcp.core.git_state import MainCheckoutUnresolvedError, get_main_checkout_root
 
 logger = logging.getLogger(__name__)
 
@@ -281,16 +281,24 @@ class SessionManager:
         existed = hestai_dir.is_dir()
         hestai_dir.mkdir(parents=True, exist_ok=True)
 
-        main_root = get_main_checkout_root(self.working_dir)
-        if main_root is None and (self.working_dir / ".git").is_file():
-            # A .git FILE marks a linked worktree whose main checkout could not
-            # be resolved (git failed, or a bare/submodule layout). The
-            # main-checkout path would rewrite the link: the #197 fork.
+        try:
+            main_root = get_main_checkout_root(self.working_dir)
+            unresolved = False
+        except MainCheckoutUnresolvedError as e:
+            main_root, unresolved = None, True
             logger.warning(
-                f"{self.working_dir} looks like a git worktree but its main checkout "
-                f"could not be resolved; {state_link} left untouched (#197)"
+                f"{self.working_dir} is a git worktree whose main checkout could not be "
+                f"resolved ({e}) (#197)"
             )
+
+        if unresolved and (state_link.is_symlink() or state_link.exists()):
+            # Rewriting an existing link here could undo a correct link to the
+            # main checkout: the #197 fork, triggered by a detection failure.
+            logger.warning(f"{state_link} left untouched (#197)")
         elif main_root is None:
+            # Main checkout, outside git, or an unresolved worktree with no
+            # link yet (pre-#197 behaviour, so create_session never mkdirs a
+            # real .hestai/state directory).
             state_real = self.working_dir / ".hestai-state"
             self._ensure_state_directory(state_real)
             self._ensure_state_symlink(state_link, state_real)

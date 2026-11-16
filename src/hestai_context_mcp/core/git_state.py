@@ -39,6 +39,14 @@ def get_current_branch(working_dir: Path) -> str:
     return "unknown"
 
 
+class MainCheckoutUnresolvedError(Exception):
+    """working_dir is a linked git worktree, but its main checkout cannot be named."""
+
+
+def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], capture_output=True, text=True, timeout=5, cwd=str(cwd))
+
+
 def get_main_checkout_root(working_dir: Path) -> Path | None:
     """Return the main checkout's root when working_dir is a linked git worktree.
 
@@ -48,38 +56,46 @@ def get_main_checkout_root(working_dir: Path) -> Path | None:
     SessionStart hook uses. Issue #197: worktrees must share the main
     checkout's ``.hestai-state`` instead of forking a local one.
 
+    Submodules and ``--separate-git-dir`` checkouts also have a ``.git`` file,
+    but their git dir IS their common dir: they are main checkouts.
+
     Args:
         working_dir: Directory to inspect.
 
     Returns:
-        The resolved main checkout root, or None for a main checkout, a
-        directory outside git, a worktree whose common dir is not a
-        checkout's ``.git``, or when git is unavailable.
+        The resolved main checkout root for a linked worktree, or None for a
+        main checkout or a directory outside git.
+
+    Raises:
+        MainCheckoutUnresolvedError: working_dir is a linked worktree whose common
+            dir is not a non-bare checkout's ``.git`` (e.g. a bare repo), or
+            git could not run and ``working_dir/.git`` is a file.
     """
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-dir", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            cwd=str(working_dir),
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return None
-    if result.returncode != 0:
+        result = _run_git(["rev-parse", "--git-dir", "--git-common-dir"], working_dir)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        if (working_dir / ".git").is_file():
+            raise MainCheckoutUnresolvedError(f"git could not run: {type(e).__name__}") from e
         return None
     lines = result.stdout.splitlines()
-    if len(lines) != 2:
+    if result.returncode != 0 or len(lines) != 2:
         return None
     # rev-parse may print either path relative to working_dir.
     git_dir = (working_dir / lines[0]).resolve()
     common_dir = (working_dir / lines[1]).resolve()
     if git_dir == common_dir:
         return None
-    # Only <main>/.git names a checkout by its parent. A bare repo, a
-    # submodule (.git/modules/<name>) or a --separate-git-dir layout does not.
+    # Only a non-bare <main>/.git names a checkout by its parent.
     if common_dir.name != ".git":
-        return None
+        raise MainCheckoutUnresolvedError(f"common dir {common_dir} is not a checkout's .git")
+    try:
+        bare = _run_git(
+            ["--git-dir", str(common_dir), "rev-parse", "--is-bare-repository"], working_dir
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        raise MainCheckoutUnresolvedError(f"git could not run: {type(e).__name__}") from e
+    if bare.returncode != 0 or bare.stdout.strip() != "false":
+        raise MainCheckoutUnresolvedError(f"common dir {common_dir} is a bare repository")
     return common_dir.parent
 
 

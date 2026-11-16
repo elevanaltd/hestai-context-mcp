@@ -27,7 +27,7 @@ def _git(cwd: Path, *args: str) -> None:
 
 
 def _raise_unresolved(_working_dir: Path) -> Path | None:
-    raise git_state.MainCheckoutUnresolved("simulated")
+    raise git_state.MainCheckoutUnresolvedError("simulated")
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ class TestGetMainCheckoutRoot:
             raise FileNotFoundError("git")
 
         monkeypatch.setattr("hestai_context_mcp.core.git_state.subprocess.run", _no_git)
-        with pytest.raises(git_state.MainCheckoutUnresolved):
+        with pytest.raises(git_state.MainCheckoutUnresolvedError):
             git_state.get_main_checkout_root(worktree)
 
     def test_returns_none_when_git_unavailable_in_main_checkout(self, repo_pair, monkeypatch):
@@ -337,7 +337,7 @@ class TestWorktreeEdgeCases:
         bare_wt = tmp_path / "bare-wt"
         _git(bare, "worktree", "add", "-q", "-b", "other", str(bare_wt))
 
-        with pytest.raises(git_state.MainCheckoutUnresolved):
+        with pytest.raises(git_state.MainCheckoutUnresolvedError):
             git_state.get_main_checkout_root(bare_wt.resolve())
         SessionManager(str(bare_wt)).ensure_hestai_structure()
         assert not (tmp_path / ".hestai-state").exists()
@@ -353,7 +353,7 @@ class TestWorktreeEdgeCases:
         bare_wt = tmp_path / "bare-dot-git-wt"
         _git(bare, "worktree", "add", "-q", "-b", "other", str(bare_wt))
 
-        with pytest.raises(git_state.MainCheckoutUnresolved):
+        with pytest.raises(git_state.MainCheckoutUnresolvedError):
             git_state.get_main_checkout_root(bare_wt.resolve())
         SessionManager(str(bare_wt)).ensure_hestai_structure()
         assert not (holder / ".hestai-state").exists()
