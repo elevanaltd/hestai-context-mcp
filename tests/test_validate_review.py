@@ -140,6 +140,7 @@ class TestHeadBoundReviewerGuidance:
         assert "submit_review" in message and "commit_sha" in message, message
         assert "older head" in message and "footer" in message, message
         assert "CE APPROVED or CE GO" not in message, message
+        assert not re.search(r"\bGO\b", message), message
 
     def test_main_failure_guidance_points_to_submit_review(
         self, ci_environment, monkeypatch, capsys
@@ -164,6 +165,7 @@ class TestHeadBoundReviewerGuidance:
         assert "submit_review" in guidance and "commit_sha" in guidance, guidance
         assert "older head" in guidance and "footer" in guidance, guidance
         assert "[assessment]" not in guidance, guidance
+        assert not re.search(r"\bGO\b", guidance), guidance
 
 
 @pytest.mark.behavior
@@ -1293,8 +1295,12 @@ class TestGoKeywordApproval:
         assert "CE" in message, "Error message should mention CE"
         assert "CIV" in message, "Error message should mention CIV"
 
-    def test_tier_2_missing_mentions_go_in_error(self, ci_environment, monkeypatch):
-        """Error message for TIER_2_STANDARD missing approval should mention GO as alternative."""
+    def test_tier_2_missing_guidance_names_an_approved_verdict_not_go(
+        self, ci_environment, monkeypatch
+    ):
+        """The missing-approval guidance points to submit_review, which can emit an
+        APPROVED verdict but has no GO verdict (VALID_VERDICTS), so it must not
+        tell reviewers to post GO (#201 pre-review). A GO footer still clears."""
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -1312,7 +1318,8 @@ class TestGoKeywordApproval:
 
         approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
         assert approved is False
-        assert "GO" in message, "Error message should mention GO as an accepted format"
+        assert "APPROVED verdict" in message, message
+        assert not re.search(r"\bGO\b", message), message
 
 
 @pytest.mark.behavior
