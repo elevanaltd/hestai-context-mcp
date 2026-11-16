@@ -1326,6 +1326,12 @@ def check_pr_comments(
         disqualified: list[str] = []
         for timestamp, text in sources:
             meta = _parse_review_metadata(text)
+            if meta is not None and not all(
+                isinstance(meta.get(key), (str, type(None))) for key in ("role", "verdict")
+            ):
+                # Malformed footer (e.g. a JSON list as role or verdict): treated as
+                # no footer, so it clears nothing and cannot crash the set lookups.
+                meta = None
             if meta is not None:
                 meta_role = meta.get("role")
                 meta_verdict = meta.get("verdict")
