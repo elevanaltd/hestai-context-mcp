@@ -1172,6 +1172,37 @@ def _sha_binds_to_head(sha: object, head_sha: str) -> bool:
     return head_sha.lower().startswith(sha.lower())
 
 
+# The verdict header submit_review emits as the first line of a review
+# (review_formats._build_comment): "<ROLE> <KEYWORD>: ...", optionally with a
+# sanitised model label "<ROLE> (<label>) <KEYWORD>: ...", or the SR
+# wording-fixes form "... APPROVED (wording fixes pending):". The label has its
+# parentheses stripped, so it cannot nest. Case-insensitive because an agreeing
+# header already in the assessment is kept verbatim (_match_existing_header_token).
+_VERDICT_HEADER_RE: Final = re.compile(
+    r"(?P<role>[A-Za-z]+)(?: \([^()\n]*\))? (?P<verdict>[A-Za-z-]+)"
+    r"(?::| \(wording fixes pending\):)",
+    re.IGNORECASE,
+)
+
+
+def _header_agrees(text: str, role: str, verdict: str) -> bool:
+    """True iff the FIRST NON-EMPTY LINE of the raw ``text`` is a verdict header at
+    column 0 whose role and verdict equal the footer's (option B, issue #201).
+
+    Only that line is constrained; the rest of the body is free text. Anything a
+    renderer could hide or reframe (code, quotes, HTML, collapsed blocks) cannot
+    open a body at column 0 with this shape, so nothing hidden can stand in for
+    the verdict a reader sees first.
+    """
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    match = _VERDICT_HEADER_RE.match(first_line)
+    return (
+        match is not None
+        and match.group("role").upper() == role
+        and match.group("verdict").upper() == verdict
+    )
+
+
 def _visible_text(text: str, *, hide_html_comments: bool = False) -> str:
     """Strip the metadata footer and code (fenced and inline) from a comment.
 
@@ -1352,6 +1383,11 @@ def check_pr_comments(
                 # a spoofing vector.
                 if meta_role and meta_verdict and meta_role in _VALID_ROLES:
                     visible_text = _visible_text(text, hide_html_comments=not self_review_path)
+                    # Peer path (option B): the footer's verdict must be the header
+                    # on the first non-empty line, or the comment is disqualified.
+                    header_mismatch = not self_review_path and not _header_agrees(
+                        text, meta_role, meta_verdict
+                    )
                     if meta_verdict in _APPROVAL_VERDICTS:
                         # An approval footer's visible text MUST state that approval.
                         mismatch = not _matches_approval_pattern(
@@ -1363,7 +1399,7 @@ def check_pr_comments(
                             _matches_approval_pattern(visible_text, meta_role, keyword)
                             for keyword in _PEER_APPROVAL_VERDICTS
                         )
-                    if mismatch:
+                    if mismatch or header_mismatch:
                         disqualified.append(f"{meta_role} {meta_verdict}")
                         if meta_verdict not in _APPROVAL_VERDICTS:
                             # Fail closed: the comment clears nothing, but its
