@@ -198,6 +198,27 @@ class TestActiveSessionRemoval:
         assert result["active_session_cleanup"] == "pending"
         assert no_sleep == [0.25, 0.25]
 
+    def test_stat_error_after_failed_rmtree_is_pending_not_a_crash(
+        self, tmp_path, monkeypatch, no_sleep
+    ):
+        """cubic on 0061f59: an EIO from checking the directory must not abort clock_out."""
+        session_dir = _setup_active_session(tmp_path)
+        _enotempty_rmtree(monkeypatch, session_dir, failures=None)
+        real_stat = Path.stat
+
+        def stat_eio(self, *args, **kwargs):
+            if self == session_dir:
+                raise OSError(errno.EIO, "Input/output error", str(self))
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", stat_eio)
+
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["status"] == "success"
+        assert result["active_session_cleanup"] == "pending"
+        assert no_sleep == [0.25, 0.25]
+
 
 class TestLeftoverActiveDirectorySweep:
     """A later clock_out removes only leftovers that cannot be a live session."""
