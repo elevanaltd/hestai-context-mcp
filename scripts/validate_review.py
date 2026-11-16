@@ -1142,7 +1142,10 @@ def _has_approval(texts: list[str], prefix: str, keyword: str) -> bool:
 # Peer roles clear ONLY through a metadata footer bound to the PR head, and only
 # when the latest such verdict for the role is an approval. The TIER_1_SELF
 # self-review path does not use these and is unchanged.
-_PEER_ROLES: Final = frozenset({"TMG", "CRS", "CE", "CIV", "PE", "SR"})
+# Every review role except the self-review roles IL and HO (today TMG, CRS, CE,
+# CIV, PE, SR). Derived, like ALLOWED_ESCALATION_ROLES, so a role added to
+# VALID_ROLES that can be required is also clearable rather than wedged.
+_PEER_ROLES: Final = frozenset(_VALID_ROLES) - {"IL", "HO"}
 _PEER_APPROVAL_VERDICTS: Final = frozenset({"APPROVED", "GO"})
 # Every footer verdict the approval-side cross-validation checks (peer + self-review).
 _APPROVAL_VERDICTS: Final = _PEER_APPROVAL_VERDICTS | {"SELF-REVIEWED", "REVIEWED"}
