@@ -70,14 +70,26 @@ class TestGetMainCheckoutRoot:
         plain.mkdir()
         assert git_state.get_main_checkout_root(plain) is None
 
-    def test_returns_none_when_git_unavailable(self, repo_pair, monkeypatch):
+    def test_raises_unresolved_when_git_unavailable_in_worktree(self, repo_pair, monkeypatch):
+        """Git cannot run and .git is a file: unknown, so not reported as a main checkout."""
         _, worktree = repo_pair
 
         def _no_git(*args, **kwargs):
             raise FileNotFoundError("git")
 
         monkeypatch.setattr("hestai_context_mcp.core.git_state.subprocess.run", _no_git)
-        assert git_state.get_main_checkout_root(worktree) is None
+        with pytest.raises(git_state.MainCheckoutUnresolved):
+            git_state.get_main_checkout_root(worktree)
+
+    def test_returns_none_when_git_unavailable_in_main_checkout(self, repo_pair, monkeypatch):
+        """Git cannot run and .git is a directory: a main checkout."""
+        main, _ = repo_pair
+
+        def _no_git(*args, **kwargs):
+            raise FileNotFoundError("git")
+
+        monkeypatch.setattr("hestai_context_mcp.core.git_state.subprocess.run", _no_git)
+        assert git_state.get_main_checkout_root(main) is None
 
 
 class TestEnsureHestaiStructureInWorktree:
