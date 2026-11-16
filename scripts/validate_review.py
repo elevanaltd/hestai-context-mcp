@@ -1172,13 +1172,20 @@ def _sha_binds_to_head(sha: object, head_sha: str) -> bool:
     return head_sha.lower().startswith(sha.lower())
 
 
-def _visible_text(text: str) -> str:
+def _visible_text(text: str, *, hide_html_comments: bool = False) -> str:
     """Strip the metadata footer and code (fenced and inline) from a comment.
 
     What remains is the reader-visible prose that cross-validation compares with
     the footer, so hidden JSON or quoted examples cannot satisfy the match.
+
+    With ``hide_html_comments`` (the peer-role path, issue #201), every HTML
+    comment is stripped too -- GitHub does not render them, so an approval line
+    inside one is not something a reader sees. An unclosed ``<!--`` hides the
+    rest of the text. The footer is parsed from the raw text before this runs.
     """
     visible = re.sub(r"<!--\s*review:.*?-->\s*", "", text)
+    if hide_html_comments:
+        visible = re.sub(r"<!--.*?(?:-->|\Z)", "", visible, flags=re.DOTALL)
     visible = re.sub(r"```.*?```", "", visible, flags=re.DOTALL)
     return re.sub(r"`[^`]+`", "", visible)
 
@@ -1344,7 +1351,7 @@ def check_pr_comments(
                 # check, so mismatched metadata is irrelevant -- not
                 # a spoofing vector.
                 if meta_role and meta_verdict and meta_role in _VALID_ROLES:
-                    visible_text = _visible_text(text)
+                    visible_text = _visible_text(text, hide_html_comments=not self_review_path)
                     if meta_verdict in _APPROVAL_VERDICTS:
                         # An approval footer's visible text MUST state that approval.
                         mismatch = not _matches_approval_pattern(
