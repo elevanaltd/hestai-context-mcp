@@ -1147,6 +1147,13 @@ _PEER_APPROVAL_VERDICTS: Final = frozenset({"APPROVED", "GO"})
 # Every footer verdict the approval-side cross-validation checks (peer + self-review).
 _APPROVAL_VERDICTS: Final = _PEER_APPROVAL_VERDICTS | {"SELF-REVIEWED", "REVIEWED"}
 _HEX_SHA_RE: Final = re.compile(r"[0-9a-fA-F]{7,64}")
+# Reviewer guidance for a missing peer role. Plain approval text no longer clears
+# a gate, so the guidance must never tell reviewers to post one.
+_HEAD_BOUND_GUIDANCE: Final = (
+    "each needs an APPROVED or GO verdict posted via submit_review with "
+    "commit_sha=<PR head SHA>; a verdict at an older head or without the review "
+    "metadata footer does not count"
+)
 
 
 def _sha_binds_to_head(sha: object, head_sha: str) -> bool:
@@ -1432,17 +1439,19 @@ def check_pr_comments(
 
         # Check each required role (SECURITY: fail-closed for unknown roles)
         missing_roles: list[str] = []
-        missing_display: list[str] = []
         for role in sorted(effective_roles):
             if role not in _PEER_ROLES or latest_verdict.get(role) not in _PEER_APPROVAL_VERDICTS:
                 missing_roles.append(role)
-                missing_display.append(f"{role} APPROVED or {role} GO")
 
         if not missing_roles:
             role_names = ", ".join(sorted(effective_roles))
             return True, _reason(f"✓ All required approvals found ({role_names})"), []
 
-        return False, _reason(f"❌ Missing: {', '.join(missing_display)}"), missing_roles
+        return (
+            False,
+            _reason(f"❌ Missing: {', '.join(missing_roles)} ({_HEAD_BOUND_GUIDANCE})"),
+            missing_roles,
+        )
 
     except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
         # SECURITY FIX: Fail closed in CI, permissive locally
@@ -1788,9 +1797,8 @@ def main() -> int:
             print("   Add comment: 'HO REVIEWED: [rationale after delegated work]'")
             print("   Example: 'skills-expert SELF-REVIEWED: Updated GATES section'")
         else:
-            print("   Need comments:")
-            for role in sorted(required_roles):
-                print(f"   - '{role} APPROVED: [assessment]' (or {role} GO:)")
+            print(f"   Required roles: {', '.join(sorted(required_roles))}")
+            print(f"   {_HEAD_BOUND_GUIDANCE}")
 
         _emit_json_summary(
             tier=tier,

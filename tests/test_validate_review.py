@@ -529,8 +529,9 @@ class TestPRCommentValidation:
 # literal guidance template "CE APPROVED: [assessment] (or CE GO:)" (and the
 # TMG/CRS/CIV equivalents) inside a fenced code block -- see
 # review-gate.yml around the `${role} APPROVED: [assessment] (or ${role} GO:)`
-# line, mirroring the text validate_review.py itself prints at
-# "   - '{role} APPROVED: [assessment]' (or {role} GO:)" (~line 1370).
+# line, mirroring the text validate_review.py printed before issue #201
+# ("   - '{role} APPROVED: [assessment]' (or {role} GO:)"); it now points
+# reviewers to submit_review with the PR head SHA instead.
 #
 # matches_approval_pattern() matches per-LINE (review_formats.py, `for line in
 # cleaned.splitlines()`), so line-anchoring alone does NOT protect this
