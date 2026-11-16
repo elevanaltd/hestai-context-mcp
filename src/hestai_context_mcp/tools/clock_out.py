@@ -490,9 +490,9 @@ def _remove_active_session_dir(session_dir: Path) -> str:
     for attempt in range(1, _RMTREE_ATTEMPTS + 1):
         try:
             shutil.rmtree(session_dir)
-        except FileNotFoundError:
-            return "removed"
         except OSError as e:
+            # Decide by the directory itself: an ENOENT may name a child (a
+            # placeholder vanishing mid-walk) while the directory remains.
             if not session_dir.exists():
                 return "removed"
             if attempt < _RMTREE_ATTEMPTS:
@@ -504,7 +504,7 @@ def _remove_active_session_dir(session_dir: Path) -> str:
             return "pending"
         logger.info("Removed active session: %s", session_dir)
         return "removed"
-    return "pending"  # pragma: no cover - loop always returns
+    return "pending"
 
 
 def _is_sweepable_leftover(entry: Path, now: float) -> bool:
