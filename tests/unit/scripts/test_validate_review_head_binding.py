@@ -720,3 +720,33 @@ class TestHeaderLineRule:
             comments=[_comment(_verdict("CE", "APPROVED", HEAD[:7], text=text))]
         )
         assert approved is True, msg
+
+
+@pytest.mark.unit
+@pytest.mark.security
+class TestHeaderLabelCannotCarryHtml:
+    """cubic P1 at e129ee2e: the optional ' (<label>)' must not carry HTML, or the
+    verdict after it can sit inside a collapsed or hidden element while the header
+    still matches. Labels may not contain '<' or '>'; real provider and model
+    labels (slashes, spaces, the &#96; backtick escape) are unaffected."""
+
+    @pytest.mark.parametrize(
+        "label",
+        ["<details><summary>ok</summary>", "<!-- note", "<span hidden>"],
+        ids=["details", "html-comment", "hidden-span"],
+    )
+    def test_html_in_label_is_disqualified(self, label: str) -> None:
+        body = _verdict("CE", "APPROVED", HEAD[:7], text=f"CE ({label}) APPROVED: fine")
+        approved, msg, missing = _check(comments=[_comment(body)])
+        assert approved is False, msg
+        assert missing == ["CE"]
+        assert "spoofing" in msg.lower(), msg
+
+    @pytest.mark.parametrize(
+        "label",
+        ["z-ai/glm-5.2", "Gemini 4 Argon High", "Claude &#96;Opus&#96; 5.5", "openai/gpt-6-sol"],
+    )
+    def test_real_labels_still_clear(self, label: str) -> None:
+        body = _verdict("CE", "APPROVED", HEAD[:7], text=f"CE ({label}) APPROVED: fine")
+        approved, msg, _ = _check(comments=[_comment(body)])
+        assert approved is True, msg
