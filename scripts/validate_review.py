@@ -1144,6 +1144,41 @@ def _has_approval(texts: list[str], prefix: str, keyword: str) -> bool:
     return any(_matches_approval_pattern(t, prefix, keyword) for t in texts)
 
 
+# --- Head-bound peer approvals (issue #201) ---
+# Peer roles clear ONLY through a metadata footer bound to the PR head, and only
+# when the latest such verdict for the role is an approval. The TIER_1_SELF
+# self-review path does not use these and is unchanged.
+_PEER_ROLES: Final = frozenset({"TMG", "CRS", "CE", "CIV", "PE", "SR"})
+_PEER_APPROVAL_VERDICTS: Final = frozenset({"APPROVED", "GO"})
+# Every footer verdict the approval-side cross-validation checks (peer + self-review).
+_APPROVAL_VERDICTS: Final = _PEER_APPROVAL_VERDICTS | {"SELF-REVIEWED", "REVIEWED"}
+_HEX_SHA_RE: Final = re.compile(r"[0-9a-fA-F]{7,64}")
+
+
+def _sha_binds_to_head(sha: object, head_sha: str) -> bool:
+    """True iff a footer ``sha`` names the PR head: >=7 hex chars that prefix it.
+
+    Fails closed on a null, missing, short or non-hex footer sha, and on a head
+    that is not a hex SHA (``_get_head_sha()`` returns 'unknown' on git failure).
+    """
+    if not isinstance(sha, str) or _HEX_SHA_RE.fullmatch(sha) is None:
+        return False
+    if _HEX_SHA_RE.fullmatch(head_sha) is None:
+        return False
+    return head_sha.lower().startswith(sha.lower())
+
+
+def _visible_text(text: str) -> str:
+    """Strip the metadata footer and code (fenced and inline) from a comment.
+
+    What remains is the reader-visible prose that cross-validation compares with
+    the footer, so hidden JSON or quoted examples cannot satisfy the match.
+    """
+    visible = re.sub(r"<!--\s*review:.*?-->\s*", "", text)
+    visible = re.sub(r"```.*?```", "", visible, flags=re.DOTALL)
+    return re.sub(r"`[^`]+`", "", visible)
+
+
 def check_pr_comments(
     _tier_or_roles: set[str] | str | None = None,
     *,
@@ -1208,10 +1243,14 @@ def check_pr_comments(
             # Legacy marker check for review-gate status comments
             return "<!-- review-gate-status -->" in comment.get("body", "")
 
-        searchable_texts: list[str] = []
+        # Each source is (timestamp, text). The timestamp orders footer verdicts
+        # for the latest-verdict-per-role rule (issue #201): comments carry
+        # `createdAt`, PR Reviews `submittedAt` (ISO-8601 UTC, so string order is
+        # time order). The PR body has no verdict time and sorts first.
+        sources: list[tuple[str, str]] = []
         pr_body = pr_data.get("body")
         if pr_body:
-            searchable_texts.append(pr_body)
+            sources.append(("", pr_body))
 
         # Filter comments, logging any bot comments that are skipped
         skipped_bots: list[str] = []
@@ -1220,7 +1259,7 @@ def check_pr_comments(
                 bot_login = (c.get("author") or {}).get("login", "unknown")
                 skipped_bots.append(bot_login)
             else:
-                searchable_texts.append(c.get("body", ""))
+                sources.append((str(c.get("createdAt") or ""), c.get("body", "")))
 
         # Include PR review bodies — GitHub PR Reviews (submitted via the Review
         # button, pulls/{n}/reviews API) are a separate resource from issue-level
@@ -1238,7 +1277,7 @@ def check_pr_comments(
             else:
                 review_body = r.get("body", "")
                 if review_body:
-                    searchable_texts.append(review_body)
+                    sources.append((str(r.get("submittedAt") or ""), review_body))
 
         if skipped_bots:
             print(
@@ -1263,15 +1302,19 @@ def check_pr_comments(
         # and `metadata_entries`, so it can satisfy neither the regex matchers nor
         # `_meta_has`, and validation continues over the remaining comments. The
         # security property is unchanged: a spoofed comment still clears nothing.
+        #
+        # SYMMETRIC MISMATCH (issue #201 item 2): the converse is disqualified too
+        # -- a NON-approval footer (BLOCKED/CONDITIONAL/...) whose visible text
+        # reads as a peer approval for the same role. Applied on the peer-role
+        # path only: TIER_1_SELF outcomes are deliberately unchanged by #201.
+        self_review_path = tier == "TIER_1_SELF" and not required_roles
         metadata_entries: list[dict[str, str | None]] = []
-        validated_texts: list[str] = []
+        timed_metadata: list[tuple[str, dict[str, str | None]]] = []
+        searchable_texts: list[str] = []
         disqualified: list[str] = []
-        for text in searchable_texts:
+        for timestamp, text in sources:
             meta = _parse_review_metadata(text)
             if meta is not None:
-                # CROSS-VALIDATION: If metadata says a role gave an approval
-                # verdict, the visible text in the same comment MUST also
-                # match that approval via regex. Otherwise disqualify.
                 meta_role = meta.get("role")
                 meta_verdict = meta.get("verdict")
                 # Only cross-validate recognized review roles.
@@ -1280,27 +1323,24 @@ def check_pr_comments(
                 # check, so mismatched metadata is irrelevant -- not
                 # a spoofing vector.
                 if meta_role and meta_verdict and meta_role in _VALID_ROLES:
-                    # Only cross-validate approval verdicts (not BLOCKED/CONDITIONAL)
-                    approval_keywords = {"APPROVED", "SELF-REVIEWED", "REVIEWED", "GO"}
-                    if meta_verdict in approval_keywords:
-                        # Strip metadata HTML comment lines before regex check so
-                        # the hidden JSON tokens don't satisfy the pattern match.
-                        visible_text = re.sub(r"<!--\s*review:.*?-->\s*", "", text)
-                        # Strip fenced code blocks and inline code so that
-                        # approval text inside code examples cannot spoof the
-                        # cross-validation regex.
-                        visible_text = re.sub(r"```.*?```", "", visible_text, flags=re.DOTALL)
-                        visible_text = re.sub(r"`[^`]+`", "", visible_text)
-                        regex_agrees = _matches_approval_pattern(
+                    visible_text = _visible_text(text)
+                    if meta_verdict in _APPROVAL_VERDICTS:
+                        # An approval footer's visible text MUST state that approval.
+                        mismatch = not _matches_approval_pattern(
                             visible_text, meta_role, meta_verdict
                         )
-                        if not regex_agrees:
-                            disqualified.append(f"{meta_role} {meta_verdict}")
-                            continue
+                    else:
+                        # A non-approval footer's visible text MUST NOT approve.
+                        mismatch = not self_review_path and any(
+                            _matches_approval_pattern(visible_text, meta_role, keyword)
+                            for keyword in _PEER_APPROVAL_VERDICTS
+                        )
+                    if mismatch:
+                        disqualified.append(f"{meta_role} {meta_verdict}")
+                        continue
                 metadata_entries.append(meta)
-            validated_texts.append(text)
-
-        searchable_texts = validated_texts
+                timed_metadata.append((timestamp, meta))
+            searchable_texts.append(text)
 
         # Surface the disqualification: a wedge attempt must be visible, not fatal.
         # `_reason` decorates EVERY verdict message below, so the notice cannot be
@@ -1340,25 +1380,8 @@ def check_pr_comments(
                     return True
             return False
 
-        # --- Role-based approval checking ---
-        # Role → approval checker dispatch
-        _role_checkers: dict[str, Any] = {
-            "TMG": lambda: _meta_has("TMG", "APPROVED") or _has_tmg_approval(searchable_texts),
-            "CRS": lambda: _meta_has("CRS", "APPROVED") or _has_crs_approval(searchable_texts),
-            "CE": lambda: _meta_has("CE", "APPROVED") or _has_ce_approval(searchable_texts),
-            "CIV": lambda: _meta_has("CIV", "APPROVED") or _has_civ_approval(searchable_texts),
-            "PE": lambda: _meta_has("PE", "APPROVED") or _has_pe_approval(searchable_texts),
-            "SR": lambda: (
-                _meta_has("SR", "APPROVED")
-                or _has_sr_approval(searchable_texts)
-                # Legacy GR visible-text check only (no _meta_has("GR") —
-                # GR not in VALID_ROLES so metadata bypasses cross-validation)
-                or _has_gr_approval(searchable_texts)
-            ),
-        }
-
         # TIER_1_SELF: self-review logic (no external reviewers required)
-        if tier == "TIER_1_SELF" and (required_roles is None or len(required_roles) == 0):
+        if self_review_path:
             for entry in metadata_entries:
                 if entry.get("verdict") == "SELF-REVIEWED":
                     return True, _reason("✓ Self-review found (metadata)"), []
@@ -1390,12 +1413,29 @@ def check_pr_comments(
             if not effective_roles:
                 return False, _reason(f"❌ Unrecognized tier: {tier}"), []
 
+        # --- Peer-role approvals: head-bound, latest verdict per role (#201) ---
+        # Only footers whose sha names the PR head count; verdicts at any other
+        # SHA (including before a merge-from-main) are ignored, so every push
+        # needs a re-review. Footerless visible text clears no peer role. The
+        # latest head-bound verdict per role decides, ordered by time across
+        # comments and PR Reviews; on a timestamp tie a non-approval sorts last
+        # and therefore wins (fail closed).
+        head_sha = _get_head_sha()
+        at_head = [
+            (timestamp, meta)
+            for timestamp, meta in timed_metadata
+            if _sha_binds_to_head(meta.get("sha"), head_sha)
+        ]
+        at_head.sort(key=lambda e: (e[0], e[1].get("verdict") not in _PEER_APPROVAL_VERDICTS))
+        latest_verdict: dict[str, str | None] = {}
+        for _timestamp, meta in at_head:
+            latest_verdict[str(meta.get("role"))] = meta.get("verdict")
+
         # Check each required role (SECURITY: fail-closed for unknown roles)
         missing_roles: list[str] = []
         missing_display: list[str] = []
         for role in sorted(effective_roles):
-            checker = _role_checkers.get(role)
-            if checker is None or not checker():
+            if role not in _PEER_ROLES or latest_verdict.get(role) not in _PEER_APPROVAL_VERDICTS:
                 missing_roles.append(role)
                 missing_display.append(f"{role} APPROVED or {role} GO")
 
