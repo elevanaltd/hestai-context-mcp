@@ -30,6 +30,7 @@ import re
 import shutil
 import stat
 import time
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -248,13 +249,14 @@ def clock_out(
         session directory is gone, ``"pending"`` when it could not be removed
         (e.g. ENOTEMPTY on an SMB mount while a file is held open); a later
         clock_out sweeps such leftovers. ``status`` stays ``"success"`` in
-        both cases (#199).
+        both cases (#199). Error returns carry ``active_session_cleanup: None``.
     """
     # Validate session_id
     valid_id = _validate_session_id(session_id)
     if valid_id is None:
         return {
             "status": "error",
+            "active_session_cleanup": None,
             "session_id": session_id,
             "archive_path": None,
             "octave_path": None,
@@ -276,6 +278,7 @@ def clock_out(
     if not session_dir.exists():
         return {
             "status": "error",
+            "active_session_cleanup": None,
             "session_id": session_id,
             "archive_path": None,
             "octave_path": None,
@@ -292,6 +295,7 @@ def clock_out(
     if not session_file.exists():
         return {
             "status": "error",
+            "active_session_cleanup": None,
             "session_id": session_id,
             "archive_path": None,
             "octave_path": None,
@@ -308,6 +312,7 @@ def clock_out(
     except (json.JSONDecodeError, OSError) as e:
         return {
             "status": "error",
+            "active_session_cleanup": None,
             "session_id": session_id,
             "archive_path": None,
             "octave_path": None,
@@ -481,7 +486,7 @@ _LEFTOVER_MIN_AGE_SECONDS = 60 * 60
 
 
 def _is_gone(path: Path) -> bool:
-    """True only when lstat says the path does not exist.
+    """True only when lstat says the path does not exist and its parent does.
 
     Any other error (EIO, EACCES on a dropping SMB mount) is 'still there', so
     it stays on the retry/pending path instead of escaping clock_out.
@@ -489,6 +494,12 @@ def _is_gone(path: Path) -> bool:
     try:
         path.lstat()
     except FileNotFoundError:
+        # Only gone if the parent is still there: a dropped mount or broken
+        # .hestai/state link also gives ENOENT while the directory survives.
+        try:
+            path.parent.lstat()
+        except OSError:
+            return False
         return True
     except OSError:
         return False
@@ -522,12 +533,23 @@ def _remove_active_session_dir(session_dir: Path) -> str:
     return "pending"
 
 
+def _is_session_id_name(name: str) -> bool:
+    """True for a canonical uuid4 string, the only name create_session gives a session."""
+    try:
+        parsed = uuid.UUID(name)
+    except ValueError:
+        return False
+    return parsed.version == 4 and str(parsed) == name
+
+
 def _is_sweepable_leftover(entry: Path, now: float) -> bool:
-    """True for an old real directory holding nothing but SMB placeholder files.
+    """True for an old, uuid4-named real directory holding only SMB placeholder files.
 
     A directory with session.json (or any other content) may be a live
     session, possibly the other machine's, and is never swept.
     """
+    if not _is_session_id_name(entry.name):
+        return False
     st = entry.lstat()
     if not stat.S_ISDIR(st.st_mode):
         return False
