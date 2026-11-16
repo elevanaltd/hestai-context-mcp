@@ -1,0 +1,18 @@
+---
+type: "DECISION_RECORD"
+version: "1.4"
+token: "HO-REVIEW-GATE-AND-HC-MERGE-AUTHORITY-20261116"
+status: "PROPOSED"
+tier: "STRATEGIC"
+authored_at: "2026-11-16T19:28:21Z"
+decision: "Require head-bound latest reviewer verdicts in PR-A; exclude PR bodies as approval evidence in PR-B; authorize HC to merge hestai-context-mcp PRs after head-commit quality gates and recorded HC verification."
+because: "Issues #201 and #116 expose stale or body-only approvals; operator limits remediation to these defects because further gate investment is unwanted."
+compression_tier: "CONSERVATIVE"
+context: "hestai-context-mcp; HC control-room session in holistic-orchestrator; ceremony 6364f71e; issue #201; issue #116 P0-2; 2026-06-22 triage routed P0-2 to requirements-steward/debate-hall, but operator ruled directly."
+hc_merge_authority: "The HC control room, hestai-context-mcp holistic-orchestrator seat, may merge any hestai-context-mcp PR only after quality gates pass at the head commit and HC verification is on record."
+loss_profile: "[preserve:reviewer-verdict rules∧PR-body exclusion∧HC merge authority∧quality gates∧rollout scope∧IDs∧operator quotes,drop:discussion prose]"
+operator_ruling: "\"Who rules on point 2 - Rule on it here\"; \"Yes\"; \"PR description approvals (PR-B) = go with your recommendations\"; \"You have authority to merge any PR here\"; \"don't want to pin things to it\""
+pr_a_review_gate: "A submit_review footer sha must prefix-match the PR head SHA with at least 7 characters; only the latest verdict for each role at that head clears TMG, CRS, CE, CIV, PE, or SR. A later BLOCKED or CONDITIONAL revokes an earlier APPROVED. Null, missing, or stale sha clears nothing. Disqualify comments whose visible approval contradicts the footer verdict. Plain-text role approvals without a footer, including comments and PR Review bodies, clear no reviewer role."
+pr_b_approval_evidence: "The PR description is not approval evidence of any kind, including on TIER_1_SELF; body-written CRS APPROVED and HO REVIEWED clear nothing. Self-review lines count only in PR comments. TIER_1_SELF self-review is not head-bound in this change."
+scope_and_rollout: "Limit the gate fix to the two defects; add no gate features. When PR-A merges, the change goes live in every repo covered by org ruleset 12626210; consuming-repo rooms were notified before PR-A opened."
+---
