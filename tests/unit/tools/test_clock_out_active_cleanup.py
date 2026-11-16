@@ -203,11 +203,12 @@ class TestActiveSessionRemoval:
     ):
         """cubic on 0061f59: an EIO from checking the directory must not abort clock_out."""
         session_dir = _setup_active_session(tmp_path)
-        _enotempty_rmtree(monkeypatch, session_dir, failures=None)
+        calls = _enotempty_rmtree(monkeypatch, session_dir, failures=None)
         real_stat = Path.stat
 
         def stat_eio(self, *args, **kwargs):
-            if self == session_dir:
+            # The mount drops after the first removal attempt.
+            if self == session_dir and calls["target"] > 0:
                 raise OSError(errno.EIO, "Input/output error", str(self))
             return real_stat(self, *args, **kwargs)
 
