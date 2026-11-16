@@ -480,6 +480,21 @@ _SMB_PLACEHOLDER_PREFIX = ".smbdelete"
 _LEFTOVER_MIN_AGE_SECONDS = 60 * 60
 
 
+def _is_gone(path: Path) -> bool:
+    """True only when lstat says the path does not exist.
+
+    Any other error (EIO, EACCES on a dropping SMB mount) is 'still there', so
+    it stays on the retry/pending path instead of escaping clock_out.
+    """
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _remove_active_session_dir(session_dir: Path) -> str:
     """Remove the active session directory with a bounded retry.
 
@@ -493,7 +508,7 @@ def _remove_active_session_dir(session_dir: Path) -> str:
         except OSError as e:
             # Decide by the directory itself: an ENOENT may name a child (a
             # placeholder vanishing mid-walk) while the directory remains.
-            if not session_dir.exists():
+            if _is_gone(session_dir):
                 return "removed"
             if attempt < _RMTREE_ATTEMPTS:
                 time.sleep(_RMTREE_RETRY_DELAY_SECONDS)
