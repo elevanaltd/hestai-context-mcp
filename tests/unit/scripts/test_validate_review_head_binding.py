@@ -348,6 +348,23 @@ class TestSymmetricMismatch:
         assert missing == []
         assert "spoofing" in msg.lower(), msg
 
+    def test_disqualified_block_still_revokes_earlier_approval_at_head(self) -> None:
+        """Fail closed (cubic P2 on PR #295): disqualifying a non-approval must not
+        resurrect the role's earlier head approval. The comment clears nothing, but
+        its non-approval verdict still counts as the role's latest at head."""
+        blocked = _verdict(
+            "CE", "BLOCKED", HEAD[:7], text="CE BLOCKED: fix X first\nCE APPROVED once X lands"
+        )
+        approved, msg, missing = _check(
+            comments=[
+                _comment(_verdict("CE", "APPROVED", HEAD[:7]), at=T1),
+                _comment(blocked, at=T2),
+            ]
+        )
+        assert approved is False, msg
+        assert missing == ["CE"]
+        assert "spoofing" in msg.lower(), msg
+
     def test_agreeing_blocked_comment_is_not_disqualified(self) -> None:
         approved, msg, _ = _check(comments=[_comment(_verdict("CE", "BLOCKED", HEAD[:7]))])
         assert approved is False, msg
