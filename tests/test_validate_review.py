@@ -122,6 +122,51 @@ class TestFailClosedBehavior:
 
 
 @pytest.mark.behavior
+class TestHeadBoundReviewerGuidance:
+    """Issue #201: footerless text and verdicts at an older head clear nothing, so
+    the gate's guidance must steer reviewers to submit_review with the PR head SHA,
+    never to a plain-text approval comment."""
+
+    def test_missing_message_points_to_submit_review_with_head_sha(
+        self, ci_environment, monkeypatch, pr_head
+    ):
+        monkeypatch.setattr(subprocess, "run", _mock_gh_pr_view([{"body": "CE APPROVED: ok"}]))
+
+        approved, message, missing = validate_review.check_pr_comments(
+            required_roles={"CE"}, tier="TIER_2_STANDARD"
+        )
+
+        assert approved is False and missing == ["CE"]
+        assert "submit_review" in message and "commit_sha" in message, message
+        assert "older head" in message and "footer" in message, message
+        assert "CE APPROVED or CE GO" not in message, message
+
+    def test_main_failure_guidance_points_to_submit_review(
+        self, ci_environment, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            validate_review,
+            "get_changed_files",
+            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+        )
+        monkeypatch.setattr(validate_review, "check_emergency_bypass", lambda: False)
+        monkeypatch.setattr(validate_review, "_get_pr_body", lambda: "")
+        monkeypatch.setattr(validate_review, "_git_show_file", lambda *a, **k: None)
+        monkeypatch.setattr(
+            validate_review,
+            "check_pr_comments",
+            lambda *args, **kwargs: (False, "missing", ["CE"]),
+        )
+
+        assert validate_review.main() == 1
+        out = capsys.readouterr().out
+        guidance = out.split("Review Requirements:")[1].split("REVIEW_GATE_JSON")[0]
+        assert "submit_review" in guidance and "commit_sha" in guidance, guidance
+        assert "older head" in guidance and "footer" in guidance, guidance
+        assert "[assessment]" not in guidance, guidance
+
+
+@pytest.mark.behavior
 class TestLocalModePermissiveness:
     """Validate that local mode remains permissive for developer UX."""
 
@@ -447,7 +492,10 @@ class TestPRCommentValidation:
 
         approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
         assert approved is False
-        assert "CE APPROVED" in message or "CE GO" in message
+        # #201: the guidance names the role and points at submit_review with the
+        # head SHA, not at a footerless "CE APPROVED" text comment.
+        assert "CE" in message
+        assert "submit_review" in message and "commit_sha" in message
 
     def test_tier_3_requires_tmg_crs_ce_civ(self, ci_environment, monkeypatch):
         """TIER_3_CRITICAL requires TMG + CRS + CE + CIV (5-tier system)."""
