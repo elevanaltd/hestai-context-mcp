@@ -467,3 +467,30 @@ class TestChangesRequestedReviewRevokes:
             tier="TIER_1_SELF",
         )
         assert approved is False, msg
+
+
+@pytest.mark.unit
+@pytest.mark.security
+class TestMalformedFooterCannotCrashGate:
+    """A footer whose role or verdict is not a string (e.g. a JSON list) is
+    malformed: it clears nothing and must not crash the gate (a crash would let
+    one comment block every approval, the #155 class)."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            '{"role": "XX", "verdict": ["x"], "sha": "%s"}',
+            '{"role": "CE", "verdict": ["x"], "sha": "%s"}',
+            '{"role": ["CE"], "verdict": "BLOCKED", "sha": "%s"}',
+        ],
+    )
+    def test_malformed_footer_is_ignored(self, payload: str) -> None:
+        poison = f"looks fine\n<!-- review: {payload % HEAD[:7]} -->"
+        approved, msg, missing = _check(
+            comments=[
+                _comment(_verdict("CE", "APPROVED", HEAD[:7]), at=T1),
+                _comment(poison, at=T2),
+            ]
+        )
+        assert approved is True, msg
+        assert missing == []
