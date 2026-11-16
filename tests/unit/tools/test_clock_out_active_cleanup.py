@@ -466,6 +466,18 @@ class TestLeftoverActiveDirectorySweep:
 
         assert d.is_dir()
 
+    def test_sweep_is_skipped_without_dir_fd_support(self, tmp_path, monkeypatch, no_sleep):
+        """cubic P2 on 0395582: no dir_fd unlink (non-POSIX) -> skip the sweep, never crash."""
+        _setup_active_session(tmp_path)
+        leftover = _leftover(tmp_path, "old-no-dirfd", [".smbdeleteHHH1"], TWO_HOURS)
+        monkeypatch.setattr(os, "supports_dir_fd", set())
+
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["status"] == "success"
+        assert result["active_session_cleanup"] == "removed"
+        assert (leftover / ".smbdeleteHHH1").exists()
+
     def test_error_return_does_not_sweep(self, tmp_path, no_sleep):
         """Only a successful clock_out sweeps; an unknown session id touches nothing."""
         _active_dir(tmp_path).mkdir(parents=True)
