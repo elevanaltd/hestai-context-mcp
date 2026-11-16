@@ -173,6 +173,31 @@ class TestActiveSessionRemoval:
         assert result["active_session_cleanup"] == "removed"
         assert no_sleep == []
 
+    def test_child_file_not_found_with_directory_still_present_is_pending(
+        self, tmp_path, monkeypatch, no_sleep
+    ):
+        """A placeholder vanishing mid-walk raises ENOENT for the CHILD; the dir may remain.
+
+        Pre-review on 3f09ab6: FileNotFoundError must not be read as 'directory gone'.
+        """
+        session_dir = _setup_active_session(tmp_path)
+        real_rmtree = shutil.rmtree
+
+        def child_enoent(path, *args, **kwargs):
+            if Path(path) == session_dir:
+                raise FileNotFoundError(
+                    errno.ENOENT, "No such file or directory", str(session_dir / ".smbdeleteX")
+                )
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(clock_out_module.shutil, "rmtree", child_enoent)
+
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert session_dir.exists()
+        assert result["active_session_cleanup"] == "pending"
+        assert no_sleep == [0.25, 0.25]
+
 
 class TestLeftoverActiveDirectorySweep:
     """A later clock_out removes only leftovers that cannot be a live session."""
