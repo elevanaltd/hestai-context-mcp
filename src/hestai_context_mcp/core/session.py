@@ -48,6 +48,17 @@ STANDARD_CONTEXT_FILES = [
 ]
 
 
+def _same_path(a: Path, b: Path) -> bool:
+    """True when a and b resolve to the same path; False if either cannot resolve.
+
+    Path.resolve() raises RuntimeError (3.11/3.12) or OSError on a symlink loop.
+    """
+    try:
+        return a.resolve() == b.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
 class SessionManager:
     """Manages agent session lifecycle.
 
@@ -271,7 +282,15 @@ class SessionManager:
         hestai_dir.mkdir(parents=True, exist_ok=True)
 
         main_root = get_main_checkout_root(self.working_dir)
-        if main_root is None:
+        if main_root is None and (self.working_dir / ".git").is_file():
+            # A .git FILE marks a linked worktree whose main checkout could not
+            # be resolved (git failed, or a bare/submodule layout). The
+            # main-checkout path would rewrite the link: the #197 fork.
+            logger.warning(
+                f"{self.working_dir} looks like a git worktree but its main checkout "
+                f"could not be resolved; {state_link} left untouched (#197)"
+            )
+        elif main_root is None:
             state_real = self.working_dir / ".hestai-state"
             self._ensure_state_directory(state_real)
             self._ensure_state_symlink(state_link, state_real)
@@ -291,9 +310,10 @@ class SessionManager:
 
         - A link that already resolves to ``shared_state`` is left verbatim.
         - An existing fork is warned about and left untouched for the operator
-          to clean up: a local ``<worktree>/.hestai-state`` that is not the
-          shared state, or a real directory at ``.hestai/state``.
-        - Otherwise a wrong, broken or missing link, or a plain file, is
+          to clean up: a link beside a local ``<worktree>/.hestai-state``
+          that is not the shared state, or a real directory at
+          ``.hestai/state``. Stray local state is always warned about.
+        - Otherwise a wrong, broken, looping or missing link, or a plain file, is
           replaced with an absolute link to ``shared_state`` (the target the
           SessionStart hook writes).
 
@@ -304,28 +324,29 @@ class SessionManager:
             shared_state: The main checkout's .hestai-state.
         """
         local_state = self.working_dir / ".hestai-state"
-        stray_local = local_state.exists() and local_state.resolve() != shared_state.resolve()
-
-        if state_link.is_symlink() and state_link.resolve() == shared_state.resolve():
-            if stray_local:
-                logger.warning(
-                    f"Worktree has local state at {local_state} that is not shared with the "
-                    f"main checkout; left untouched for operator cleanup (#197)"
-                )
-            self._ensure_state_directory(shared_state)
-            return
-
+        stray_local = local_state.exists() and not _same_path(local_state, shared_state)
         if stray_local:
             logger.warning(
-                f"Worktree state is forked into {local_state}; {state_link} left untouched "
-                f"for operator cleanup. Session state will not reach {shared_state} (#197)"
+                f"Worktree has local state at {local_state} that is not shared with the "
+                f"main checkout; left untouched for operator cleanup (#197)"
             )
+
+        if state_link.is_symlink() and _same_path(state_link, shared_state):
+            self._ensure_state_directory(shared_state)
             return
 
         if state_link.is_dir() and not state_link.is_symlink():
             logger.warning(
                 f"Real directory at {state_link} holds worktree-local state; left untouched "
                 f"for operator cleanup. Session state will not reach {shared_state} (#197)"
+            )
+            return
+
+        if stray_local and state_link.is_symlink():
+            # The fork shape (e.g. ../.hestai-state plus local data): leave it.
+            logger.warning(
+                f"{state_link} left untouched beside the forked state; session state "
+                f"will not reach {shared_state} (#197)"
             )
             return
 

@@ -53,7 +53,8 @@ def get_main_checkout_root(working_dir: Path) -> Path | None:
 
     Returns:
         The resolved main checkout root, or None for a main checkout, a
-        directory outside git, or when git is unavailable.
+        directory outside git, a worktree whose common dir is not a
+        checkout's ``.git``, or when git is unavailable.
     """
     try:
         result = subprocess.run(
@@ -74,6 +75,10 @@ def get_main_checkout_root(working_dir: Path) -> Path | None:
     git_dir = (working_dir / lines[0]).resolve()
     common_dir = (working_dir / lines[1]).resolve()
     if git_dir == common_dir:
+        return None
+    # Only <main>/.git names a checkout by its parent. A bare repo, a
+    # submodule (.git/modules/<name>) or a --separate-git-dir layout does not.
+    if common_dir.name != ".git":
         return None
     return common_dir.parent
 
