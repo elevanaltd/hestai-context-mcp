@@ -291,13 +291,14 @@ class SessionManager:
                 f"resolved ({e}) (#197)"
             )
 
-        if unresolved and (state_link.is_symlink() or state_link.exists()):
-            # Rewriting an existing link here could undo a correct link to the
-            # main checkout: the #197 fork, triggered by a detection failure.
+        if unresolved and state_link.is_dir():
+            # A usable link (or real directory) is kept: rewriting it could undo
+            # a correct link to the main checkout, the #197 fork triggered by a
+            # detection failure. A broken link or plain file is repaired below.
             logger.warning(f"{state_link} left untouched (#197)")
         elif main_root is None:
             # Main checkout, outside git, or an unresolved worktree with no
-            # link yet (pre-#197 behaviour, so create_session never mkdirs a
+            # usable link (pre-#197 behaviour, so create_session never mkdirs a
             # real .hestai/state directory).
             state_real = self.working_dir / ".hestai-state"
             self._ensure_state_directory(state_real)
