@@ -44,6 +44,10 @@ Thumbs.db
 # HestAI Three-Tier Architecture
 # Tier 1: System governance (MCP-delivered, never committed)
 .hestai-sys
+# Slash form too: the HestAI-MCP server only recognises '.hestai-sys/' and appends it
+# to the worktree's .gitignore on every goose review if missing. Keep the bare line above:
+# the slash form alone matches directories only and would un-ignore the .hestai-sys symlink.
+.hestai-sys/
 # Tier 3: Working state (gitignored, symlinked from .hestai/state/)
 .hestai-state
 .hestai/state
