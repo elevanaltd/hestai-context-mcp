@@ -363,9 +363,13 @@ class TestSymmetricMismatch:
     def test_disqualified_block_still_revokes_earlier_approval_at_head(self) -> None:
         """Fail closed (cubic P2 on PR #295): disqualifying a non-approval must not
         resurrect the role's earlier head approval. The comment clears nothing, but
-        its non-approval verdict still counts as the role's latest at head."""
+        its non-approval verdict still counts as the role's latest at head.
+
+        Under option B the disqualification comes from the header: it reads as an
+        approval while the footer says BLOCKED. (A 'CE BLOCKED:' header followed by
+        approval-like prose is an ordinary block, not a mismatch.)"""
         blocked = _verdict(
-            "CE", "BLOCKED", HEAD[:7], text="CE BLOCKED: fix X first\nCE APPROVED once X lands"
+            "CE", "BLOCKED", HEAD[:7], text="CE APPROVED: once X lands\nBlocking: fix X first"
         )
         approved, msg, missing = _check(
             comments=[
