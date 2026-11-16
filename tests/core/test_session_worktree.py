@@ -387,7 +387,7 @@ class TestWorktreeEdgeCases:
 
         monkeypatch.setattr("hestai_context_mcp.core.git_state.subprocess.run", _git_128)
 
-        with pytest.raises(git_state.MainCheckoutUnresolvedError):
+        with pytest.raises(git_state.MainCheckoutUnresolvedError, match="exit code 128"):
             SessionManager(str(worktree)).create_session(role="r", focus="f")
         assert not (worktree / ".hestai-state").exists()
         assert not (worktree / ".hestai" / "state").is_symlink()
