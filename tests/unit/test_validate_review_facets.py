@@ -18,6 +18,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 import validate_review
 
+# Issue #201: a peer role (TMG/CRS/CE/CIV/PE/SR) clears only through a review
+# metadata footer whose sha names the PR head; footerless visible text no longer
+# clears it. Approving bodies carry a head-bound footer and the CI fixtures pin
+# the head SHA check_pr_comments binds to.
+_PR_HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _at_head(body: str, role: str, verdict: str = "APPROVED") -> str:
+    """Append the footer submit_review emits, bound to the pinned PR head."""
+    footer = json.dumps(
+        {"role": role, "provider": "goose", "verdict": verdict, "sha": _PR_HEAD[:7]}
+    )
+    return f"{body}\n<!-- review: {footer} -->"
+
 
 # ---------------------------------------------------------------------------
 # 1. Facet classification tests
@@ -276,6 +290,7 @@ class TestExecutableSpecGateRequiresCRS:
         """Set CI + PR_NUMBER so check_pr_comments runs its full logic."""
         monkeypatch.setenv("CI", "true")
         monkeypatch.setenv("PR_NUMBER", "999")
+        monkeypatch.setattr(validate_review, "_get_head_sha", lambda: _PR_HEAD)
 
     def test_executable_spec_fails_without_crs(self, monkeypatch) -> None:
         """EXECUTABLE_SPEC gate must reject when CRS approval is missing."""
@@ -289,11 +304,11 @@ class TestExecutableSpecGateRequiresCRS:
                         "comments": [
                             {
                                 "author": {"login": "human-ce"},
-                                "body": "CE APPROVED: code looks good",
+                                "body": _at_head("CE APPROVED: code looks good", "CE"),
                             },
                             {
                                 "author": {"login": "human-sr"},
-                                "body": "SR APPROVED: standards met",
+                                "body": _at_head("SR APPROVED: standards met", "SR"),
                             },
                         ],
                     }
@@ -322,15 +337,15 @@ class TestExecutableSpecGateRequiresCRS:
                         "comments": [
                             {
                                 "author": {"login": "human-ce"},
-                                "body": "CE APPROVED: code looks good",
+                                "body": _at_head("CE APPROVED: code looks good", "CE"),
                             },
                             {
                                 "author": {"login": "human-crs"},
-                                "body": "CRS APPROVED: review complete",
+                                "body": _at_head("CRS APPROVED: review complete", "CRS"),
                             },
                             {
                                 "author": {"login": "human-sr"},
-                                "body": "SR APPROVED: standards met",
+                                "body": _at_head("SR APPROVED: standards met", "SR"),
                             },
                         ],
                     }
@@ -429,6 +444,7 @@ def ci_environment(monkeypatch):
     monkeypatch.setenv("CI", "true")
     monkeypatch.setenv("GITHUB_BASE_REF", "origin/main")
     monkeypatch.setenv("PR_NUMBER", "999")
+    monkeypatch.setattr(validate_review, "_get_head_sha", lambda: _PR_HEAD)
 
 
 @pytest.mark.unit
@@ -445,7 +461,11 @@ class TestRoleBasedApproval:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "SR APPROVED: standards aligned with North Star"},
+                            {
+                                "body": _at_head(
+                                    "SR APPROVED: standards aligned with North Star", "SR"
+                                )
+                            },
                         ],
                     }
                 ),
@@ -470,9 +490,9 @@ class TestRoleBasedApproval:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: logic correct"},
-                            {"body": "CE APPROVED: architecture sound"},
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -497,8 +517,8 @@ class TestRoleBasedApproval:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "CRS APPROVED: logic correct"},
-                            {"body": "CE APPROVED: architecture sound"},
+                            {"body": _at_head("CRS APPROVED: logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -524,10 +544,10 @@ class TestRoleBasedApproval:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: logic correct"},
-                            {"body": "CE APPROVED: architecture sound"},
-                            {"body": "SR APPROVED: standards aligned"},
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: architecture sound", "CE")},
+                            {"body": _at_head("SR APPROVED: standards aligned", "SR")},
                         ],
                     }
                 ),
@@ -664,7 +684,7 @@ class TestFailClosedUnknownRoles:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "CE APPROVED: architecture sound"},
+                            {"body": _at_head("CE APPROVED: architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -688,10 +708,15 @@ class TestFailClosedUnknownRoles:
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestSRCheckerGRBackwardCompat:
-    """SR checker in check_pr_comments must accept legacy GR APPROVED comments."""
+    """Legacy GR visible-text approvals no longer satisfy SR (issue #201).
 
-    def test_sr_satisfied_by_legacy_gr_comment(self, ci_environment, monkeypatch) -> None:
-        """required_roles={SR} passes with legacy 'GR APPROVED' comment."""
+    The footerless visible-text path is retired for peer roles (operator ruling
+    relayed 2026-11-16), including the legacy GR alias for SR. GR was never a
+    VALID_ROLES footer role, so a legacy GR comment can no longer clear SR.
+    """
+
+    def test_sr_not_satisfied_by_legacy_gr_comment(self, ci_environment, monkeypatch) -> None:
+        """required_roles={SR} is missing with only a legacy 'GR APPROVED' comment."""
         import subprocess
 
         def mock_run(cmd, *args, **kwargs):
@@ -710,10 +735,11 @@ class TestSRCheckerGRBackwardCompat:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments(
+        approved, message, missing = validate_review.check_pr_comments(
             required_roles={"SR"}, tier="TIER_2_STANDARD"
         )
-        assert approved is True, f"SR should accept legacy GR APPROVED comments, got: {message}"
+        assert approved is False, f"Legacy GR text must not clear SR, got: {message}"
+        assert missing == ["SR"]
 
 
 # ---------------------------------------------------------------------------

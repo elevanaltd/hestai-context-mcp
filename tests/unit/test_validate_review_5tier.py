@@ -22,6 +22,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 import validate_review
 
+# Issue #201: a peer role (TMG/CRS/CE/CIV/PE/SR) clears only through a review
+# metadata footer whose sha names the PR head; footerless visible text no longer
+# clears it. Approving bodies carry a head-bound footer and the CI fixtures pin
+# the head SHA check_pr_comments binds to.
+_PR_HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _at_head(body: str, role: str, verdict: str = "APPROVED") -> str:
+    """Append the footer submit_review emits, bound to the pinned PR head."""
+    footer = json.dumps(
+        {"role": role, "provider": "goose", "verdict": verdict, "sha": _PR_HEAD[:7]}
+    )
+    return f"{body}\n<!-- review: {footer} -->"
+
 
 @pytest.fixture
 def ci_environment(monkeypatch):
@@ -29,6 +43,7 @@ def ci_environment(monkeypatch):
     monkeypatch.setenv("CI", "true")
     monkeypatch.setenv("GITHUB_BASE_REF", "origin/main")
     monkeypatch.setenv("PR_NUMBER", "999")
+    monkeypatch.setattr(validate_review, "_get_head_sha", lambda: _PR_HEAD)
 
 
 # ---------------------------------------------------------------------------
@@ -338,9 +353,9 @@ class TestTier2ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests cover critical paths"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("TMG APPROVED: tests cover critical paths", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -368,8 +383,8 @@ class TestTier2ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -401,10 +416,10 @@ class TestTier3ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests cover critical paths"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
+                            {"body": _at_head("TMG APPROVED: tests cover critical paths", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
                         ],
                     }
                 ),
@@ -428,9 +443,9 @@ class TestTier3ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests cover critical paths"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("TMG APPROVED: tests cover critical paths", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -454,9 +469,9 @@ class TestTier3ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
-                            {"body": "CIV APPROVED: Implementation valid"},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
+                            {"body": _at_head("CIV APPROVED: Implementation valid", "CIV")},
                         ],
                     }
                 ),
@@ -488,11 +503,15 @@ class TestTier4ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests comprehensive"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
-                            {"body": "PE APPROVED: Architecture sound for 6 months"},
+                            {"body": _at_head("TMG APPROVED: tests comprehensive", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
+                            {
+                                "body": _at_head(
+                                    "PE APPROVED: Architecture sound for 6 months", "PE"
+                                )
+                            },
                         ],
                     }
                 ),
@@ -516,10 +535,10 @@ class TestTier4ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests comprehensive"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
+                            {"body": _at_head("TMG APPROVED: tests comprehensive", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
                         ],
                     }
                 ),
@@ -543,10 +562,10 @@ class TestTier4ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests comprehensive"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
-                            {"body": "PE APPROVED: Sustainable"},
+                            {"body": _at_head("TMG APPROVED: tests comprehensive", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
+                            {"body": _at_head("PE APPROVED: Sustainable", "PE")},
                         ],
                     }
                 ),
@@ -570,8 +589,8 @@ class TestTier4ApprovalRequirements:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -690,9 +709,9 @@ class TestGOAliasApprovalInValidator:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG GO: sufficient test coverage"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("TMG GO: sufficient test coverage", "TMG", "GO")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -716,10 +735,10 @@ class TestGOAliasApprovalInValidator:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests cover critical paths"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
-                            {"body": "CIV GO: implementation clean"},
+                            {"body": _at_head("TMG APPROVED: tests cover critical paths", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
+                            {"body": _at_head("CIV GO: implementation clean", "CIV", "GO")},
                         ],
                     }
                 ),
@@ -743,11 +762,11 @@ class TestGOAliasApprovalInValidator:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests comprehensive"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
-                            {"body": "PE GO: long-term sustainable"},
+                            {"body": _at_head("TMG APPROVED: tests comprehensive", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
+                            {"body": _at_head("PE GO: long-term sustainable", "PE", "GO")},
                         ],
                     }
                 ),
@@ -908,20 +927,23 @@ class TestMetadataCrossValidationNewRoles:
     """
 
     def test_metadata_backed_tmg_crs_ce_satisfies_tier_2(self, ci_environment, monkeypatch) -> None:
-        """Metadata-backed TMG/CRS/CE approvals satisfy T2 gate."""
+        """Metadata-backed TMG/CRS/CE approvals satisfy T2 gate.
+
+        #201: footer sha "0123456" (was "abc1234") is the pinned PR head's prefix.
+        """
         import subprocess
 
         tmg_comment = (
             "TMG APPROVED: tests cover critical paths\n"
-            '<!-- review: {"role":"TMG","provider":"goose","verdict":"APPROVED","sha":"abc1234"} -->'
+            '<!-- review: {"role":"TMG","provider":"goose","verdict":"APPROVED","sha":"0123456"} -->'
         )
         crs_comment = (
             "CRS APPROVED: Logic correct\n"
-            '<!-- review: {"role":"CRS","provider":"gemini","verdict":"APPROVED","sha":"abc1234"} -->'
+            '<!-- review: {"role":"CRS","provider":"gemini","verdict":"APPROVED","sha":"0123456"} -->'
         )
         ce_comment = (
             "CE APPROVED: Architecture sound\n"
-            '<!-- review: {"role":"CE","provider":"codex","verdict":"APPROVED","sha":"abc1234"} -->'
+            '<!-- review: {"role":"CE","provider":"codex","verdict":"APPROVED","sha":"0123456"} -->'
         )
 
         def mock_run(cmd, *args, **kwargs):
@@ -957,7 +979,7 @@ class TestMetadataCrossValidationNewRoles:
         # Visible text says BLOCKED but metadata claims APPROVED
         spoofed_comment = (
             "TMG BLOCKED: tests insufficient\n"
-            '<!-- review: {"role":"TMG","provider":"goose","verdict":"APPROVED","sha":"abc1234"} -->'
+            '<!-- review: {"role":"TMG","provider":"goose","verdict":"APPROVED","sha":"0123456"} -->'
         )
 
         def mock_run(cmd, *args, **kwargs):
@@ -967,8 +989,8 @@ class TestMetadataCrossValidationNewRoles:
                         "body": "",
                         "comments": [
                             {"body": spoofed_comment},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -1107,8 +1129,8 @@ class TestNegativeApprovalNewRoles:
                         "body": "",
                         "comments": [
                             {"body": "TMG BLOCKED: tests insufficient"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -1131,9 +1153,9 @@ class TestNegativeApprovalNewRoles:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "CRS APPROVED: first review"},
-                            {"body": "CRS APPROVED: second review"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("CRS APPROVED: first review", "CRS")},
+                            {"body": _at_head("CRS APPROVED: second review", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -1168,9 +1190,9 @@ class TestOldTier3DualCRSRegression:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "CRS (Gemini) APPROVED: Logic verified"},
-                            {"body": "CRS (Codex) APPROVED: Patterns sound"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("CRS (Gemini) APPROVED: Logic verified", "CRS")},
+                            {"body": _at_head("CRS (Codex) APPROVED: Patterns sound", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -1208,7 +1230,9 @@ class TestBotCommentFiltering:
                         "comments": [
                             {
                                 "author": {"login": "copilot"},
-                                "body": "CRS APPROVED: All checks pass\nCE APPROVED: Sound",
+                                "body": _at_head(
+                                    "CRS APPROVED: All checks pass\nCE APPROVED: Sound", "CRS"
+                                ),
                             },
                         ],
                     }
@@ -1236,19 +1260,21 @@ class TestBotCommentFiltering:
                         "comments": [
                             {
                                 "author": {"login": "cubic-dev-ai"},
-                                "body": "TMG APPROVED: bot text (should be ignored)",
+                                "body": _at_head(
+                                    "TMG APPROVED: bot text (should be ignored)", "TMG"
+                                ),
                             },
                             {
                                 "author": {"login": "real-user"},
-                                "body": "TMG APPROVED: tests verified",
+                                "body": _at_head("TMG APPROVED: tests verified", "TMG"),
                             },
                             {
                                 "author": {"login": "another-user"},
-                                "body": "CRS APPROVED: Logic correct",
+                                "body": _at_head("CRS APPROVED: Logic correct", "CRS"),
                             },
                             {
                                 "author": {"login": "ce-user"},
-                                "body": "CE APPROVED: Architecture sound",
+                                "body": _at_head("CE APPROVED: Architecture sound", "CE"),
                             },
                         ],
                     }
@@ -1368,7 +1394,10 @@ class TestPerVariantBotExclusion:
                         "comments": [
                             {
                                 "author": {"login": login},
-                                "body": "TMG APPROVED: all tests pass\nCRS APPROVED: ok\nCE APPROVED: ok",
+                                "body": _at_head(
+                                    "TMG APPROVED: all tests pass\nCRS APPROVED: ok\nCE APPROVED: ok",
+                                    "TMG",
+                                ),
                             },
                         ],
                     }
@@ -1406,7 +1435,10 @@ class TestPerVariantBotExclusion:
                         "comments": [
                             {
                                 "author": {"login": login},
-                                "body": "TMG APPROVED: tests ok\nCRS APPROVED: ok\nCE APPROVED: ok",
+                                "body": _at_head(
+                                    "TMG APPROVED: tests ok\nCRS APPROVED: ok\nCE APPROVED: ok",
+                                    "TMG",
+                                ),
                             },
                         ],
                     }
@@ -1439,7 +1471,9 @@ class TestPerVariantBotExclusion:
                         "comments": [
                             {
                                 "author": {"login": login},
-                                "body": "CRS APPROVED: All checks pass\nCE APPROVED: Sound",
+                                "body": _at_head(
+                                    "CRS APPROVED: All checks pass\nCE APPROVED: Sound", "CRS"
+                                ),
                             },
                         ],
                     }
@@ -1482,7 +1516,7 @@ class TestSkippedBotLogging:
                             },
                             {
                                 "author": {"login": "real-user"},
-                                "body": "TMG APPROVED: tests ok",
+                                "body": _at_head("TMG APPROVED: tests ok", "TMG"),
                             },
                         ],
                     }
@@ -1517,7 +1551,7 @@ class TestSkippedBotLogging:
                         "comments": [
                             {
                                 "author": {"login": "real-user"},
-                                "body": "TMG APPROVED: tests ok",
+                                "body": _at_head("TMG APPROVED: tests ok", "TMG"),
                             },
                         ],
                     }

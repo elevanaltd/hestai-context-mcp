@@ -3212,20 +3212,37 @@ class TestSubmitReviewCiParity:
     # deliberately -- see module-level comment above.
     _CI_CHECKED_ROLES = ["TMG", "CRS", "CE", "CIV", "PE", "SR"]
 
-    @staticmethod
-    def _ci_accepts(monkeypatch, role: str, probe_text: str) -> bool:
+    # Issue #201: CI clears a peer role only through a review metadata footer
+    # bound to the PR head, so the probe is posted as submit_review posts it --
+    # visible text plus a head-bound APPROVED footer for the required role. CI
+    # then accepts iff the visible text cross-validates for that role.
+    _HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+    # The one divergence #201 introduces, in the SAFE direction only: CI no
+    # longer honours the legacy GR visible-text alias for SR (footerless path
+    # retired), while submit_review's guard still flags GR-shaped text on an SR
+    # verdict. submit_review refusing MORE than CI counts cannot open a gate.
+    _KNOWN_SAFE_DIVERGENCE = {("SR", "GR")}
+
+    @classmethod
+    def _ci_accepts(cls, monkeypatch, role: str, probe_text: str) -> bool:
         """True if validate_review.check_pr_comments() would accept
-        ``probe_text`` as satisfying ``role``, mocking the ``gh pr view``
-        call it makes internally."""
+        ``probe_text`` (under a head-bound ``role`` APPROVED footer) as
+        satisfying ``role``, mocking the ``gh pr view`` call it makes."""
         monkeypatch.setenv("CI", "true")
         monkeypatch.setenv("PR_NUMBER", "999")
+        monkeypatch.setattr(validate_review, "_get_head_sha", lambda: cls._HEAD)
+        footer = json.dumps(
+            {"role": role, "provider": "goose", "verdict": "APPROVED", "sha": cls._HEAD[:7]}
+        )
+        body = f"{probe_text}\n<!-- review: {footer} -->"
 
         def mock_run(*args, **kwargs):
             mock = MagicMock()
             mock.stdout = json.dumps(
                 {
                     "body": "",
-                    "comments": [{"author": {"login": "reviewer1"}, "body": probe_text}],
+                    "comments": [{"author": {"login": "reviewer1"}, "body": body}],
                     "reviews": [],
                 }
             )
@@ -3255,6 +3272,13 @@ class TestSubmitReviewCiParity:
         for probe_name, probe_text in self._PROBES.items():
             ci_result = self._ci_accepts(monkeypatch, role, probe_text)
             submit_review_result = self._submit_review_accepts(role, probe_text)
+            if (role, probe_name) in self._KNOWN_SAFE_DIVERGENCE:
+                # Safe direction only: CI must not accept what submit_review would not flag.
+                assert submit_review_result is True and ci_result is False, (
+                    f"known divergence {(role, probe_name)!r} changed shape: "
+                    f"CI={ci_result} submit_review={submit_review_result}"
+                )
+                continue
             if ci_result != submit_review_result:
                 mismatches.append(
                     f"probe={probe_name!r} ({probe_text!r}): "
