@@ -941,11 +941,14 @@ class TestHOSupervisoryReview:
 class TestFlexiblePatternMatching:
     """Validate flexible approval pattern matching beyond exact string match."""
 
-    def test_crs_parenthetical_model_format(self, ci_environment, monkeypatch, pr_head):
-        """'CRS (Gemini): APPROVED' format should be recognized at TIER_2.
+    def test_crs_colon_before_verdict_header_does_not_clear(
+        self, ci_environment, monkeypatch, pr_head
+    ):
+        """'CRS (Gemini): APPROVED' no longer clears CRS at TIER_2.
 
-        #201: the format is now exercised through footer cross-validation (the
-        visible line must state the footer's approval); one footer per text.
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
         """
 
         def mock_run(cmd, *args, **kwargs):
@@ -969,11 +972,19 @@ class TestFlexiblePatternMatching:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "'CRS (Gemini): APPROVED' + TMG + CE should be recognized"
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, message
+        assert missing == ["CRS"], message
 
-    def test_ce_parenthetical_model_format(self, ci_environment, monkeypatch, pr_head):
-        """'CE (Claude): APPROVED' format should be recognized at TIER_3_CRITICAL."""
+    def test_ce_colon_before_verdict_header_does_not_clear(
+        self, ci_environment, monkeypatch, pr_head
+    ):
+        """'CE (Claude): APPROVED' no longer clears CE at TIER_3_CRITICAL.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -994,11 +1005,17 @@ class TestFlexiblePatternMatching:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_3_CRITICAL")
-        assert approved is True, "'CE (Claude): APPROVED' with TMG+CRS+CIV should be recognized"
+        approved, message, missing = validate_review.check_pr_comments("TIER_3_CRITICAL")
+        assert approved is False, message
+        assert missing == ["CE"], message
 
-    def test_crs_with_extra_whitespace(self, ci_environment, monkeypatch, pr_head):
-        """Patterns with varied whitespace should still match."""
+    def test_crs_double_space_header_does_not_clear(self, ci_environment, monkeypatch, pr_head):
+        """'CRS  APPROVED' (two spaces) no longer clears CRS.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -1017,8 +1034,9 @@ class TestFlexiblePatternMatching:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "CRS APPROVED with extra whitespace should match"
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, message
+        assert missing == ["CRS"], message
 
     def test_il_parenthetical_model_format(self, ci_environment, monkeypatch):
         """'IL (Claude): SELF-REVIEWED' format should be recognized."""
@@ -1145,8 +1163,13 @@ class TestGoKeywordApproval:
     tiers. TIER_1_SELF (IL SELF-REVIEWED) is NOT affected.
     """
 
-    def test_crs_go_matches_as_crs_approval(self, ci_environment, monkeypatch, pr_head):
-        """'CRS (Gemini): GO' should match as CRS approval at TIER_2."""
+    def test_crs_colon_before_go_header_does_not_clear(self, ci_environment, monkeypatch, pr_head):
+        """'CRS (Gemini): GO' no longer clears CRS at TIER_2.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -1165,11 +1188,17 @@ class TestGoKeywordApproval:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "'CRS (Gemini): GO' + TMG + CE should be recognized"
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, message
+        assert missing == ["CRS"], message
 
-    def test_ce_go_after_fix_matches_as_ce_approval(self, ci_environment, monkeypatch, pr_head):
-        """'CE (Codex): GO after fix' should match as CE approval at TIER_3_CRITICAL."""
+    def test_ce_go_without_colon_header_does_not_clear(self, ci_environment, monkeypatch, pr_head):
+        """'CE (Codex): GO after fix' no longer clears CE at TIER_3_CRITICAL.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -1190,11 +1219,17 @@ class TestGoKeywordApproval:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_3_CRITICAL")
-        assert approved is True, "'CE (Codex): GO after fix' with TMG+CRS+CIV should pass"
+        approved, message, missing = validate_review.check_pr_comments("TIER_3_CRITICAL")
+        assert approved is False, message
+        assert missing == ["CE"], message
 
-    def test_crs_go_with_score_matches(self, ci_environment, monkeypatch, pr_head):
-        """'CRS (Gemini): GO (9/10)' should match -- the real-world failing case."""
+    def test_crs_go_with_score_header_does_not_clear(self, ci_environment, monkeypatch, pr_head):
+        """'CRS (Gemini): GO (9/10)' no longer clears CRS.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -1213,8 +1248,9 @@ class TestGoKeywordApproval:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "'CRS (Gemini): GO (9/10)' + TMG + CE should pass"
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, message
+        assert missing == ["CRS"], message
 
     def test_tier_3_go_plus_ce_approved_passes(self, ci_environment, monkeypatch, pr_head):
         """TIER_3_CRITICAL with TMG+CRS GO+CE+CIV should pass."""
@@ -1242,7 +1278,11 @@ class TestGoKeywordApproval:
         assert approved is True, "TMG+CRS GO+CE+CIV should satisfy TIER_3_CRITICAL"
 
     def test_tier_3_approved_plus_ce_go_passes(self, ci_environment, monkeypatch, pr_head):
-        """TIER_3_CRITICAL with TMG+CRS+CE GO+CIV should pass."""
+        """TIER_3_CRITICAL with TMG+CRS+CE GO+CIV should pass.
+
+        #201 option B: the CE GO comment uses the header submit_review emits,
+        'CE (Codex) GO: ...' (was 'CE (Codex): GO - looks good').
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -1252,7 +1292,7 @@ class TestGoKeywordApproval:
                         "comments": [
                             {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
                             {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
-                            {"body": _at_head("CE (Codex): GO - looks good", "CE", "GO")},
+                            {"body": _at_head("CE (Codex) GO: looks good", "CE", "GO")},
                             {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
                         ],
                     }

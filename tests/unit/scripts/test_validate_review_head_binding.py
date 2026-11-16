@@ -567,10 +567,13 @@ class TestHiddenHtmlCommentsAreNotVisible:
         assert "spoofing" not in msg.lower(), msg
 
     def test_visible_approval_with_unrelated_hidden_comment_still_clears(self) -> None:
-        """Control: stripping hidden comments leaves a visible approval intact."""
-        body = (
-            "<!-- reviewer notes: checked retry loop -->\n"
-            f"{_verdict('CE', 'APPROVED', HEAD[:7])}"
+        """Control: a hidden note AFTER the header leaves a visible approval intact.
+        (Option B: a note BEFORE the header is disqualified -- see TestHeaderLineRule.)"""
+        body = _verdict(
+            "CE",
+            "APPROVED",
+            HEAD[:7],
+            text="CE APPROVED: fine\n<!-- reviewer notes: checked retry loop -->",
         )
         approved, msg, _ = _check(comments=[_comment(body)])
         assert approved is True, msg

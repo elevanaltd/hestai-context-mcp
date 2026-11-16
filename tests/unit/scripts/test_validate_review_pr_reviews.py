@@ -114,13 +114,17 @@ class TestCheckPrCommentsIncludesReviews:
         assert missing == []
 
     def test_tmg_approval_in_review_body_satisfies_gate(self) -> None:
-        """A TMG APPROVED verdict in a PR review body must pass the TMG check."""
+        """A TMG APPROVED verdict in a PR review body must pass the TMG check.
+
+        #201 option B: the body opens with the header submit_review emits (it was a
+        markdown heading, '## TMG APPROVED ✅', which no longer clears a peer role).
+        """
         pr_data = _make_pr_data(
             reviews=[
                 {
                     "author": {"login": "tmg-agent"},
                     "state": "COMMENTED",
-                    "body": _at_head("## TMG APPROVED ✅\nAll checks pass.", "TMG"),
+                    "body": _at_head("TMG APPROVED: All checks pass.", "TMG"),
                 }
             ]
         )
