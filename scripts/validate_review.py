@@ -1150,7 +1150,7 @@ _HEX_SHA_RE: Final = re.compile(r"[0-9a-fA-F]{7,64}")
 # Reviewer guidance for a missing peer role. Plain approval text no longer clears
 # a gate, so the guidance must never tell reviewers to post one.
 _HEAD_BOUND_GUIDANCE: Final = (
-    "each needs an APPROVED or GO verdict posted via submit_review with "
+    "each needs an APPROVED verdict posted via submit_review with "
     "commit_sha=<PR head SHA>; a verdict at an older head or without the review "
     "metadata footer does not count"
 )
