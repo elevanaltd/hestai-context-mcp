@@ -38,7 +38,9 @@ def _active_dir(working_dir: Path) -> Path:
     return working_dir / ".hestai" / "state" / "sessions" / "active"
 
 
-def _setup_active_session(working_dir: Path, session_id: str = SESSION_ID) -> Path:
+def _setup_active_session(
+    working_dir: Path, session_id: str = SESSION_ID, transcript_path: Path | None = None
+) -> Path:
     active = _active_dir(working_dir)
     (working_dir / ".hestai" / "state" / "sessions" / "archive").mkdir(parents=True, exist_ok=True)
     session_dir = active / session_id
@@ -52,10 +54,21 @@ def _setup_active_session(working_dir: Path, session_id: str = SESSION_ID) -> Pa
                 "focus": "test-focus",
                 "started_at": "2026-04-17T10:00:00+00:00",
                 "branch": "main",
+                **({"transcript_path": str(transcript_path)} if transcript_path else {}),
             }
         )
     )
     return session_dir
+
+
+def _write_transcript(path: Path) -> Path:
+    record = {
+        "type": "human",
+        "message": {"role": "user", "content": "LEARNING_1: retry SMB deletes."},
+        "timestamp": "2026-04-17T10:00:00Z",
+    }
+    path.write_text(json.dumps(record) + "\n")
+    return path
 
 
 def _leftover(working_dir: Path, name: str, entries: list[str], age_seconds: int) -> Path:
@@ -124,7 +137,8 @@ class TestActiveSessionRemoval:
     def test_persistent_enotempty_reports_pending_and_still_succeeds(
         self, tmp_path, monkeypatch, no_sleep, caplog
     ):
-        session_dir = _setup_active_session(tmp_path)
+        transcript = _write_transcript(tmp_path / "transcript.jsonl")
+        session_dir = _setup_active_session(tmp_path, transcript_path=transcript)
         calls = _enotempty_rmtree(monkeypatch, session_dir, failures=None)
 
         with caplog.at_level(logging.WARNING, logger="hestai_context_mcp.tools.clock_out"):
@@ -137,6 +151,7 @@ class TestActiveSessionRemoval:
         assert session_dir.exists()
         # The archive and learnings index were still written.
         assert result["archive_path"] is not None
+        assert Path(result["archive_path"]).exists()
         assert (tmp_path / ".hestai" / "state" / "learnings-index.jsonl").exists()
         assert any(r.levelno == logging.WARNING for r in caplog.records)
 
