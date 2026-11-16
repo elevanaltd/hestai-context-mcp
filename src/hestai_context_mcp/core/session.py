@@ -275,6 +275,11 @@ class SessionManager:
 
         Returns:
             'present' if .hestai/ already existed, 'created' if newly created.
+
+        Raises:
+            MainCheckoutUnresolvedError: working_dir is a linked worktree whose
+                main checkout cannot be resolved and .hestai/state is not a
+                usable link (fail closed rather than fork state).
         """
         hestai_dir = self.working_dir / ".hestai"
         state_link = hestai_dir / "state"
@@ -291,15 +296,21 @@ class SessionManager:
                 f"resolved ({e}) (#197)"
             )
 
-        if unresolved and state_link.is_dir():
+        # Critical-Engineer: consulted for Worktree state integrity and failure handling
+        if unresolved:
+            if not state_link.is_dir():
+                # No usable link and no known main checkout: fail closed. Any
+                # local fallback would recreate the #197 fork (CE on c405610).
+                raise MainCheckoutUnresolvedError(
+                    f"{self.working_dir} is a git worktree whose main checkout could not be "
+                    f"resolved and {state_link} is not a usable link; refusing to create "
+                    f"worktree-local state (#197)"
+                )
             # A usable link (or real directory) is kept: rewriting it could undo
-            # a correct link to the main checkout, the #197 fork triggered by a
-            # detection failure. A broken link or plain file is repaired below.
+            # a correct link to the main checkout.
             logger.warning(f"{state_link} left untouched (#197)")
         elif main_root is None:
-            # Main checkout, outside git, or an unresolved worktree with no
-            # usable link (pre-#197 behaviour, so create_session never mkdirs a
-            # real .hestai/state directory).
+            # Main checkout or outside git: the relative ../.hestai-state convention.
             state_real = self.working_dir / ".hestai-state"
             self._ensure_state_directory(state_real)
             self._ensure_state_symlink(state_link, state_real)

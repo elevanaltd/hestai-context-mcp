@@ -47,6 +47,21 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], capture_output=True, text=True, timeout=5, cwd=str(cwd))
 
 
+def _nearest_git_entry_is_file(working_dir: Path) -> bool:
+    """True when the nearest ``.git`` at or above working_dir is a file.
+
+    A ``.git`` file marks a linked worktree (or a submodule or a
+    separate-git-dir checkout); a ``.git`` directory marks a main checkout.
+    """
+    for directory in (working_dir, *working_dir.parents):
+        entry = directory / ".git"
+        if entry.is_file():
+            return True
+        if entry.exists():
+            return False
+    return False
+
+
 def get_main_checkout_root(working_dir: Path) -> Path | None:
     """Return the main checkout's root when working_dir is a linked git worktree.
 
@@ -69,16 +84,22 @@ def get_main_checkout_root(working_dir: Path) -> Path | None:
     Raises:
         MainCheckoutUnresolvedError: working_dir is a linked worktree whose common
             dir is not a non-bare checkout's ``.git`` (e.g. a bare repo), or
-            git could not run and ``working_dir/.git`` is a file.
+            git failed or could not run and the nearest ``.git`` is a file.
     """
     try:
         result = _run_git(["rev-parse", "--git-dir", "--git-common-dir"], working_dir)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        if (working_dir / ".git").is_file():
+        if _nearest_git_entry_is_file(working_dir):
             raise MainCheckoutUnresolvedError(f"git could not run: {type(e).__name__}") from e
         return None
     lines = result.stdout.splitlines()
     if result.returncode != 0 or len(lines) != 2:
+        # Exit 128 also means 'dubious ownership' on an external volume, so a
+        # failure beside a .git FILE is unknown, not 'not a worktree' (CE).
+        if _nearest_git_entry_is_file(working_dir):
+            raise MainCheckoutUnresolvedError(
+                f"git rev-parse failed with exit code {result.returncode}"
+            )
         return None
     # rev-parse may print either path relative to working_dir.
     git_dir = (working_dir / lines[0]).resolve()
