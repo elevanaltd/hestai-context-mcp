@@ -1203,20 +1203,14 @@ def _header_agrees(text: str, role: str, verdict: str) -> bool:
     )
 
 
-def _visible_text(text: str, *, hide_html_comments: bool = False) -> str:
+def _visible_text(text: str) -> str:
     """Strip the metadata footer and code (fenced and inline) from a comment.
 
-    What remains is the reader-visible prose that cross-validation compares with
-    the footer, so hidden JSON or quoted examples cannot satisfy the match.
-
-    With ``hide_html_comments`` (the peer-role path, issue #201), every HTML
-    comment is stripped too -- GitHub does not render them, so an approval line
-    inside one is not something a reader sees. An unclosed ``<!--`` hides the
-    rest of the text. The footer is parsed from the raw text before this runs.
+    What remains is the reader-visible prose that the TIER_1_SELF path's
+    cross-validation compares with the footer, so hidden JSON or quoted examples
+    cannot satisfy the match. (The peer-role path uses _header_agrees instead.)
     """
     visible = re.sub(r"<!--\s*review:.*?-->\s*", "", text)
-    if hide_html_comments:
-        visible = re.sub(r"<!--.*?(?:-->|\Z)", "", visible, flags=re.DOTALL)
     visible = re.sub(r"```.*?```", "", visible, flags=re.DOTALL)
     return re.sub(r"`[^`]+`", "", visible)
 
@@ -1356,10 +1350,12 @@ def check_pr_comments(
         # `_meta_has`, and validation continues over the remaining comments. The
         # security property is unchanged: a spoofed comment still clears nothing.
         #
-        # SYMMETRIC MISMATCH (issue #201 item 2): the converse is disqualified too
-        # -- a NON-approval footer (BLOCKED/CONDITIONAL/...) whose visible text
-        # reads as a peer approval for the same role. Applied on the peer-role
-        # path only: TIER_1_SELF outcomes are deliberately unchanged by #201.
+        # PEER-ROLE PATH (issue #201, option B): the visible-text comparison is
+        # replaced by the header rule in _header_agrees -- the first non-empty
+        # line must be the verdict header submit_review emits, naming the
+        # footer's role and verdict. That covers both directions (a hidden
+        # approval behind a blocking header, and an approving header over a
+        # non-approval footer). TIER_1_SELF keeps its pre-#201 check unchanged.
         self_review_path = tier == "TIER_1_SELF" and not required_roles
         metadata_entries: list[dict[str, str | None]] = []
         timed_metadata: list[tuple[str, dict[str, str | None]]] = []
@@ -1382,24 +1378,17 @@ def check_pr_comments(
                 # check, so mismatched metadata is irrelevant -- not
                 # a spoofing vector.
                 if meta_role and meta_verdict and meta_role in _VALID_ROLES:
-                    visible_text = _visible_text(text, hide_html_comments=not self_review_path)
-                    # Peer path (option B): the footer's verdict must be the header
-                    # on the first non-empty line, or the comment is disqualified.
-                    header_mismatch = not self_review_path and not _header_agrees(
-                        text, meta_role, meta_verdict
-                    )
-                    if meta_verdict in _APPROVAL_VERDICTS:
-                        # An approval footer's visible text MUST state that approval.
-                        mismatch = not _matches_approval_pattern(
-                            visible_text, meta_role, meta_verdict
+                    if self_review_path:
+                        # Unchanged by #201: an approval footer's visible text
+                        # must state that approval.
+                        mismatch = meta_verdict in _APPROVAL_VERDICTS and not (
+                            _matches_approval_pattern(_visible_text(text), meta_role, meta_verdict)
                         )
                     else:
-                        # A non-approval footer's visible text MUST NOT approve.
-                        mismatch = not self_review_path and any(
-                            _matches_approval_pattern(visible_text, meta_role, keyword)
-                            for keyword in _PEER_APPROVAL_VERDICTS
-                        )
-                    if mismatch or header_mismatch:
+                        # Peer path (option B): the footer's verdict must be the
+                        # header on the first non-empty line of the raw text.
+                        mismatch = not _header_agrees(text, meta_role, meta_verdict)
+                    if mismatch:
                         disqualified.append(f"{meta_role} {meta_verdict}")
                         if meta_verdict not in _APPROVAL_VERDICTS:
                             # Fail closed: the comment clears nothing, but its
