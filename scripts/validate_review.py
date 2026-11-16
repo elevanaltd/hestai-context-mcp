@@ -1331,6 +1331,11 @@ def check_pr_comments(
                         )
                     if mismatch:
                         disqualified.append(f"{meta_role} {meta_verdict}")
+                        if meta_verdict not in _APPROVAL_VERDICTS:
+                            # Fail closed: the comment clears nothing, but its
+                            # non-approval still counts as the role's latest
+                            # verdict, so it cannot resurrect an earlier approval.
+                            timed_metadata.append((timestamp, meta))
                         continue
                 metadata_entries.append(meta)
                 timed_metadata.append((timestamp, meta))
