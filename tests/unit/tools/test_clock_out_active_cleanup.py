@@ -371,14 +371,14 @@ class TestLeftoverActiveDirectorySweep:
         """A leftover whose placeholder is still held stays for a later sweep."""
         _setup_active_session(tmp_path)
         leftover = _leftover(tmp_path, "old-held", [".smbdeleteEEE1"], TWO_HOURS)
-        real_unlink = Path.unlink
+        real_unlink = os.unlink
 
-        def held_unlink(self, *args, **kwargs):
-            if self.parent == leftover:
-                raise PermissionError(errno.EACCES, "Permission denied", str(self))
-            return real_unlink(self, *args, **kwargs)
+        def held_unlink(path, *args, dir_fd=None, **kwargs):
+            if str(path).startswith(".smbdeleteEEE1") or Path(path).parent == leftover:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_unlink(path, *args, dir_fd=dir_fd, **kwargs)
 
-        monkeypatch.setattr(Path, "unlink", held_unlink)
+        monkeypatch.setattr(os, "unlink", held_unlink)  # Path.unlink delegates to os.unlink
 
         result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
 
@@ -418,6 +418,33 @@ class TestLeftoverActiveDirectorySweep:
         clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
 
         assert helper.is_dir()
+
+    def test_directory_swapped_for_symlink_after_the_check_deletes_nothing_elsewhere(
+        self, tmp_path, monkeypatch, no_sleep
+    ):
+        """cubic P1 on c477724: deletion is anchored to the checked directory, never a symlink."""
+        _setup_active_session(tmp_path)
+        leftover = _leftover(tmp_path, "old-swapped", [".smbdeleteGGG1"], TWO_HOURS)
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        (victim / ".smbdeleteGGG1").write_text("not ours")
+        moved = tmp_path / "moved-away"
+        real_check = clock_out_module._sweepable_placeholders
+
+        def check_then_swap(entry, now):
+            eligible = real_check(entry, now)
+            if eligible is not None and entry == leftover:
+                leftover.rename(moved)
+                leftover.symlink_to(victim, target_is_directory=True)
+            return eligible
+
+        monkeypatch.setattr(clock_out_module, "_sweepable_placeholders", check_then_swap)
+
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["status"] == "success"
+        assert (victim / ".smbdeleteGGG1").read_text() == "not ours"
+        assert leftover.is_symlink()
 
     @pytest.mark.parametrize(
         "name",
