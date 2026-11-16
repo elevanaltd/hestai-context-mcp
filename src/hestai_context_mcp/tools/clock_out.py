@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import stat
@@ -542,12 +543,13 @@ def _is_session_id_name(name: str) -> bool:
     return parsed.version == 4 and str(parsed) == name
 
 
-def _sweepable_placeholders(entry: Path, now: float) -> list[Path] | None:
-    """The placeholder files to remove if entry is a sweepable leftover, else None.
+def _sweepable_placeholders(entry: Path, now: float) -> tuple[os.stat_result, list[str]] | None:
+    """The checked directory's stat and placeholder names if entry is a sweepable leftover.
 
     Sweepable: an old, uuid4-named real directory holding nothing or only
     regular ``.smbdelete*`` files. A directory with session.json (or any other
-    content) may be a live session, possibly the other machine's.
+    content) may be a live session, possibly the other machine's. Returns None
+    when entry is not sweepable.
     """
     if not _is_session_id_name(entry.name):
         return None
@@ -556,14 +558,37 @@ def _sweepable_placeholders(entry: Path, now: float) -> list[Path] | None:
         return None
     if now - st.st_mtime < _LEFTOVER_MIN_AGE_SECONDS:
         return None
-    placeholders = []
+    names = []
     for child in entry.iterdir():
         if not child.name.startswith(_SMB_PLACEHOLDER_PREFIX):
             return None
         if not stat.S_ISREG(child.lstat().st_mode):
             return None
-        placeholders.append(child)
-    return placeholders
+        names.append(child.name)
+    return st, names
+
+
+def _remove_checked_leftover(entry: Path, checked: os.stat_result, names: list[str]) -> None:
+    """Remove the checked placeholder files, then the directory, without following links.
+
+    The directory is opened with O_NOFOLLOW and must be the same inode that
+    was checked, so a swap for a symlink or another directory after the check
+    deletes nothing elsewhere. The final rmdir fails if anything appeared
+    after the check (e.g. a late session.json), which keeps it.
+    """
+    fd = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+            raise FileNotFoundError(f"{entry} changed after the sweep check")
+        for name in names:
+            try:
+                os.unlink(name, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(fd)
+    os.rmdir(entry)
 
 
 def _sweep_leftover_active_dirs(active_dir: Path, exclude: str) -> None:
@@ -573,9 +598,8 @@ def _sweep_leftover_active_dirs(active_dir: Path, exclude: str) -> None:
     and no failure here affects the clock_out result. ``exclude`` is the
     session just clocked out, which is reported rather than swept.
 
-    Deletion is never recursive: only the placeholder files that were checked
-    are unlinked, then ``rmdir`` runs, which fails if anything (e.g. a
-    session.json) appeared after the check, so new content is kept.
+    Deletion is never recursive and never follows links: see
+    ``_remove_checked_leftover``.
     """
     # Critical-Engineer: consulted for shared-mount cleanup and data-loss boundary
     now = time.time()
@@ -587,12 +611,10 @@ def _sweep_leftover_active_dirs(active_dir: Path, exclude: str) -> None:
         if entry.name == exclude:
             continue
         try:
-            placeholders = _sweepable_placeholders(entry, now)
-            if placeholders is None:
+            checked = _sweepable_placeholders(entry, now)
+            if checked is None:
                 continue
-            for placeholder in placeholders:
-                placeholder.unlink(missing_ok=True)
-            entry.rmdir()
+            _remove_checked_leftover(entry, *checked)
             logger.info("Swept leftover active session directory: %s", entry)
         except OSError as e:
             logger.info(
