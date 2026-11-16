@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -71,9 +72,18 @@ def _write_transcript(path: Path) -> Path:
     return path
 
 
-def _leftover(working_dir: Path, name: str, entries: list[str], age_seconds: int) -> Path:
-    """Create sessions/active/<name>/ holding the given file entries, aged by mtime."""
-    d = _active_dir(working_dir) / name
+def _session_name(label: str) -> str:
+    """A stable uuid4-shaped session id for a readable test label.
+
+    create_session names active directories with uuid4, and only such names
+    are sweep candidates.
+    """
+    return str(uuid.UUID(bytes=uuid.uuid5(uuid.NAMESPACE_URL, label).bytes, version=4))
+
+
+def _leftover(working_dir: Path, label: str, entries: list[str], age_seconds: int) -> Path:
+    """Create sessions/active/<uuid>/ holding the given file entries, aged by mtime."""
+    d = _active_dir(working_dir) / _session_name(label)
     d.mkdir(parents=True, exist_ok=True)
     for entry in entries:
         (d / entry).write_text("held-open content")
@@ -220,6 +230,29 @@ class TestActiveSessionRemoval:
         assert result["active_session_cleanup"] == "pending"
         assert no_sleep == [0.25, 0.25]
 
+    def test_enoent_because_the_mount_dropped_is_pending_not_removed(
+        self, tmp_path, monkeypatch, no_sleep
+    ):
+        """Pre-review high on 0775f43: a vanished PARENT does not mean the session dir is gone."""
+        session_dir = _setup_active_session(tmp_path)
+        state = tmp_path / ".hestai" / "state"
+        unmounted = tmp_path / "unmounted-state"
+        real_rmtree = shutil.rmtree
+
+        def mount_drops(path, *args, **kwargs):
+            if Path(path) == session_dir:
+                if state.exists():
+                    state.rename(unmounted)  # the mountpoint goes away
+                raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(path))
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(clock_out_module.shutil, "rmtree", mount_drops)
+
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert result["active_session_cleanup"] == "pending"
+        assert (unmounted / "sessions" / "active" / SESSION_ID / "session.json").exists()
+
 
 class TestLeftoverActiveDirectorySweep:
     """A later clock_out removes only leftovers that cannot be a live session."""
@@ -295,9 +328,9 @@ class TestLeftoverActiveDirectorySweep:
         _setup_active_session(tmp_path)
         target = tmp_path / "elsewhere"
         target.mkdir()
-        link = _active_dir(tmp_path) / "linked"
+        link = _active_dir(tmp_path) / _session_name("linked")
         link.symlink_to(target)
-        stray = _active_dir(tmp_path) / "stray-file"
+        stray = _active_dir(tmp_path) / _session_name("stray-file")
         stray.write_text("x")
         then = time.time() - TWO_HOURS
         os.utime(link, (then, then), follow_symlinks=False)
@@ -345,6 +378,18 @@ class TestLeftoverActiveDirectorySweep:
         assert result["active_session_cleanup"] == "removed"
         assert leftover.exists()
 
+    def test_old_empty_directory_not_named_like_a_session_is_kept(self, tmp_path, no_sleep):
+        """Pre-review high on 0775f43: only uuid4 session-id names are sweep candidates."""
+        _setup_active_session(tmp_path)
+        helper = _active_dir(tmp_path) / "operator-staging"
+        helper.mkdir()
+        then = time.time() - TWO_HOURS
+        os.utime(helper, (then, then))
+
+        clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+
+        assert helper.is_dir()
+
     def test_error_return_does_not_sweep(self, tmp_path, no_sleep):
         """Only a successful clock_out sweeps; an unknown session id touches nothing."""
         _active_dir(tmp_path).mkdir(parents=True)
@@ -354,3 +399,36 @@ class TestLeftoverActiveDirectorySweep:
 
         assert result["status"] == "error"
         assert leftover.exists()
+
+
+class TestReturnShapeOnErrors:
+    """PROD::I4: every clock_out return carries the same keys (pre-review high on 0775f43)."""
+
+    def test_invalid_session_id_carries_null_cleanup(self, tmp_path):
+        result = clock_out(session_id="../escape", working_dir=str(tmp_path))
+        assert result["status"] == "error"
+        assert "active_session_cleanup" in result
+        assert result["active_session_cleanup"] is None
+
+    def test_session_not_found_carries_null_cleanup(self, tmp_path):
+        _active_dir(tmp_path).mkdir(parents=True)
+        result = clock_out(session_id="TESTONLY_missing", working_dir=str(tmp_path))
+        assert result["status"] == "error"
+        assert "active_session_cleanup" in result
+        assert result["active_session_cleanup"] is None
+
+    def test_metadata_missing_carries_null_cleanup(self, tmp_path):
+        (_active_dir(tmp_path) / SESSION_ID).mkdir(parents=True)
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+        assert result["status"] == "error"
+        assert "active_session_cleanup" in result
+        assert result["active_session_cleanup"] is None
+
+    def test_corrupt_metadata_carries_null_cleanup(self, tmp_path):
+        session_dir = _active_dir(tmp_path) / SESSION_ID
+        session_dir.mkdir(parents=True)
+        (session_dir / "session.json").write_text("{not json")
+        result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
+        assert result["status"] == "error"
+        assert "active_session_cleanup" in result
+        assert result["active_session_cleanup"] is None
