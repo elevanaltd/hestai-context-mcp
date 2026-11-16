@@ -28,6 +28,8 @@ import json
 import logging
 import re
 import shutil
+import stat
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -241,7 +243,12 @@ def clock_out(
 
     Returns:
         Dictionary with archive status, paths, message count,
-        compression status, and extracted learnings.
+        compression status, and extracted learnings. On success it also
+        carries ``active_session_cleanup``: ``"removed"`` when the active
+        session directory is gone, ``"pending"`` when it could not be removed
+        (e.g. ENOTEMPTY on an SMB mount while a file is held open); a later
+        clock_out sweeps such leftovers. ``status`` stays ``"success"`` in
+        both cases (#199).
     """
     # Validate session_id
     valid_id = _validate_session_id(session_id)
@@ -442,15 +449,13 @@ def clock_out(
         redaction_failure_reason=redaction_failure_reason,
     )
 
-    # Remove active session directory
-    try:
-        shutil.rmtree(session_dir)
-        logger.info("Removed active session: %s", session_dir)
-    except OSError as e:
-        logger.warning("Could not remove active session directory: %s", type(e).__name__)
+    # Remove active session directory (#199: bounded retry, then report).
+    active_session_cleanup = _remove_active_session_dir(session_dir)
+    _sweep_leftover_active_dirs(active_dir, exclude=session_id)
 
     return {
         "status": "success",
+        "active_session_cleanup": active_session_cleanup,
         "session_id": session_id,
         "archive_path": archive_path,
         "octave_path": octave_path,
@@ -460,6 +465,91 @@ def clock_out(
         "portable_publication": portable_publication,
         "unpublished_memory_exists": unpublished_memory_exists,
     }
+
+
+# Issue #199: on an SMB-backed mount (e.g. a LucidLink filespace), deleting a
+# file that another process holds open renames it to a hidden ".smbdelete*"
+# placeholder that lasts until the last handle closes, so rmtree's final rmdir
+# fails with ENOTEMPTY. A short retry covers transient readers; long-lived
+# holders are left for a later clock_out's sweep.
+_RMTREE_ATTEMPTS = 3
+_RMTREE_RETRY_DELAY_SECONDS = 0.25
+_SMB_PLACEHOLDER_PREFIX = ".smbdelete"
+# Generous: a younger directory may be the other machine's new session
+# between its mkdir and its session.json write.
+_LEFTOVER_MIN_AGE_SECONDS = 60 * 60
+
+
+def _remove_active_session_dir(session_dir: Path) -> str:
+    """Remove the active session directory with a bounded retry.
+
+    Returns:
+        ``"removed"`` if the directory is gone, ``"pending"`` if it is still
+        there after ``_RMTREE_ATTEMPTS`` attempts.
+    """
+    for attempt in range(1, _RMTREE_ATTEMPTS + 1):
+        try:
+            shutil.rmtree(session_dir)
+        except FileNotFoundError:
+            return "removed"
+        except OSError as e:
+            if not session_dir.exists():
+                return "removed"
+            if attempt < _RMTREE_ATTEMPTS:
+                time.sleep(_RMTREE_RETRY_DELAY_SECONDS)
+                continue
+            # Type-only: exception text may echo input (credential-safety tests
+            # pin this message). The directory is left for a later sweep.
+            logger.warning("Could not remove active session directory: %s", type(e).__name__)
+            return "pending"
+        logger.info("Removed active session: %s", session_dir)
+        return "removed"
+    return "pending"  # pragma: no cover - loop always returns
+
+
+def _is_sweepable_leftover(entry: Path, now: float) -> bool:
+    """True for an old real directory holding nothing but SMB placeholder files.
+
+    A directory with session.json (or any other content) may be a live
+    session, possibly the other machine's, and is never swept.
+    """
+    st = entry.lstat()
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    if now - st.st_mtime < _LEFTOVER_MIN_AGE_SECONDS:
+        return False
+    for child in entry.iterdir():
+        if not child.name.startswith(_SMB_PLACEHOLDER_PREFIX):
+            return False
+        if not stat.S_ISREG(child.lstat().st_mode):
+            return False
+    return True
+
+
+def _sweep_leftover_active_dirs(active_dir: Path, exclude: str) -> None:
+    """Remove leftover ``sessions/active/<id>/`` directories from earlier clock_outs.
+
+    Best-effort: a leftover that is still held open stays for a later sweep,
+    and no failure here affects the clock_out result. ``exclude`` is the
+    session just clocked out, which is reported rather than swept.
+    """
+    now = time.time()
+    try:
+        entries = list(active_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name == exclude:
+            continue
+        try:
+            if not _is_sweepable_leftover(entry, now):
+                continue
+            shutil.rmtree(entry)
+            logger.info("Swept leftover active session directory: %s", entry)
+        except OSError as e:
+            logger.info(
+                "Leftover active session directory not swept (%s): %s", type(e).__name__, entry
+            )
 
 
 def _skipped_publication(reason_code: str) -> dict[str, Any]:
