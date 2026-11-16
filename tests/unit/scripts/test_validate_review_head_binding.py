@@ -259,6 +259,18 @@ class TestLatestVerdictAcrossSources:
         )
         assert approved is False, msg
 
+    def test_timestamp_tie_with_block_listed_first_still_fails_closed(self) -> None:
+        """Pins the tie-break itself: with BLOCKED listed BEFORE APPROVED at the same
+        timestamp, insertion order alone would leave APPROVED last and clear."""
+        approved, msg, missing = _check(
+            comments=[
+                _comment(_verdict("CE", "BLOCKED", HEAD[:7]), at=T2),
+                _comment(_verdict("CE", "APPROVED", HEAD[:7]), at=T2),
+            ]
+        )
+        assert approved is False, msg
+        assert missing == ["CE"]
+
     def test_other_roles_verdict_does_not_revoke(self) -> None:
         approved, msg, _ = _check(
             comments=[
