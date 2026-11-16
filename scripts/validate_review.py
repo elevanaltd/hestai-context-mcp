@@ -1176,12 +1176,12 @@ def _sha_binds_to_head(sha: object, head_sha: str) -> bool:
 # (review_formats._build_comment): "<ROLE> <KEYWORD>: ...", optionally with a
 # sanitised model label "<ROLE> (<label>) <KEYWORD>: ...", or the SR
 # wording-fixes form "... APPROVED (wording fixes pending):". The label has its
-# parentheses stripped, so it cannot nest. Case-insensitive because an agreeing
-# header already in the assessment is kept verbatim (_match_existing_header_token).
+# parentheses stripped, so it cannot nest. Role and verdict accept either case
+# and are compared upper-cased, because an agreeing header already in the
+# assessment is kept verbatim (_match_existing_header_token).
 _VERDICT_HEADER_RE: Final = re.compile(
     r"(?P<role>[A-Za-z]+)(?: \([^()\n]*\))? (?P<verdict>[A-Za-z-]+)"
-    r"(?::| \(wording fixes pending\):)",
-    re.IGNORECASE,
+    r"(?::| \(wording fixes pending\):)"
 )
 
 
