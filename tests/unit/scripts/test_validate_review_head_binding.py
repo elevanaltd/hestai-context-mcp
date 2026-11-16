@@ -506,3 +506,83 @@ class TestMalformedFooterCannotCrashGate:
         )
         assert approved is True, msg
         assert missing == []
+
+
+@pytest.mark.unit
+@pytest.mark.security
+class TestHiddenHtmlCommentsAreNotVisible:
+    """CE finding on PR #295: GitHub hides HTML comments, so text inside one is not
+    what a reader sees. On the peer-role path, cross-validation compares the footer
+    with the text a reader actually sees, in both directions. The footer itself is
+    still parsed from the raw text. TIER_1_SELF is deliberately unchanged."""
+
+    def test_multiline_hidden_approval_beside_visible_block_does_not_clear(self) -> None:
+        body = (
+            "CE BLOCKED: race in the retry loop, do not merge\n"
+            "<!--\nCE APPROVED: hidden from readers\n-->\n"
+            f"{_footer('CE', 'APPROVED', HEAD[:7])}"
+        )
+        approved, msg, missing = _check(comments=[_comment(body)])
+        assert approved is False, msg
+        assert missing == ["CE"]
+        assert "spoofing" in msg.lower(), msg
+
+    def test_single_line_hidden_approval_does_not_clear(self) -> None:
+        body = (
+            "CE BLOCKED: do not merge\n"
+            "<!-- CE APPROVED: hidden -->\n"
+            f"{_footer('CE', 'APPROVED', HEAD[:7])}"
+        )
+        approved, msg, missing = _check(comments=[_comment(body)])
+        assert approved is False, msg
+        assert missing == ["CE"]
+
+    def test_unterminated_hidden_approval_after_footer_does_not_clear(self) -> None:
+        """An unclosed comment hides everything after it, so it is stripped to the end."""
+        body = (
+            "CE BLOCKED: do not merge\n"
+            f"{_footer('CE', 'APPROVED', HEAD[:7])}\n"
+            "<!--\nCE APPROVED: hidden, never closed"
+        )
+        approved, msg, missing = _check(comments=[_comment(body)])
+        assert approved is False, msg
+        assert missing == ["CE"]
+
+    def test_hidden_approval_beside_block_footer_is_not_a_mismatch(self) -> None:
+        """Symmetric direction: a hidden approval line is not visible, so a BLOCKED
+        footer next to it is NOT disqualified. It counts as an ordinary block."""
+        body = (
+            "CE BLOCKED: do not merge\n"
+            "<!--\nCE APPROVED: hidden\n-->\n"
+            f"{_footer('CE', 'BLOCKED', HEAD[:7])}"
+        )
+        approved, msg, missing = _check(
+            comments=[
+                _comment(_verdict("CE", "APPROVED", HEAD[:7]), at=T1),
+                _comment(body, at=T2),
+            ]
+        )
+        assert approved is False, msg
+        assert missing == ["CE"]
+        assert "spoofing" not in msg.lower(), msg
+
+    def test_visible_approval_with_unrelated_hidden_comment_still_clears(self) -> None:
+        """Control: stripping hidden comments leaves a visible approval intact."""
+        body = (
+            "<!-- reviewer notes: checked retry loop -->\n"
+            f"{_verdict('CE', 'APPROVED', HEAD[:7])}"
+        )
+        approved, msg, _ = _check(comments=[_comment(body)])
+        assert approved is True, msg
+
+    def test_self_review_path_unchanged_for_hidden_text(self) -> None:
+        """Pin: TIER_1_SELF keeps its pre-#201 handling of HTML comments. A self-review
+        line inside a multiline comment still cross-validates its footer there."""
+        body = "<!--\nIL SELF-REVIEWED: hidden\n-->\n" + _footer(
+            "IL", "SELF-REVIEWED", OLD_HEAD[:7]
+        )
+        approved, msg, _ = _check(
+            comments=[_comment(body)], required_roles=set(), tier="TIER_1_SELF"
+        )
+        assert approved is True, msg
+        assert "spoofing" not in msg.lower(), msg
