@@ -569,6 +569,17 @@ def _sweepable_placeholders(entry: Path, now: float) -> tuple[os.stat_result, li
     return st, names
 
 
+def _can_sweep_safely() -> bool:
+    """True when the platform offers the no-follow, dir_fd deletion the sweep relies on.
+
+    Without it (non-POSIX) the best-effort sweep is skipped rather than risk
+    following a link.
+    """
+    return (
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY") and os.unlink in os.supports_dir_fd
+    )
+
+
 def _remove_checked_leftover(entry: Path, checked: os.stat_result, names: list[str]) -> None:
     """Remove the checked placeholder files, then the directory, without following links.
 
@@ -601,6 +612,8 @@ def _sweep_leftover_active_dirs(active_dir: Path, exclude: str) -> None:
     ``_remove_checked_leftover``.
     """
     # Critical-Engineer: consulted for shared-mount cleanup and data-loss boundary
+    if not _can_sweep_safely():
+        return
     now = time.time()
     try:
         entries = list(active_dir.iterdir())
