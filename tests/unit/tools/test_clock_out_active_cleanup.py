@@ -251,14 +251,25 @@ class TestLeftoverActiveDirectorySweep:
     ):
         """The session just left pending is reported, not deleted behind the report."""
         session_dir = _setup_active_session(tmp_path)
-        _enotempty_rmtree(monkeypatch, session_dir, failures=None)
-        then = time.time() - TWO_HOURS
-        os.utime(session_dir, (then, then))
+        real_rmtree = shutil.rmtree
+
+        def smb_rmtree(path, *args, **kwargs):
+            """SMB shape: session.json becomes a held-open placeholder, rmdir fails."""
+            if Path(path) == session_dir:
+                held = session_dir / "session.json"
+                if held.exists():
+                    held.rename(session_dir / ".smbdeleteOWN0001")
+                then = time.time() - TWO_HOURS  # old enough that only exclusion saves it
+                os.utime(session_dir, (then, then))
+                raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(clock_out_module.shutil, "rmtree", smb_rmtree)
 
         result = clock_out(session_id=SESSION_ID, working_dir=str(tmp_path))
 
         assert result["active_session_cleanup"] == "pending"
-        assert session_dir.exists()
+        assert (session_dir / ".smbdeleteOWN0001").exists()
 
     def test_sweep_failure_does_not_fail_clock_out(self, tmp_path, monkeypatch, no_sleep):
         """A leftover that is still held open stays for a later sweep."""
