@@ -128,8 +128,8 @@ def clock_in(
         ValueError: If role is invalid.
         FileNotFoundError: If working_dir doesn't exist.
         MainCheckoutUnresolvedError: If working_dir is a git worktree whose main
-            checkout cannot be resolved and .hestai/state is not a usable link
-            (fail closed rather than fork state; issue #197).
+            checkout cannot be resolved and .hestai/state does not resolve to a
+            directory (fail closed rather than fork state; issue #197).
     """
     # Validate inputs
     role = validate_role(role)

@@ -278,34 +278,34 @@ class SessionManager:
 
         Raises:
             MainCheckoutUnresolvedError: working_dir is a linked worktree whose
-                main checkout cannot be resolved and .hestai/state is not a
-                usable link (fail closed rather than fork state).
+                main checkout cannot be resolved and .hestai/state does not
+                resolve to a directory (fail closed rather than fork state).
         """
         hestai_dir = self.working_dir / ".hestai"
         state_link = hestai_dir / "state"
         existed = hestai_dir.is_dir()
         hestai_dir.mkdir(parents=True, exist_ok=True)
 
+        unresolved: MainCheckoutUnresolvedError | None = None
         try:
             main_root = get_main_checkout_root(self.working_dir)
-            unresolved = False
         except MainCheckoutUnresolvedError as e:
-            main_root, unresolved = None, True
+            main_root, unresolved = None, e
             logger.warning(
                 f"{self.working_dir} is a git worktree whose main checkout could not be "
                 f"resolved ({e}) (#197)"
             )
 
         # Critical-Engineer: consulted for Worktree state integrity and failure handling
-        if unresolved:
+        if unresolved is not None:
             if not state_link.is_dir():
                 # No usable link and no known main checkout: fail closed. Any
                 # local fallback would recreate the #197 fork (CE on c405610).
                 raise MainCheckoutUnresolvedError(
                     f"{self.working_dir} is a git worktree whose main checkout could not be "
-                    f"resolved and {state_link} is not a usable link; refusing to create "
-                    f"worktree-local state (#197)"
-                )
+                    f"resolved ({unresolved}) and {state_link} does not resolve to a "
+                    f"directory; refusing to create worktree-local state (#197)"
+                ) from unresolved
             # A usable link (or real directory) is kept: rewriting it could undo
             # a correct link to the main checkout.
             logger.warning(f"{state_link} left untouched (#197)")
