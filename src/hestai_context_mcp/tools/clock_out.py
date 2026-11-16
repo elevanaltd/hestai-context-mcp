@@ -23,6 +23,7 @@ Part of ADR-0353 Phase 1 harvest.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -582,10 +583,8 @@ def _remove_checked_leftover(entry: Path, checked: os.stat_result, names: list[s
         if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
             raise FileNotFoundError(f"{entry} changed after the sweep check")
         for name in names:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 os.unlink(name, dir_fd=fd)
-            except FileNotFoundError:
-                pass
     finally:
         os.close(fd)
     os.rmdir(entry)
