@@ -329,6 +329,29 @@ class TestWorktreeEdgeCases:
         assert os.readlink(str(link)) == "../.hestai-state"
         assert any(r.levelno == logging.WARNING for r in caplog.records)
 
+    @pytest.mark.parametrize("shape", ["broken_link", "plain_file"])
+    def test_unresolved_worktree_repairs_unusable_link_path(self, repo_pair, monkeypatch, shape):
+        """Only a usable link is protected; a broken link or plain file is repaired as pre-#197.
+
+        Leaving them would make create_session's mkdir fail.
+        """
+        _, worktree = repo_pair
+        (worktree / ".hestai").mkdir()
+        link = worktree / ".hestai" / "state"
+        if shape == "broken_link":
+            link.symlink_to("../nowhere")
+        else:
+            link.write_text("accidental file")
+        monkeypatch.setattr(
+            "hestai_context_mcp.core.session.get_main_checkout_root", _raise_unresolved
+        )
+
+        result = SessionManager(str(worktree)).create_session(role="r", focus="f")
+
+        assert os.readlink(str(link)) == "../.hestai-state"
+        session_dir = worktree / ".hestai-state" / "sessions" / "active" / result["session_id"]
+        assert (session_dir / "session.json").is_file()
+
     def test_worktree_of_bare_repo_is_unresolved(self, tmp_path, repo_pair):
         """A bare repo's common dir is not <main>/.git, so its parent is not a checkout."""
         main, _ = repo_pair
