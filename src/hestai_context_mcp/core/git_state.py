@@ -39,6 +39,87 @@ def get_current_branch(working_dir: Path) -> str:
     return "unknown"
 
 
+class MainCheckoutUnresolvedError(Exception):
+    """working_dir is a linked git worktree, but its main checkout cannot be named."""
+
+
+def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], capture_output=True, text=True, timeout=5, cwd=str(cwd))
+
+
+def _nearest_git_entry_is_file(working_dir: Path) -> bool:
+    """True when the nearest ``.git`` at or above working_dir is a file.
+
+    A ``.git`` file marks a linked worktree (or a submodule or a
+    separate-git-dir checkout); a ``.git`` directory marks a main checkout.
+    """
+    for directory in (working_dir, *working_dir.parents):
+        entry = directory / ".git"
+        if entry.is_file():
+            return True
+        if entry.exists():
+            return False
+    return False
+
+
+def get_main_checkout_root(working_dir: Path) -> Path | None:
+    """Return the main checkout's root when working_dir is a linked git worktree.
+
+    A linked worktree has its own git dir (``<main>/.git/worktrees/<name>``)
+    while ``--git-common-dir`` names the main checkout's ``.git``. When the two
+    differ, the main root is the common dir's parent, the same rule the
+    SessionStart hook uses. Issue #197: worktrees must share the main
+    checkout's ``.hestai-state`` instead of forking a local one.
+
+    Submodules and ``--separate-git-dir`` checkouts also have a ``.git`` file,
+    but their git dir IS their common dir: they are main checkouts.
+
+    Args:
+        working_dir: Directory to inspect.
+
+    Returns:
+        The resolved main checkout root for a linked worktree, or None for a
+        main checkout or a directory outside git.
+
+    Raises:
+        MainCheckoutUnresolvedError: working_dir is a linked worktree whose common
+            dir is not a non-bare checkout's ``.git`` (e.g. a bare repo), or
+            git failed or could not run and the nearest ``.git`` is a file.
+    """
+    try:
+        result = _run_git(["rev-parse", "--git-dir", "--git-common-dir"], working_dir)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        if _nearest_git_entry_is_file(working_dir):
+            raise MainCheckoutUnresolvedError(f"git could not run: {type(e).__name__}") from e
+        return None
+    lines = result.stdout.splitlines()
+    if result.returncode != 0 or len(lines) != 2:
+        # Exit 128 also means 'dubious ownership' on an external volume, so a
+        # failure beside a .git FILE is unknown, not 'not a worktree' (CE).
+        if _nearest_git_entry_is_file(working_dir):
+            raise MainCheckoutUnresolvedError(
+                f"git rev-parse failed with exit code {result.returncode}"
+            )
+        return None
+    # rev-parse may print either path relative to working_dir.
+    git_dir = (working_dir / lines[0]).resolve()
+    common_dir = (working_dir / lines[1]).resolve()
+    if git_dir == common_dir:
+        return None
+    # Only a non-bare <main>/.git names a checkout by its parent.
+    if common_dir.name != ".git":
+        raise MainCheckoutUnresolvedError(f"common dir {common_dir} is not a checkout's .git")
+    try:
+        bare = _run_git(
+            ["--git-dir", str(common_dir), "rev-parse", "--is-bare-repository"], working_dir
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        raise MainCheckoutUnresolvedError(f"git could not run: {type(e).__name__}") from e
+    if bare.returncode != 0 or bare.stdout.strip() != "false":
+        raise MainCheckoutUnresolvedError(f"common dir {common_dir} is a bare repository")
+    return common_dir.parent
+
+
 def get_git_state(working_dir: Path) -> dict[str, Any] | None:
     """Get full git state: branch, ahead/behind, modified files.
 

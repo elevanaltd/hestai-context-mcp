@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
+from hestai_context_mcp.core.git_state import MainCheckoutUnresolvedError, get_main_checkout_root
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,6 +46,17 @@ STANDARD_CONTEXT_FILES = [
     "PROJECT-HISTORY.oct.md",
     "context-negatives.oct.md",
 ]
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    """True when a and b resolve to the same path; False if either cannot resolve.
+
+    Path.resolve() raises RuntimeError (3.11/3.12) or OSError on a symlink loop.
+    """
+    try:
+        return a.resolve() == b.resolve()
+    except (OSError, RuntimeError):
+        return False
 
 
 class SessionManager:
@@ -255,28 +268,118 @@ class SessionManager:
             .hestai-state/   - uncommitted working state (sessions, context)
             .hestai/state    - symlink to ../.hestai-state
 
+        In a linked git worktree (issue #197) the state lives in the MAIN
+        checkout: ``.hestai/state`` links to ``<main>/.hestai-state`` and no
+        local ``<worktree>/.hestai-state`` is created. See
+        ``_ensure_worktree_state_link``.
+
         Returns:
             'present' if .hestai/ already existed, 'created' if newly created.
+
+        Raises:
+            MainCheckoutUnresolvedError: working_dir is a linked worktree whose
+                main checkout cannot be resolved and .hestai/state does not
+                resolve to a directory (fail closed rather than fork state).
         """
         hestai_dir = self.working_dir / ".hestai"
         state_link = hestai_dir / "state"
-        state_real = self.working_dir / ".hestai-state"
+        existed = hestai_dir.is_dir()
+        hestai_dir.mkdir(parents=True, exist_ok=True)
 
-        if hestai_dir.exists() and hestai_dir.is_dir():
-            # Already exists, ensure subdirs and symlink
+        unresolved: MainCheckoutUnresolvedError | None = None
+        try:
+            main_root = get_main_checkout_root(self.working_dir)
+        except MainCheckoutUnresolvedError as e:
+            main_root, unresolved = None, e
+            logger.warning(
+                f"{self.working_dir} is a git worktree whose main checkout could not be "
+                f"resolved ({e}) (#197)"
+            )
+
+        # Critical-Engineer: consulted for Worktree state integrity and failure handling
+        if unresolved is not None:
+            if not state_link.is_dir():
+                # No usable link and no known main checkout: fail closed. Any
+                # local fallback would recreate the #197 fork (CE on c405610).
+                raise MainCheckoutUnresolvedError(
+                    f"{self.working_dir} is a git worktree whose main checkout could not be "
+                    f"resolved ({unresolved}) and {state_link} does not resolve to a "
+                    f"directory; refusing to create worktree-local state (#197)"
+                ) from unresolved
+            # A usable link (or real directory) is kept: rewriting it could undo
+            # a correct link to the main checkout.
+            logger.warning(f"{state_link} left untouched (#197)")
+        elif main_root is None:
+            # Main checkout or outside git: the relative ../.hestai-state convention.
+            state_real = self.working_dir / ".hestai-state"
             self._ensure_state_directory(state_real)
             self._ensure_state_symlink(state_link, state_real)
-            (hestai_dir / "north-star").mkdir(parents=True, exist_ok=True)
-            return "present"
+        else:
+            self._ensure_worktree_state_link(state_link, main_root / ".hestai-state")
 
-        # Create new structure
-        hestai_dir.mkdir(parents=True, exist_ok=True)
-        self._ensure_state_directory(state_real)
-        self._ensure_state_symlink(state_link, state_real)
         (hestai_dir / "north-star").mkdir(parents=True, exist_ok=True)
-
+        if existed:
+            return "present"
         logger.info(f"Created .hestai/ directory structure at {self.working_dir}")
         return "created"
+
+    def _ensure_worktree_state_link(self, state_link: Path, shared_state: Path) -> None:
+        """Point a linked worktree's .hestai/state at the main checkout's state.
+
+        Issue #197. ``shared_state`` is ``<main>/.hestai-state``.
+
+        - A link that already resolves to ``shared_state`` is left verbatim.
+        - An existing fork is warned about and left untouched for the operator
+          to clean up: a link beside a local ``<worktree>/.hestai-state``
+          that is not the shared state, or a real directory at
+          ``.hestai/state``. Stray local state is always warned about.
+        - Otherwise a wrong, broken, looping or missing link, or a plain file, is
+          replaced with an absolute link to ``shared_state`` (the target the
+          SessionStart hook writes).
+
+        A local ``<worktree>/.hestai-state`` is never created.
+
+        Args:
+            state_link: Path of the worktree's .hestai/state.
+            shared_state: The main checkout's .hestai-state.
+        """
+        local_state = self.working_dir / ".hestai-state"
+        stray_local = local_state.exists() and not _same_path(local_state, shared_state)
+        if stray_local:
+            logger.warning(
+                f"Worktree has local state at {local_state} that is not shared with the "
+                f"main checkout; left untouched for operator cleanup (#197)"
+            )
+
+        if state_link.is_symlink() and _same_path(state_link, shared_state):
+            self._ensure_state_directory(shared_state)
+            return
+
+        if state_link.is_dir() and not state_link.is_symlink():
+            logger.warning(
+                f"Real directory at {state_link} holds worktree-local state; left untouched "
+                f"for operator cleanup. Session state will not reach {shared_state} (#197)"
+            )
+            return
+
+        if stray_local and state_link.is_symlink():
+            # The fork shape (e.g. ../.hestai-state plus local data): leave it.
+            logger.warning(
+                f"{state_link} left untouched beside the forked state; session state "
+                f"will not reach {shared_state} (#197)"
+            )
+            return
+
+        if state_link.is_symlink() or state_link.exists():
+            logger.warning(
+                f"Replacing {state_link} with a link to the main checkout's state "
+                f"{shared_state} (#197)"
+            )
+            state_link.unlink()
+
+        self._ensure_state_directory(shared_state)
+        state_link.symlink_to(str(shared_state))
+        logger.info(f"Created symlink {state_link} -> {shared_state} (worktree, #197)")
 
     def _ensure_state_directory(self, state_real: Path) -> None:
         """Create .hestai-state/ with required subdirectories.
