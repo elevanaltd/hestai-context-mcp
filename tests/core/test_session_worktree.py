@@ -26,6 +26,10 @@ def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
 
 
+def _raise_unresolved(_working_dir: Path) -> Path | None:
+    raise git_state.MainCheckoutUnresolved("simulated")
+
+
 @pytest.fixture
 def repo_pair(tmp_path: Path) -> tuple[Path, Path]:
     """Create a main checkout with one commit and a linked worktree.
@@ -274,7 +278,7 @@ class TestWorktreeEdgeCases:
     """Pre-review findings on #197: detection failure, missing link, symlink loop."""
 
     def test_unresolved_worktree_leaves_link_untouched(self, repo_pair, monkeypatch, caplog):
-        """If main-root detection fails in a worktree (.git is a file), nothing is rewritten.
+        """If the main root of a linked worktree cannot be named, an existing link is kept.
 
         Falling back to the main-checkout path would rewrite the link to
         ../.hestai-state: the #197 fork, triggered by a git failure.
@@ -286,7 +290,7 @@ class TestWorktreeEdgeCases:
         link = worktree / ".hestai" / "state"
         link.symlink_to(str(shared))
         monkeypatch.setattr(
-            "hestai_context_mcp.core.session.get_main_checkout_root", lambda _wd: None
+            "hestai_context_mcp.core.session.get_main_checkout_root", _raise_unresolved
         )
 
         with caplog.at_level(logging.WARNING, logger="hestai_context_mcp.core.session"):
@@ -296,7 +300,24 @@ class TestWorktreeEdgeCases:
         assert not (worktree / ".hestai-state").exists()
         assert any(r.levelno == logging.WARNING for r in caplog.records)
 
-    def test_worktree_of_bare_repo_is_not_given_a_guessed_main_root(self, tmp_path, repo_pair):
+    def test_unresolved_worktree_without_link_keeps_pre_197_behaviour(
+        self, repo_pair, monkeypatch, caplog
+    ):
+        """No link to keep: fall back to the main-checkout path, never a real .hestai/state dir."""
+        _, worktree = repo_pair
+        monkeypatch.setattr(
+            "hestai_context_mcp.core.session.get_main_checkout_root", _raise_unresolved
+        )
+
+        with caplog.at_level(logging.WARNING, logger="hestai_context_mcp.core.session"):
+            SessionManager(str(worktree)).create_session(role="r", focus="f")
+
+        link = worktree / ".hestai" / "state"
+        assert link.is_symlink()
+        assert os.readlink(str(link)) == "../.hestai-state"
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_worktree_of_bare_repo_is_unresolved(self, tmp_path, repo_pair):
         """A bare repo's common dir is not <main>/.git, so its parent is not a checkout."""
         main, _ = repo_pair
         bare = tmp_path / "proj.git"
@@ -304,10 +325,51 @@ class TestWorktreeEdgeCases:
         bare_wt = tmp_path / "bare-wt"
         _git(bare, "worktree", "add", "-q", "-b", "other", str(bare_wt))
 
-        assert git_state.get_main_checkout_root(bare_wt.resolve()) is None
+        with pytest.raises(git_state.MainCheckoutUnresolved):
+            git_state.get_main_checkout_root(bare_wt.resolve())
         SessionManager(str(bare_wt)).ensure_hestai_structure()
         assert not (tmp_path / ".hestai-state").exists()
-        assert not (bare_wt / ".hestai-state").exists()
+        assert os.readlink(str(bare_wt / ".hestai" / "state")) == "../.hestai-state"
+
+    def test_worktree_of_bare_repo_named_dot_git_is_unresolved(self, tmp_path, repo_pair):
+        """A bare repo whose directory is literally named .git still has no checkout parent."""
+        main, _ = repo_pair
+        holder = tmp_path / "holder"
+        holder.mkdir()
+        bare = holder / ".git"
+        _git(tmp_path, "clone", "-q", "--bare", str(main), str(bare))
+        bare_wt = tmp_path / "bare-dot-git-wt"
+        _git(bare, "worktree", "add", "-q", "-b", "other", str(bare_wt))
+
+        with pytest.raises(git_state.MainCheckoutUnresolved):
+            git_state.get_main_checkout_root(bare_wt.resolve())
+        SessionManager(str(bare_wt)).ensure_hestai_structure()
+        assert not (holder / ".hestai-state").exists()
+
+    def test_separate_git_dir_checkout_is_a_main_checkout(self, tmp_path):
+        """.git is a file but git-dir == common-dir: not a linked worktree, pre-#197 behaviour."""
+        checkout = tmp_path / "sep"
+        _git(tmp_path, "init", "-q", f"--separate-git-dir={tmp_path / 'sep-gitdir'}", str(checkout))
+        assert (checkout / ".git").is_file()
+
+        assert git_state.get_main_checkout_root(checkout.resolve()) is None
+        SessionManager(str(checkout)).ensure_hestai_structure()
+        assert os.readlink(str(checkout / ".hestai" / "state")) == "../.hestai-state"
+        assert (checkout / ".hestai-state" / "sessions" / "active").is_dir()
+
+    def test_submodule_checkout_is_a_main_checkout(self, tmp_path, repo_pair):
+        """A submodule has a .git file but is not a linked worktree: pre-#197 behaviour."""
+        main, _ = repo_pair
+        sup = tmp_path / "super"
+        sup.mkdir()
+        _git(sup, "init", "-q")
+        _git(sup, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(main), "sub")
+        sub = (sup / "sub").resolve()
+        assert (sub / ".git").is_file()
+
+        assert git_state.get_main_checkout_root(sub) is None
+        SessionManager(str(sub)).ensure_hestai_structure()
+        assert os.readlink(str(sub / ".hestai" / "state")) == "../.hestai-state"
 
     def test_missing_link_beside_stray_local_state_links_to_main(self, repo_pair, caplog):
         """No link to leave alone: link to main so create_session cannot mkdir a real dir."""
