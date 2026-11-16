@@ -417,3 +417,53 @@ class TestTier1SelfUnchanged:
     def test_missing_self_review_still_fails(self) -> None:
         approved, msg, _ = self._self(_comment("just a note"))
         assert approved is False, msg
+
+
+# ---------------------------------------------------------------------------
+# Pre-review findings on PR #295 (/code-review high)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.security
+class TestChangesRequestedReviewRevokes:
+    """A GitHub 'Request changes' review is the natural way to block. Its head-bound
+    non-approval footer must count as the role's latest verdict, and it must never
+    clear anything itself."""
+
+    def test_changes_requested_block_revokes_earlier_head_approval(self) -> None:
+        approved, msg, missing = _check(
+            comments=[_comment(_verdict("CE", "APPROVED", HEAD[:7]), at=T1)],
+            reviews=[
+                _review(_verdict("CE", "BLOCKED", HEAD[:7]), at=T2, state="CHANGES_REQUESTED")
+            ],
+        )
+        assert approved is False, msg
+        assert missing == ["CE"]
+
+    def test_changes_requested_review_never_clears(self) -> None:
+        approved, msg, missing = _check(
+            reviews=[
+                _review(_verdict("CE", "APPROVED", HEAD[:7]), at=T1, state="CHANGES_REQUESTED")
+            ]
+        )
+        assert approved is False, msg
+        assert missing == ["CE"]
+
+    def test_later_approval_after_changes_requested_clears(self) -> None:
+        approved, msg, _ = _check(
+            comments=[_comment(_verdict("CE", "APPROVED", HEAD[:7]), at=T2)],
+            reviews=[
+                _review(_verdict("CE", "BLOCKED", HEAD[:7]), at=T1, state="CHANGES_REQUESTED")
+            ],
+        )
+        assert approved is True, msg
+
+    def test_changes_requested_review_still_excluded_from_self_review(self) -> None:
+        """Pin: TIER_1_SELF still ignores CHANGES_REQUESTED review bodies."""
+        approved, msg, _ = _check(
+            reviews=[_review("IL SELF-REVIEWED: done", state="CHANGES_REQUESTED")],
+            required_roles=set(),
+            tier="TIER_1_SELF",
+        )
+        assert approved is False, msg
