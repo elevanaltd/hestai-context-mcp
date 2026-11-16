@@ -1269,7 +1269,18 @@ def check_pr_comments(
         # retracted their assessment, so it must not satisfy the gate.
         # PENDING reviews have not been submitted yet and are also excluded.
         active_review_states: frozenset[str] = frozenset({"APPROVED", "COMMENTED"})
+        # A CHANGES_REQUESTED review is a block (issue #201): its head-bound
+        # NON-approval footer counts toward the role's latest verdict, so it can
+        # revoke an earlier approval. It never clears anything and its body is
+        # not searched (TIER_1_SELF is unchanged).
+        review_revocations: list[tuple[str, dict[str, str | None]]] = []
         for r in pr_data.get("reviews", []):
+            if r.get("state") == "CHANGES_REQUESTED" and not _is_bot_comment(r):
+                block = _parse_review_metadata(r.get("body") or "") or {}
+                verdict = block.get("verdict")
+                if isinstance(verdict, str) and verdict not in _APPROVAL_VERDICTS:
+                    review_revocations.append((str(r.get("submittedAt") or ""), block))
+                continue
             if r.get("state") not in active_review_states:
                 continue
             if _is_bot_comment(r):
@@ -1347,6 +1358,7 @@ def check_pr_comments(
                 metadata_entries.append(meta)
                 timed_metadata.append((timestamp, meta))
             searchable_texts.append(text)
+        timed_metadata.extend(review_revocations)
 
         # Surface the disqualification: a wedge attempt must be visible, not fatal.
         # `_reason` decorates EVERY verdict message below, so the notice cannot be
