@@ -87,7 +87,11 @@ def _match_existing_header_token(assessment: str, role: str) -> str | None:
         # a shorter token sharing a prefix.
         tokens = sorted(_RECOGNIZED_HEADER_TOKENS, key=len, reverse=True)
         token_alt = "|".join(re.escape(t) for t in tokens)
-        pattern = re.compile(rf"^{re.escape(role)} ({token_alt}):", re.IGNORECASE)
+        # re.ASCII: case-insensitive for ASCII only. Without it Python's Unicode
+        # case folding accepts lookalike roles (U+017F long s for "S", U+0130 /
+        # U+0131 for "I") as an existing header, which would then be kept
+        # verbatim as a first line the review gate rejects.
+        pattern = re.compile(rf"^{re.escape(role)} ({token_alt}):", re.IGNORECASE | re.ASCII)
         _ANY_TOKEN_HEADER_RE_CACHE[role] = pattern
 
     first_line = assessment.split("\n", 1)[0]
@@ -152,21 +156,47 @@ def neutralise_comment_delimiters(text: str) -> str:
     return text.replace("-->", "--&gt;").replace("<!--", "&lt;!--")
 
 
-def _sanitize_model_label(model_annotation: str) -> str:
-    """Strip characters that would corrupt the anchored "<ROLE> (<model>)" shape.
+# Characters the review gate accepts in the header label (scripts/validate_review.py
+# _VERDICT_HEADER_RE, PR #295): ASCII letters, digits, space, '.', ',', '/', '-'.
+_LABEL_DISALLOWED_RE = re.compile(r"[^A-Za-z0-9 .,/-]+")
 
-    Parentheses inside a free-form model/annotation label (e.g. a decorated
-    display name such as ``"Gemini 3.1 Pro (High)"``) would otherwise nest
-    inside the header's own wrapping parens, producing
-    ``"CRS (Gemini 3.1 Pro (High))"`` -- visually ambiguous and unsafe for any
-    exact-match parenthetical lookup. Only the parenthesis punctuation is
-    stripped; the human-readable content is preserved (minimal intervention --
-    the documented ``"CRS (Gemini): APPROVED"`` parenthetical format is kept,
-    just constrained to never nest).
+
+def _sanitize_model_label(model_annotation: str) -> str:
+    """Reduce a free-form model label to the gate's header-label allowlist.
+
+    The review gate counts a peer verdict only if the header label holds nothing
+    but ``[A-Za-z0-9 .,/-]`` (anything else could hide or restyle the verdict:
+    nested parentheses, code spans, emphasis, link text, HTML, entities, bidi
+    controls, non-ASCII). Three steps, chosen so the label never gains a new
+    word -- the approval matcher reads words, so "gemini_go" must not become
+    "gemini go":
+
+    1. accented letters fold to ASCII (NFKD, combining marks dropped);
+    2. remaining word characters outside the allowlist ('_' and non-ASCII
+       letters or digits) and invisible format characters (category Cf: zero-
+       width spaces, soft hyphens, bidi controls) are deleted, so they cannot
+       split a word;
+    3. every other disallowed run, already a word boundary, becomes one space,
+       and whitespace is collapsed.
+
+    So ``"Gemini 3.1 Pro (High)"`` becomes ``"Gemini 3.1 Pro High"`` and real
+    labels such as ``"z-ai/glm-5.2"`` are unchanged. An all-disallowed label
+    yields ``""`` (the header then carries no label). The footer ``provider``
+    token is derived separately and unchanged.
     """
-    # Backticks are escaped too: a stray one in the header would pair with a
-    # later backtick and the gate's inline-code strip would swallow the verdict.
-    return re.sub(r"[()]", "", model_annotation).strip().replace("`", "&#96;")
+    folded = "".join(c for c in _ud.normalize("NFKD", model_annotation) if not _ud.combining(c))
+    joined = "".join(
+        c
+        for c in folded
+        if c != "_" and not (c.isalnum() and not c.isascii()) and _ud.category(c) != "Cf"
+    )
+    return " ".join(_LABEL_DISALLOWED_RE.sub(" ", joined).split())
+
+
+def _header_prefix(role: str, model_annotation: str | None) -> str:
+    """``"<ROLE> (<label>)"``, or just ``"<ROLE>"`` when the sanitised label is empty."""
+    label = _sanitize_model_label(model_annotation) if model_annotation else ""
+    return f"{role} ({label})" if label else role
 
 
 def _normalize_provider(model_annotation: str) -> str:
@@ -179,8 +209,10 @@ def _normalize_provider(model_annotation: str) -> str:
     keeping the metadata ``provider`` field usable for exact-match
     provider-level lookups (e.g. ``scripts/validate_review.py``'s
     ``_meta_has(..., provider=...)``) regardless of how decorated the visible
-    annotation is. The full annotation still appears, sanitized, in the
-    human-readable header -- only the metadata token is shortened.
+    annotation is. The human-readable header carries the annotation reduced to
+    the gate's label allowlist by _sanitize_model_label (lossy; possibly empty,
+    in which case the header has no label) -- this token is derived from the raw
+    annotation independently.
     """
     stripped = model_annotation.strip()
     match = re.match(r"[^\s()]+", stripped)
@@ -686,11 +718,14 @@ def format_review_comment(
     def _no_ticks(text: str) -> str:
         return text.replace("`", "&#96;")
 
+    # The model annotation is not escaped: the header label is already reduced
+    # to the gate's allowlist (no backticks), and the footer JSON escapes them,
+    # so escaping it would only leave '&#96;' residue ("96") in the label.
     escalated = (
         role,
         verdict,
         _no_ticks(assessment),
-        _no_ticks(model_annotation) if model_annotation else model_annotation,
+        model_annotation,
         commit_sha,
         (
             [_no_ticks(f) if isinstance(f, str) else f for f in wording_fixes]
@@ -733,9 +768,10 @@ def _build_comment(
     # a metadata-shaped HTML comment ahead of the real footer. The formatter's
     # own footer (below) is emitted AFTER this and is never altered.
     # The FINAL neutralisation of the whole visible portion happens below, after
-    # every other transformation (e.g. _sanitize_model_label strips parentheses,
-    # which can RE-CREATE a delimiter from "<(!--"). Neutralising the raw
-    # annotation up front is therefore not sufficient on its own.
+    # every other transformation, as a guarantee that does not depend on any one
+    # of them. (The model label can no longer carry a delimiter at all:
+    # _sanitize_model_label reduces it to [A-Za-z0-9 .,/-]. Earlier, stripping
+    # only parentheses could RE-CREATE one from "<(!--".)
     assessment = neutralise_comment_delimiters(assessment)
 
     fixes = list(wording_fixes) if wording_fixes else []
@@ -792,16 +828,15 @@ def _build_comment(
                 count=1,
                 flags=re.IGNORECASE,
             )
-        prefix = f"{role} ({_sanitize_model_label(model_annotation)})" if model_annotation else role
+        prefix = _header_prefix(role, model_annotation)
         numbered = "\n".join(f"{i}. {fix}" for i, fix in enumerate(fixes, 1))
         human_line = f"{prefix} {keyword} (wording fixes pending):\n{numbered}\n\n{body}"
     elif existing_token == keyword:
         human_line = assessment
     else:
-        # Build the prefix with optional model annotation. The annotation is
-        # sanitized (parens stripped) so a decorated label can never nest
-        # inside the header's own wrapping parens.
-        prefix = f"{role} ({_sanitize_model_label(model_annotation)})" if model_annotation else role
+        # Build the prefix with the optional model annotation, reduced to the
+        # gate's header-label allowlist (see _sanitize_model_label).
+        prefix = _header_prefix(role, model_annotation)
         human_line = f"{prefix} {keyword}: {assessment}"
 
     # Build metadata dict
