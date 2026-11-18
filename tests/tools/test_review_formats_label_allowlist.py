@@ -188,6 +188,41 @@ class TestFormatterGateRoundTrip:
         assert meta is not None
         assert validate_review._header_agrees(comment, "CE", "APPROVED"), comment
 
+    @pytest.mark.parametrize(
+        ("role", "assessment"),
+        [
+            ("SR", "\u017fR APPROVED: long-s lookalike role"),
+            ("CRS", "CR\u017f APPROVED: long-s lookalike role"),
+            ("IL", "\u0130L SELF-REVIEWED: dotted capital I lookalike role"),
+            ("IL", "\u0131L SELF-REVIEWED: dotless i lookalike role"),
+            ("CE", "\u0421E APPROVED: Cyrillic Es homoglyph role"),
+            ("PE", "\u03a1E APPROVED: Greek Rho homoglyph role"),
+        ],
+        ids=["long-s-SR", "long-s-CRS", "dotted-I", "dotless-i", "cyrillic-C", "greek-P"],
+    )
+    @pytest.mark.parametrize("annotation", [None, "Gemini"])
+    def test_lookalike_role_header_is_not_kept_verbatim(
+        self, role: str, assessment: str, annotation: str | None
+    ) -> None:
+        """A non-ASCII lookalike of '<ROLE> <TOKEN>:' is not an existing header: the
+        canonical header is prepended, so the posted first line passes the gate and
+        submit_review's matcher sees the approval."""
+        comment = format_review_comment(role, "APPROVED", assessment, annotation, SHA)
+        meta = parse_review_metadata(comment)
+        assert meta is not None
+        assert validate_review._header_agrees(comment, meta["role"], meta["verdict"]), comment
+        assert _matches_role_gate(comment, role) is True, comment
+        assert comment.splitlines()[0].startswith(f"{role} "), comment
+
+    @pytest.mark.parametrize(
+        "assessment", ["ce approved: lowercase kept", "Ce Approved: mixed case kept"]
+    )
+    def test_genuine_ascii_header_any_case_is_still_kept_verbatim(self, assessment: str) -> None:
+        """Pin (#295): an agreeing ASCII header, in any case, is reused as written."""
+        comment = format_review_comment("CE", "APPROVED", assessment, "Gemini", SHA)
+        assert comment.splitlines()[0] == assessment
+        assert validate_review._header_agrees(comment, "CE", "APPROVED"), comment
+
     def test_escalation_path_label_has_no_entity_residue(self, monkeypatch) -> None:
         """When the first footer check fails, the escalated rebuild escapes
         backticks in free text; the label is already allowlisted, so it must not
