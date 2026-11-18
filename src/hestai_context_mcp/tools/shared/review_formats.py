@@ -152,21 +152,30 @@ def neutralise_comment_delimiters(text: str) -> str:
     return text.replace("-->", "--&gt;").replace("<!--", "&lt;!--")
 
 
-def _sanitize_model_label(model_annotation: str) -> str:
-    """Strip characters that would corrupt the anchored "<ROLE> (<model>)" shape.
+# Characters the review gate accepts in the header label (scripts/validate_review.py
+# _VERDICT_HEADER_RE, PR #295): ASCII letters, digits, space, '.', ',', '/', '-'.
+_LABEL_DISALLOWED_RE = re.compile(r"[^A-Za-z0-9 .,/-]+")
 
-    Parentheses inside a free-form model/annotation label (e.g. a decorated
-    display name such as ``"Gemini 3.1 Pro (High)"``) would otherwise nest
-    inside the header's own wrapping parens, producing
-    ``"CRS (Gemini 3.1 Pro (High))"`` -- visually ambiguous and unsafe for any
-    exact-match parenthetical lookup. Only the parenthesis punctuation is
-    stripped; the human-readable content is preserved (minimal intervention --
-    the documented ``"CRS (Gemini): APPROVED"`` parenthetical format is kept,
-    just constrained to never nest).
+
+def _sanitize_model_label(model_annotation: str) -> str:
+    """Reduce a free-form model label to the gate's header-label allowlist.
+
+    The review gate counts a peer verdict only if the header label holds nothing
+    but ``[A-Za-z0-9 .,/-]`` (anything else could hide or restyle the verdict:
+    nested parentheses, code spans, emphasis, link text, HTML, entities, bidi
+    controls, non-ASCII). Each run of other characters becomes one space, then
+    whitespace is collapsed, so ``"Gemini 3.1 Pro (High)"`` becomes
+    ``"Gemini 3.1 Pro High"`` and real labels such as ``"z-ai/glm-5.2"`` are
+    unchanged. An all-disallowed label yields ``""`` (the header then carries no
+    label). The footer ``provider`` token is derived separately and unchanged.
     """
-    # Backticks are escaped too: a stray one in the header would pair with a
-    # later backtick and the gate's inline-code strip would swallow the verdict.
-    return re.sub(r"[()]", "", model_annotation).strip().replace("`", "&#96;")
+    return " ".join(_LABEL_DISALLOWED_RE.sub(" ", model_annotation).split())
+
+
+def _header_prefix(role: str, model_annotation: str | None) -> str:
+    """``"<ROLE> (<label>)"``, or just ``"<ROLE>"`` when the sanitised label is empty."""
+    label = _sanitize_model_label(model_annotation) if model_annotation else ""
+    return f"{role} ({label})" if label else role
 
 
 def _normalize_provider(model_annotation: str) -> str:
@@ -686,11 +695,14 @@ def format_review_comment(
     def _no_ticks(text: str) -> str:
         return text.replace("`", "&#96;")
 
+    # The model annotation is not escaped: the header label is already reduced
+    # to the gate's allowlist (no backticks), and the footer JSON escapes them,
+    # so escaping it would only leave '&#96;' residue ("96") in the label.
     escalated = (
         role,
         verdict,
         _no_ticks(assessment),
-        _no_ticks(model_annotation) if model_annotation else model_annotation,
+        model_annotation,
         commit_sha,
         (
             [_no_ticks(f) if isinstance(f, str) else f for f in wording_fixes]
@@ -792,16 +804,15 @@ def _build_comment(
                 count=1,
                 flags=re.IGNORECASE,
             )
-        prefix = f"{role} ({_sanitize_model_label(model_annotation)})" if model_annotation else role
+        prefix = _header_prefix(role, model_annotation)
         numbered = "\n".join(f"{i}. {fix}" for i, fix in enumerate(fixes, 1))
         human_line = f"{prefix} {keyword} (wording fixes pending):\n{numbered}\n\n{body}"
     elif existing_token == keyword:
         human_line = assessment
     else:
-        # Build the prefix with optional model annotation. The annotation is
-        # sanitized (parens stripped) so a decorated label can never nest
-        # inside the header's own wrapping parens.
-        prefix = f"{role} ({_sanitize_model_label(model_annotation)})" if model_annotation else role
+        # Build the prefix with the optional model annotation, reduced to the
+        # gate's header-label allowlist (see _sanitize_model_label).
+        prefix = _header_prefix(role, model_annotation)
         human_line = f"{prefix} {keyword}: {assessment}"
 
     # Build metadata dict
