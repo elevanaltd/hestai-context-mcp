@@ -169,7 +169,9 @@ def _sanitize_model_label(model_annotation: str) -> str:
 
     1. accented letters fold to ASCII (NFKD, combining marks dropped);
     2. remaining word characters outside the allowlist ('_' and non-ASCII
-       letters or digits) are deleted, so they cannot split a word;
+       letters or digits) and invisible format characters (category Cf: zero-
+       width spaces, soft hyphens, bidi controls) are deleted, so they cannot
+       split a word;
     3. every other disallowed run, already a word boundary, becomes one space,
        and whitespace is collapsed.
 
@@ -179,7 +181,11 @@ def _sanitize_model_label(model_annotation: str) -> str:
     token is derived separately and unchanged.
     """
     folded = "".join(c for c in _ud.normalize("NFKD", model_annotation) if not _ud.combining(c))
-    joined = "".join(c for c in folded if c != "_" and not (c.isalnum() and not c.isascii()))
+    joined = "".join(
+        c
+        for c in folded
+        if c != "_" and not (c.isalnum() and not c.isascii()) and _ud.category(c) != "Cf"
+    )
     return " ".join(_LABEL_DISALLOWED_RE.sub(" ", joined).split())
 
 
