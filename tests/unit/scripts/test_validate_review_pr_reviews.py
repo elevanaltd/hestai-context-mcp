@@ -7,6 +7,12 @@ Contract:
 - Bot reviews are excluded using the same _BOT_LOGIN_SET logic
 - A review body containing a valid approval satisfies the relevant role checker
 - Existing comment-path behaviour is unaffected (no regression)
+
+Issue #201: a peer role clears only via a review metadata footer whose sha names
+the PR head, so approving bodies here carry a head-bound footer (``_at_head``)
+and ``_run_check`` pins the head SHA. Exclusion tests (dismissed, pending, bot,
+status marker) also use footer-bearing bodies, so they still prove the exclusion
+rather than passing merely because footerless text no longer clears.
 """
 
 from __future__ import annotations
@@ -21,6 +27,14 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _at_head(body: str, role: str, verdict: str = "APPROVED") -> str:
+    """Append the footer submit_review emits, bound to the pinned PR head."""
+    footer = json.dumps({"role": role, "provider": "goose", "verdict": verdict, "sha": _HEAD[:7]})
+    return f"{body}\n<!-- review: {footer} -->"
 
 
 def _make_pr_data(
@@ -53,6 +67,7 @@ def _run_check(
     with (
         patch.dict(os.environ, env_patch),
         patch("scripts.validate_review.subprocess.run", return_value=mock_result),
+        patch("scripts.validate_review._get_head_sha", return_value=_HEAD),
     ):
         from scripts.validate_review import check_pr_comments
 
@@ -75,7 +90,7 @@ class TestCheckPrCommentsIncludesReviews:
                 {
                     "author": {"login": "crs-agent"},
                     "state": "COMMENTED",
-                    "body": "CRS APPROVED: looks good",
+                    "body": _at_head("CRS APPROVED: looks good", "CRS"),
                 }
             ]
         )
@@ -90,7 +105,7 @@ class TestCheckPrCommentsIncludesReviews:
                 {
                     "author": {"login": "ce-agent"},
                     "state": "COMMENTED",
-                    "body": "CE APPROVED: implementation is clean",
+                    "body": _at_head("CE APPROVED: implementation is clean", "CE"),
                 }
             ]
         )
@@ -99,13 +114,17 @@ class TestCheckPrCommentsIncludesReviews:
         assert missing == []
 
     def test_tmg_approval_in_review_body_satisfies_gate(self) -> None:
-        """A TMG APPROVED verdict in a PR review body must pass the TMG check."""
+        """A TMG APPROVED verdict in a PR review body must pass the TMG check.
+
+        #201 option B: the body opens with the header submit_review emits (it was a
+        markdown heading, '## TMG APPROVED ✅', which no longer clears a peer role).
+        """
         pr_data = _make_pr_data(
             reviews=[
                 {
                     "author": {"login": "tmg-agent"},
                     "state": "COMMENTED",
-                    "body": "## TMG APPROVED ✅\nAll checks pass.",
+                    "body": _at_head("TMG APPROVED: All checks pass.", "TMG"),
                 }
             ]
         )
@@ -120,17 +139,17 @@ class TestCheckPrCommentsIncludesReviews:
                 {
                     "author": {"login": "tmg-agent"},
                     "state": "COMMENTED",
-                    "body": "TMG APPROVED: structural review complete",
+                    "body": _at_head("TMG APPROVED: structural review complete", "TMG"),
                 },
                 {
                     "author": {"login": "crs-agent"},
                     "state": "COMMENTED",
-                    "body": "CRS APPROVED: code quality confirmed",
+                    "body": _at_head("CRS APPROVED: code quality confirmed", "CRS"),
                 },
                 {
                     "author": {"login": "ce-agent"},
                     "state": "COMMENTED",
-                    "body": "CE APPROVED: engineering standards met",
+                    "body": _at_head("CE APPROVED: engineering standards met", "CE"),
                 },
             ]
         )
@@ -144,14 +163,14 @@ class TestCheckPrCommentsIncludesReviews:
             comments=[
                 {
                     "author": {"login": "ce-user"},
-                    "body": "CE APPROVED: implementation looks correct",
+                    "body": _at_head("CE APPROVED: implementation looks correct", "CE"),
                 }
             ],
             reviews=[
                 {
                     "author": {"login": "crs-agent"},
                     "state": "COMMENTED",
-                    "body": "CRS APPROVED: passes review",
+                    "body": _at_head("CRS APPROVED: passes review", "CRS"),
                 }
             ],
         )
@@ -181,7 +200,7 @@ class TestCheckPrCommentsIncludesReviews:
                 {
                     "author": {"login": "crs-agent"},
                     "state": "COMMENTED",
-                    "body": "CRS APPROVED: code quality confirmed",
+                    "body": _at_head("CRS APPROVED: code quality confirmed", "CRS"),
                 }
             ]
         )
@@ -206,7 +225,7 @@ class TestCheckPrCommentsReviewStateFiltering:
                 {
                     "author": {"login": "crs-agent"},
                     "state": "DISMISSED",
-                    "body": "CRS APPROVED: looked good at the time",
+                    "body": _at_head("CRS APPROVED: looked good at the time", "CRS"),
                 }
             ]
         )
@@ -221,7 +240,7 @@ class TestCheckPrCommentsReviewStateFiltering:
                 {
                     "author": {"login": "ce-agent"},
                     "state": "PENDING",
-                    "body": "CE APPROVED: draft review",
+                    "body": _at_head("CE APPROVED: draft review", "CE"),
                 }
             ]
         )
@@ -236,7 +255,7 @@ class TestCheckPrCommentsReviewStateFiltering:
                 {
                     "author": {"login": "crs-agent"},
                     "state": "COMMENTED",
-                    "body": "CRS APPROVED: review complete",
+                    "body": _at_head("CRS APPROVED: review complete", "CRS"),
                 }
             ]
         )
@@ -251,7 +270,7 @@ class TestCheckPrCommentsReviewStateFiltering:
                 {
                     "author": {"login": "crs-agent"},
                     "state": "APPROVED",
-                    "body": "CRS APPROVED: full approval",
+                    "body": _at_head("CRS APPROVED: full approval", "CRS"),
                 }
             ]
         )
@@ -265,14 +284,14 @@ class TestCheckPrCommentsReviewStateFiltering:
             comments=[
                 {
                     "author": {"login": "crs-user"},
-                    "body": "CRS APPROVED: approved via comment",
+                    "body": _at_head("CRS APPROVED: approved via comment", "CRS"),
                 }
             ],
             reviews=[
                 {
                     "author": {"login": "crs-agent"},
                     "state": "DISMISSED",
-                    "body": "CRS APPROVED: earlier dismissed review",
+                    "body": _at_head("CRS APPROVED: earlier dismissed review", "CRS"),
                 }
             ],
         )
@@ -297,7 +316,7 @@ class TestCheckPrCommentsBotReviewExclusion:
                 {
                     "author": {"login": "github-actions"},
                     "state": "COMMENTED",
-                    "body": "CRS APPROVED: auto-generated review",
+                    "body": _at_head("CRS APPROVED: auto-generated review", "CRS"),
                 }
             ]
         )
@@ -312,7 +331,7 @@ class TestCheckPrCommentsBotReviewExclusion:
                 {
                     "author": {"login": "Copilot"},
                     "state": "COMMENTED",
-                    "body": "CE APPROVED: copilot auto-review",
+                    "body": _at_head("CE APPROVED: copilot auto-review", "CE"),
                 }
             ]
         )
@@ -327,7 +346,7 @@ class TestCheckPrCommentsBotReviewExclusion:
                 {
                     "author": {"login": "some-new-bot[bot]"},
                     "state": "COMMENTED",
-                    "body": "CRS APPROVED: auto-review",
+                    "body": _at_head("CRS APPROVED: auto-review", "CRS"),
                 }
             ]
         )
@@ -342,7 +361,7 @@ class TestCheckPrCommentsBotReviewExclusion:
                 {
                     "author": {"login": "some-human"},
                     "state": "COMMENTED",
-                    "body": "<!-- review-gate-status -->\nCRS APPROVED: injected",
+                    "body": _at_head("<!-- review-gate-status -->\nCRS APPROVED: injected", "CRS"),
                 }
             ]
         )
@@ -357,7 +376,7 @@ class TestCheckPrCommentsBotReviewExclusion:
                 {
                     "author": {"login": "shaun"},
                     "state": "COMMENTED",
-                    "body": "CRS APPROVED: reviewed by human",
+                    "body": _at_head("CRS APPROVED: reviewed by human", "CRS"),
                 }
             ]
         )
@@ -381,7 +400,7 @@ class TestCheckPrCommentsNoRegression:
             comments=[
                 {
                     "author": {"login": "crs-user"},
-                    "body": "CRS APPROVED: all good",
+                    "body": _at_head("CRS APPROVED: all good", "CRS"),
                 }
             ]
         )
@@ -391,7 +410,7 @@ class TestCheckPrCommentsNoRegression:
 
     def test_pr_body_approval_still_works(self) -> None:
         """CRS approval in the PR body itself still satisfies the gate."""
-        pr_data = _make_pr_data(body="CRS APPROVED: in the PR description")
+        pr_data = _make_pr_data(body=_at_head("CRS APPROVED: in the PR description", "CRS"))
         approved, _msg, missing = _run_check(pr_data, required_roles={"CRS"})
         assert approved is True
         assert missing == []

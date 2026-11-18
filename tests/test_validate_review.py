@@ -33,6 +33,27 @@ def ci_environment(monkeypatch):
     monkeypatch.setenv("PR_NUMBER", "123")
 
 
+# Issue #201: a peer role (TMG/CRS/CE/CIV/PE/SR) clears only through a review
+# metadata footer whose sha names the PR head; footerless visible text no longer
+# clears it. Tests that exercise a clearing peer approval therefore attach a
+# head-bound footer and pin the head SHA with the `pr_head` fixture.
+_PR_HEAD = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _at_head(body, role, verdict="APPROVED"):
+    """Append the footer submit_review emits, bound to the pinned PR head."""
+    footer = json.dumps(
+        {"role": role, "provider": "goose", "verdict": verdict, "sha": _PR_HEAD[:7]}
+    )
+    return f"{body}\n<!-- review: {footer} -->"
+
+
+@pytest.fixture
+def pr_head(monkeypatch):
+    """Pin the PR head SHA check_pr_comments binds peer approvals to."""
+    monkeypatch.setattr(validate_review, "_get_head_sha", lambda: _PR_HEAD)
+
+
 @pytest.fixture
 def local_environment(monkeypatch):
     """Set up local development environment."""
@@ -98,6 +119,53 @@ class TestFailClosedBehavior:
         # main() should exit 1 in CI when reviews missing
         exit_code = validate_review.main()
         assert exit_code == 1, "main() must exit 1 when reviews missing in CI"
+
+
+@pytest.mark.behavior
+class TestHeadBoundReviewerGuidance:
+    """Issue #201: footerless text and verdicts at an older head clear nothing, so
+    the gate's guidance must steer reviewers to submit_review with the PR head SHA,
+    never to a plain-text approval comment."""
+
+    def test_missing_message_points_to_submit_review_with_head_sha(
+        self, ci_environment, monkeypatch, pr_head
+    ):
+        monkeypatch.setattr(subprocess, "run", _mock_gh_pr_view([{"body": "CE APPROVED: ok"}]))
+
+        approved, message, missing = validate_review.check_pr_comments(
+            required_roles={"CE"}, tier="TIER_2_STANDARD"
+        )
+
+        assert approved is False and missing == ["CE"]
+        assert "submit_review" in message and "commit_sha" in message, message
+        assert "older head" in message and "footer" in message, message
+        assert "CE APPROVED or CE GO" not in message, message
+        assert not re.search(r"\bGO\b", message), message
+
+    def test_main_failure_guidance_points_to_submit_review(
+        self, ci_environment, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            validate_review,
+            "get_changed_files",
+            lambda: [{"path": "src/core.py", "added": 10, "deleted": 5, "total_changed": 15}],
+        )
+        monkeypatch.setattr(validate_review, "check_emergency_bypass", lambda: False)
+        monkeypatch.setattr(validate_review, "_get_pr_body", lambda: "")
+        monkeypatch.setattr(validate_review, "_git_show_file", lambda *a, **k: None)
+        monkeypatch.setattr(
+            validate_review,
+            "check_pr_comments",
+            lambda *args, **kwargs: (False, "missing", ["CE"]),
+        )
+
+        assert validate_review.main() == 1
+        out = capsys.readouterr().out
+        guidance = out.split("Review Requirements:")[1].split("REVIEW_GATE_JSON")[0]
+        assert "submit_review" in guidance and "commit_sha" in guidance, guidance
+        assert "older head" in guidance and "footer" in guidance, guidance
+        assert "[assessment]" not in guidance, guidance
+        assert not re.search(r"\bGO\b", guidance), guidance
 
 
 @pytest.mark.behavior
@@ -384,7 +452,7 @@ class TestPRCommentValidation:
         assert approved is False
         assert "SELF-REVIEWED" in message or "HO REVIEWED" in message
 
-    def test_tier_2_requires_tmg_crs_and_ce_approval(self, ci_environment, monkeypatch):
+    def test_tier_2_requires_tmg_crs_and_ce_approval(self, ci_environment, monkeypatch, pr_head):
         """TIER_2_STANDARD requires TMG + CRS + CE approval (5-tier system)."""
 
         # Mock gh CLI to return comments with TMG, CRS and CE approval
@@ -394,9 +462,9 @@ class TestPRCommentValidation:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests cover critical paths"},
-                            {"body": "CRS APPROVED: Logic correct, tests pass"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("TMG APPROVED: tests cover critical paths", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct, tests pass", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -426,7 +494,10 @@ class TestPRCommentValidation:
 
         approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
         assert approved is False
-        assert "CE APPROVED" in message or "CE GO" in message
+        # #201: the guidance names the role and points at submit_review with the
+        # head SHA, not at a footerless "CE APPROVED" text comment.
+        assert "CE" in message
+        assert "submit_review" in message and "commit_sha" in message
 
     def test_tier_3_requires_tmg_crs_ce_civ(self, ci_environment, monkeypatch):
         """TIER_3_CRITICAL requires TMG + CRS + CE + CIV (5-tier system)."""
@@ -460,8 +531,9 @@ class TestPRCommentValidation:
 # literal guidance template "CE APPROVED: [assessment] (or CE GO:)" (and the
 # TMG/CRS/CIV equivalents) inside a fenced code block -- see
 # review-gate.yml around the `${role} APPROVED: [assessment] (or ${role} GO:)`
-# line, mirroring the text validate_review.py itself prints at
-# "   - '{role} APPROVED: [assessment]' (or {role} GO:)" (~line 1370).
+# line, mirroring the text validate_review.py printed before issue #201
+# ("   - '{role} APPROVED: [assessment]' (or {role} GO:)"); it now points
+# reviewers to submit_review with the PR head SHA instead.
 #
 # matches_approval_pattern() matches per-LINE (review_formats.py, `for line in
 # cleaned.splitlines()`), so line-anchoring alone does NOT protect this
@@ -574,12 +646,16 @@ class TestTemplateSelfMatchGuard:
         assert approved is False
         assert set(missing) == {"CE", "CIV", "CRS", "TMG"}
 
-    def test_removing_both_defenses_would_self_clear(self, ci_environment, monkeypatch):
-        """Control case: WITHOUT bot-author or marker exclusion, the same
-        template text posted by a non-bot author with no marker DOES clear
-        the gate -- demonstrating these two checks are load-bearing, not
-        incidental. If this test ever fails, _is_bot_comment() has grown a
-        third, different exclusion path and this pin needs updating.
+    def test_footerless_template_no_longer_self_clears_without_both_defenses(
+        self, ci_environment, monkeypatch
+    ):
+        """Control case, updated for issue #201. Before #201 the same template
+        text posted by a non-bot author with no marker DID clear the gate,
+        proving the two exclusions load-bearing. #201 added the third path
+        this pin anticipated: peer roles now clear only via a head-bound
+        metadata footer, so the footerless template clears nothing even with
+        both exclusions bypassed (it still matches the regex per line -- see
+        test_template_text_matches_pattern_in_isolation).
         """
 
         def mock_run(cmd, *args, **kwargs):
@@ -601,20 +677,26 @@ class TestTemplateSelfMatchGuard:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, _message, _missing = validate_review.check_pr_comments(
+        approved, _message, missing = validate_review.check_pr_comments(
             required_roles={"CE", "CIV", "CRS", "TMG"}, tier="TIER_3_CRITICAL"
         )
-        # Not gated by bot-exclusion or marker -- the template text alone
-        # satisfies the regex for all four roles.
-        assert approved is True
+        # Not gated by bot-exclusion or marker, and still cleared nothing:
+        # footerless text is no longer a peer approval (#201).
+        assert approved is False
+        assert set(missing) == {"CE", "CIV", "CRS", "TMG"}
 
 
 @pytest.mark.behavior
 class TestPRBodyScanning:
     """Validate that PR body is scanned for approval patterns in addition to comments."""
 
-    def test_tmg_crs_and_ce_approval_in_pr_body_is_accepted(self, ci_environment, monkeypatch):
-        """Approval patterns in PR body should satisfy the review gate (5-tier)."""
+    def test_footerless_tmg_crs_and_ce_approval_in_pr_body_is_not_accepted(
+        self, ci_environment, monkeypatch, pr_head
+    ):
+        """Footerless approval text in the PR body no longer satisfies peer roles
+        (#201: footerless path retired). The body is still scanned -- a
+        head-bound footer there still counts until PR-B (#116 P0-2) -- but a
+        body carries at most one footer, so this three-role body clears none."""
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -630,8 +712,9 @@ class TestPRBodyScanning:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "TMG, CRS and CE approval in PR body should be accepted"
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, "footerless PR-body approvals must not clear peer roles"
+        assert sorted(missing) == ["CE", "CRS", "TMG"]
 
     def test_self_review_in_pr_body_is_accepted(self, ci_environment, monkeypatch):
         """Self-review pattern in PR body should satisfy TIER_1_SELF."""
@@ -654,17 +737,24 @@ class TestPRBodyScanning:
         assert approved is True, "Self-review in PR body should be accepted"
         assert "Self-review found" in message
 
-    def test_tier_3_approvals_split_between_body_and_comments(self, ci_environment, monkeypatch):
-        """TIER_3_CRITICAL: TMG+CRS+CE+CIV split between body and comments should pass."""
+    def test_tier_3_approvals_split_between_body_and_comments(
+        self, ci_environment, monkeypatch, pr_head
+    ):
+        """TIER_3_CRITICAL: TMG+CRS+CE+CIV split between body and comments should pass.
+
+        #201: each approval carries a head-bound footer; a text carries one footer,
+        so the body holds TMG and the comments hold CRS, CE and CIV.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": "TMG APPROVED: tests verified\nCRS APPROVED: Logic verified",
+                        "body": _at_head("TMG APPROVED: tests verified", "TMG"),
                         "comments": [
-                            {"body": "CE APPROVED: Performance acceptable"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
+                            {"body": _at_head("CRS APPROVED: Logic verified", "CRS")},
+                            {"body": _at_head("CE APPROVED: Performance acceptable", "CE")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
                         ],
                     }
                 ),
@@ -709,7 +799,7 @@ class TestPRBodyScanning:
         assert json_arg is not None, f"gh CLI should fetch comments and body, got: {gh_cmd}"
         assert "reviews" in json_arg, f"gh CLI should also fetch reviews, got: {gh_cmd}"
 
-    def test_empty_pr_body_still_checks_comments(self, ci_environment, monkeypatch):
+    def test_empty_pr_body_still_checks_comments(self, ci_environment, monkeypatch, pr_head):
         """Empty or null PR body should not break comment checking."""
 
         def mock_run(cmd, *args, **kwargs):
@@ -718,9 +808,9 @@ class TestPRBodyScanning:
                     {
                         "body": None,
                         "comments": [
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: Looks good"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Looks good", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -851,39 +941,28 @@ class TestHOSupervisoryReview:
 class TestFlexiblePatternMatching:
     """Validate flexible approval pattern matching beyond exact string match."""
 
-    def test_crs_parenthetical_model_format(self, ci_environment, monkeypatch):
-        """'CRS (Gemini): APPROVED' format should be recognized at TIER_2."""
+    def test_crs_colon_before_verdict_header_does_not_clear(
+        self, ci_environment, monkeypatch, pr_head
+    ):
+        """'CRS (Gemini): APPROVED' no longer clears CRS at TIER_2.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": "TMG APPROVED: tests verified\nCRS (Gemini): APPROVED - Logic correct, tests pass",
-                        "comments": [{"body": "CE APPROVED: Architecture sound"}],
-                    }
-                ),
-                returncode=0,
-                check=lambda: None,
-            )
-
-        monkeypatch.setattr(subprocess, "run", mock_run)
-
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "'CRS (Gemini): APPROVED' + TMG + CE should be recognized"
-
-    def test_ce_parenthetical_model_format(self, ci_environment, monkeypatch):
-        """'CE (Claude): APPROVED' format should be recognized at TIER_3_CRITICAL."""
-
-        def mock_run(cmd, *args, **kwargs):
-            return MagicMock(
-                stdout=json.dumps(
-                    {
-                        "body": "",
+                        "body": _at_head("TMG APPROVED: tests verified", "TMG"),
                         "comments": [
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: Logic ok"},
-                            {"body": "CE (Claude): APPROVED - Architecture sound"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
+                            {
+                                "body": _at_head(
+                                    "CRS (Gemini): APPROVED - Logic correct, tests pass", "CRS"
+                                )
+                            },
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -893,18 +972,31 @@ class TestFlexiblePatternMatching:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_3_CRITICAL")
-        assert approved is True, "'CE (Claude): APPROVED' with TMG+CRS+CIV should be recognized"
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, message
+        assert missing == ["CRS"], message
 
-    def test_crs_with_extra_whitespace(self, ci_environment, monkeypatch):
-        """Patterns with varied whitespace should still match."""
+    def test_ce_colon_before_verdict_header_does_not_clear(
+        self, ci_environment, monkeypatch, pr_head
+    ):
+        """'CE (Claude): APPROVED' no longer clears CE at TIER_3_CRITICAL.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": "TMG APPROVED: ok\nCRS  APPROVED: Logic correct",
-                        "comments": [{"body": "CE APPROVED: Sound"}],
+                        "body": "",
+                        "comments": [
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic ok", "CRS")},
+                            {"body": _at_head("CE (Claude): APPROVED - Architecture sound", "CE")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
+                        ],
                     }
                 ),
                 returncode=0,
@@ -913,8 +1005,38 @@ class TestFlexiblePatternMatching:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "CRS APPROVED with extra whitespace should match"
+        approved, message, missing = validate_review.check_pr_comments("TIER_3_CRITICAL")
+        assert approved is False, message
+        assert missing == ["CE"], message
+
+    def test_crs_double_space_header_does_not_clear(self, ci_environment, monkeypatch, pr_head):
+        """'CRS  APPROVED' (two spaces) no longer clears CRS.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
+
+        def mock_run(cmd, *args, **kwargs):
+            return MagicMock(
+                stdout=json.dumps(
+                    {
+                        "body": _at_head("TMG APPROVED: ok", "TMG"),
+                        "comments": [
+                            {"body": _at_head("CRS  APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Sound", "CE")},
+                        ],
+                    }
+                ),
+                returncode=0,
+                check=lambda: None,
+            )
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, message
+        assert missing == ["CRS"], message
 
     def test_il_parenthetical_model_format(self, ci_environment, monkeypatch):
         """'IL (Claude): SELF-REVIEWED' format should be recognized."""
@@ -936,7 +1058,7 @@ class TestFlexiblePatternMatching:
         approved, message, _ = validate_review.check_pr_comments("TIER_1_SELF")
         assert approved is True, "'IL (Claude): SELF-REVIEWED' should be recognized"
 
-    def test_original_exact_format_still_works(self, ci_environment, monkeypatch):
+    def test_original_exact_format_still_works(self, ci_environment, monkeypatch, pr_head):
         """Original exact format 'CRS APPROVED:' must continue to work at TIER_2."""
 
         def mock_run(cmd, *args, **kwargs):
@@ -945,9 +1067,9 @@ class TestFlexiblePatternMatching:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: Logic correct, tests pass"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct, tests pass", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -1041,39 +1163,22 @@ class TestGoKeywordApproval:
     tiers. TIER_1_SELF (IL SELF-REVIEWED) is NOT affected.
     """
 
-    def test_crs_go_matches_as_crs_approval(self, ci_environment, monkeypatch):
-        """'CRS (Gemini): GO' should match as CRS approval at TIER_2."""
+    def test_crs_colon_before_go_header_does_not_clear(self, ci_environment, monkeypatch, pr_head):
+        """'CRS (Gemini): GO' no longer clears CRS at TIER_2.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": "TMG APPROVED: ok\nCRS (Gemini): GO",
-                        "comments": [{"body": "CE APPROVED: Sound"}],
-                    }
-                ),
-                returncode=0,
-                check=lambda: None,
-            )
-
-        monkeypatch.setattr(subprocess, "run", mock_run)
-
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "'CRS (Gemini): GO' + TMG + CE should be recognized"
-
-    def test_ce_go_after_fix_matches_as_ce_approval(self, ci_environment, monkeypatch):
-        """'CE (Codex): GO after fix' should match as CE approval at TIER_3_CRITICAL."""
-
-        def mock_run(cmd, *args, **kwargs):
-            return MagicMock(
-                stdout=json.dumps(
-                    {
-                        "body": "",
+                        "body": _at_head("TMG APPROVED: ok", "TMG"),
                         "comments": [
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: ok"},
-                            {"body": "CE (Codex): GO after fix"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
+                            {"body": _at_head("CRS (Gemini): GO", "CRS", "GO")},
+                            {"body": _at_head("CE APPROVED: Sound", "CE")},
                         ],
                     }
                 ),
@@ -1083,18 +1188,29 @@ class TestGoKeywordApproval:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_3_CRITICAL")
-        assert approved is True, "'CE (Codex): GO after fix' with TMG+CRS+CIV should pass"
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, message
+        assert missing == ["CRS"], message
 
-    def test_crs_go_with_score_matches(self, ci_environment, monkeypatch):
-        """'CRS (Gemini): GO (9/10)' should match -- the real-world failing case."""
+    def test_ce_go_without_colon_header_does_not_clear(self, ci_environment, monkeypatch, pr_head):
+        """'CE (Codex): GO after fix' no longer clears CE at TIER_3_CRITICAL.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": "TMG APPROVED: ok\nCRS (Gemini): GO (9/10)",
-                        "comments": [{"body": "CE APPROVED: Sound"}],
+                        "body": "",
+                        "comments": [
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: ok", "CRS")},
+                            {"body": _at_head("CE (Codex): GO after fix", "CE", "GO")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
+                        ],
                     }
                 ),
                 returncode=0,
@@ -1103,10 +1219,40 @@ class TestGoKeywordApproval:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
-        assert approved is True, "'CRS (Gemini): GO (9/10)' + TMG + CE should pass"
+        approved, message, missing = validate_review.check_pr_comments("TIER_3_CRITICAL")
+        assert approved is False, message
+        assert missing == ["CE"], message
 
-    def test_tier_3_go_plus_ce_approved_passes(self, ci_environment, monkeypatch):
+    def test_crs_go_with_score_header_does_not_clear(self, ci_environment, monkeypatch, pr_head):
+        """'CRS (Gemini): GO (9/10)' no longer clears CRS.
+
+        #201 option B: on the peer-role path a footer counts only under the header
+        submit_review emits on the first non-empty line, `<ROLE>[ (model)] <VERDICT>:`.
+        This hand-written shape is not that header, so the comment is disqualified.
+        """
+
+        def mock_run(cmd, *args, **kwargs):
+            return MagicMock(
+                stdout=json.dumps(
+                    {
+                        "body": _at_head("TMG APPROVED: ok", "TMG"),
+                        "comments": [
+                            {"body": _at_head("CRS (Gemini): GO (9/10)", "CRS", "GO")},
+                            {"body": _at_head("CE APPROVED: Sound", "CE")},
+                        ],
+                    }
+                ),
+                returncode=0,
+                check=lambda: None,
+            )
+
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        approved, message, missing = validate_review.check_pr_comments("TIER_2_STANDARD")
+        assert approved is False, message
+        assert missing == ["CRS"], message
+
+    def test_tier_3_go_plus_ce_approved_passes(self, ci_environment, monkeypatch, pr_head):
         """TIER_3_CRITICAL with TMG+CRS GO+CE+CIV should pass."""
 
         def mock_run(cmd, *args, **kwargs):
@@ -1115,10 +1261,10 @@ class TestGoKeywordApproval:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS GO: Logic sound"},
-                            {"body": "CE APPROVED: Architecture sound"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS GO: Logic sound", "CRS", "GO")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
                         ],
                     }
                 ),
@@ -1131,8 +1277,12 @@ class TestGoKeywordApproval:
         approved, message, _ = validate_review.check_pr_comments("TIER_3_CRITICAL")
         assert approved is True, "TMG+CRS GO+CE+CIV should satisfy TIER_3_CRITICAL"
 
-    def test_tier_3_approved_plus_ce_go_passes(self, ci_environment, monkeypatch):
-        """TIER_3_CRITICAL with TMG+CRS+CE GO+CIV should pass."""
+    def test_tier_3_approved_plus_ce_go_passes(self, ci_environment, monkeypatch, pr_head):
+        """TIER_3_CRITICAL with TMG+CRS+CE GO+CIV should pass.
+
+        #201 option B: the CE GO comment uses the header submit_review emits,
+        'CE (Codex) GO: ...' (was 'CE (Codex): GO - looks good').
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -1140,10 +1290,10 @@ class TestGoKeywordApproval:
                     {
                         "body": "",
                         "comments": [
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE (Codex): GO - looks good"},
-                            {"body": "CIV APPROVED: Implementation matches spec"},
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE (Codex) GO: looks good", "CE", "GO")},
+                            {"body": _at_head("CIV APPROVED: Implementation matches spec", "CIV")},
                         ],
                     }
                 ),
@@ -1185,8 +1335,12 @@ class TestGoKeywordApproval:
         assert "CE" in message, "Error message should mention CE"
         assert "CIV" in message, "Error message should mention CIV"
 
-    def test_tier_2_missing_mentions_go_in_error(self, ci_environment, monkeypatch):
-        """Error message for TIER_2_STANDARD missing approval should mention GO as alternative."""
+    def test_tier_2_missing_guidance_names_an_approved_verdict_not_go(
+        self, ci_environment, monkeypatch
+    ):
+        """The missing-approval guidance points to submit_review, which can emit an
+        APPROVED verdict but has no GO verdict (VALID_VERDICTS), so it must not
+        tell reviewers to post GO (#201 pre-review). A GO footer still clears."""
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -1204,7 +1358,8 @@ class TestGoKeywordApproval:
 
         approved, message, _ = validate_review.check_pr_comments("TIER_2_STANDARD")
         assert approved is False
-        assert "GO" in message, "Error message should mention GO as an accepted format"
+        assert "APPROVED verdict" in message, message
+        assert not re.search(r"\bGO\b", message), message
 
 
 @pytest.mark.behavior
@@ -1406,7 +1561,7 @@ class TestCrossValidationUnrecognizedRoles:
     """
 
     def test_unrecognized_role_in_metadata_does_not_trigger_cross_validation(
-        self, ci_environment, monkeypatch
+        self, ci_environment, monkeypatch, pr_head
     ):
         """Unrecognized role (e.g., code-review-specialist) must NOT cause false positive.
 
@@ -1428,9 +1583,9 @@ class TestCrossValidationUnrecognizedRoles:
                                     '"verdict": "APPROVED", "provider": "gemini"} -->'
                                 )
                             },
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -1447,7 +1602,7 @@ class TestCrossValidationUnrecognizedRoles:
         )
 
     def test_unrecognized_role_without_visible_match_does_not_fail(
-        self, ci_environment, monkeypatch
+        self, ci_environment, monkeypatch, pr_head
     ):
         """Unrecognized role with no visible text match must NOT fail.
 
@@ -1470,9 +1625,9 @@ class TestCrossValidationUnrecognizedRoles:
                                     '"verdict": "APPROVED", "provider": "gemini"} -->'
                                 )
                             },
-                            {"body": "TMG APPROVED: tests verified"},
-                            {"body": "CRS APPROVED: Logic correct"},
-                            {"body": "CE APPROVED: Architecture sound"},
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                            {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                            {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                         ],
                     }
                 ),
@@ -2012,7 +2167,7 @@ class TestStructuredMissingRoles:
             "TMG",
         }, f"Expected missing_roles={{'CE', 'CRS', 'TMG'}}, got {set(missing_roles)}"
 
-    def test_check_pr_comments_handles_null_author(self, ci_environment, monkeypatch):
+    def test_check_pr_comments_handles_null_author(self, ci_environment, monkeypatch, pr_head):
         """A comment/review with author=null (ghost/deleted user) must not crash the gate.
 
         Regression: ``comment.get("author", {})`` returns None when the key exists
@@ -2028,7 +2183,10 @@ class TestStructuredMissingRoles:
                     "body": "",
                     "comments": [
                         {"author": None, "body": "just some prose from a ghost user"},
-                        {"author": {"login": "reviewer1"}, "body": "CE APPROVED: real"},
+                        {
+                            "author": {"login": "reviewer1"},
+                            "body": _at_head("CE APPROVED: real", "CE"),
+                        },
                     ],
                     "reviews": [
                         {"author": None, "state": "COMMENTED", "body": "ghost review"},
@@ -2046,7 +2204,9 @@ class TestStructuredMissingRoles:
         assert approved is True
         assert missing_roles == []
 
-    def test_check_pr_comments_returns_empty_missing_on_success(self, ci_environment, monkeypatch):
+    def test_check_pr_comments_returns_empty_missing_on_success(
+        self, ci_environment, monkeypatch, pr_head
+    ):
         """When all approvals found, missing_roles must be an empty list."""
         monkeypatch.setenv("PR_NUMBER", "999")
 
@@ -2058,15 +2218,15 @@ class TestStructuredMissingRoles:
                     "comments": [
                         {
                             "author": {"login": "reviewer1"},
-                            "body": "CE APPROVED: looks good",
+                            "body": _at_head("CE APPROVED: looks good", "CE"),
                         },
                         {
                             "author": {"login": "reviewer2"},
-                            "body": "CRS APPROVED: standards met",
+                            "body": _at_head("CRS APPROVED: standards met", "CRS"),
                         },
                         {
                             "author": {"login": "reviewer3"},
-                            "body": "TMG APPROVED: tests verified",
+                            "body": _at_head("TMG APPROVED: tests verified", "TMG"),
                         },
                     ],
                 }
@@ -2086,7 +2246,9 @@ class TestStructuredMissingRoles:
         assert approved is True
         assert missing_roles == [], f"Expected empty missing_roles on success, got {missing_roles}"
 
-    def test_check_pr_comments_partial_approvals_structured(self, ci_environment, monkeypatch):
+    def test_check_pr_comments_partial_approvals_structured(
+        self, ci_environment, monkeypatch, pr_head
+    ):
         """With partial approvals, missing_roles lists only the actually missing ones."""
         monkeypatch.setenv("PR_NUMBER", "999")
 
@@ -2098,11 +2260,11 @@ class TestStructuredMissingRoles:
                     "comments": [
                         {
                             "author": {"login": "reviewer1"},
-                            "body": "CRS APPROVED: standards met",
+                            "body": _at_head("CRS APPROVED: standards met", "CRS"),
                         },
                         {
                             "author": {"login": "reviewer2"},
-                            "body": "TMG APPROVED: tests verified",
+                            "body": _at_head("TMG APPROVED: tests verified", "TMG"),
                         },
                     ],
                 }
@@ -3432,7 +3594,9 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
     security property is unchanged: a spoofed comment still clears nothing.
     """
 
-    def test_poisoned_comment_does_not_block_genuine_approvals(self, ci_environment, monkeypatch):
+    def test_poisoned_comment_does_not_block_genuine_approvals(
+        self, ci_environment, monkeypatch, pr_head
+    ):
         """BLAST RADIUS: genuine approvals for every required role must still satisfy
         the gate when an unrelated poisoned comment is present on the same PR."""
         monkeypatch.setattr(
@@ -3441,9 +3605,9 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
             _mock_gh_pr_view(
                 [
                     _POISONED_CRS_COMMENT,
-                    {"body": "TMG APPROVED: tests verified"},
-                    {"body": "CRS APPROVED: Logic correct"},
-                    {"body": "CE APPROVED: Architecture sound"},
+                    {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                    {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                    {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                 ]
             ),
         )
@@ -3456,7 +3620,7 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
         )
         assert missing == []
 
-    def test_disqualification_is_surfaced_not_silent(self, ci_environment, monkeypatch):
+    def test_disqualification_is_surfaced_not_silent(self, ci_environment, monkeypatch, pr_head):
         """A wedge attempt must remain visible in the gate's human-readable reason."""
         monkeypatch.setattr(
             subprocess,
@@ -3464,9 +3628,9 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
             _mock_gh_pr_view(
                 [
                     _POISONED_CRS_COMMENT,
-                    {"body": "TMG APPROVED: tests verified"},
-                    {"body": "CRS APPROVED: Logic correct"},
-                    {"body": "CE APPROVED: Architecture sound"},
+                    {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                    {"body": _at_head("CRS APPROVED: Logic correct", "CRS")},
+                    {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                 ]
             ),
         )
@@ -3481,7 +3645,7 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
             "spoofing" in message.lower()
         ), f"Disqualifying a comment must not be silent. Got: {message}"
 
-    def test_poisoned_comment_clears_nothing(self, ci_environment, monkeypatch):
+    def test_poisoned_comment_clears_nothing(self, ci_environment, monkeypatch, pr_head):
         """SECURITY: the disqualified comment must satisfy neither the regex
         matchers nor the metadata check -- CRS stays missing."""
         monkeypatch.setattr(
@@ -3490,8 +3654,8 @@ class TestCrossValidationDisqualifiesInsteadOfWedging:
             _mock_gh_pr_view(
                 [
                     _POISONED_CRS_COMMENT,
-                    {"body": "TMG APPROVED: tests verified"},
-                    {"body": "CE APPROVED: Architecture sound"},
+                    {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
+                    {"body": _at_head("CE APPROVED: Architecture sound", "CE")},
                 ]
             ),
         )
