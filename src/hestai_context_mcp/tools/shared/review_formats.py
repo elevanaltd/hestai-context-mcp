@@ -199,8 +199,10 @@ def _normalize_provider(model_annotation: str) -> str:
     keeping the metadata ``provider`` field usable for exact-match
     provider-level lookups (e.g. ``scripts/validate_review.py``'s
     ``_meta_has(..., provider=...)``) regardless of how decorated the visible
-    annotation is. The full annotation still appears, sanitized, in the
-    human-readable header -- only the metadata token is shortened.
+    annotation is. The human-readable header carries the annotation reduced to
+    the gate's label allowlist by _sanitize_model_label (lossy; possibly empty,
+    in which case the header has no label) -- this token is derived from the raw
+    annotation independently.
     """
     stripped = model_annotation.strip()
     match = re.match(r"[^\s()]+", stripped)
@@ -756,9 +758,10 @@ def _build_comment(
     # a metadata-shaped HTML comment ahead of the real footer. The formatter's
     # own footer (below) is emitted AFTER this and is never altered.
     # The FINAL neutralisation of the whole visible portion happens below, after
-    # every other transformation (e.g. _sanitize_model_label strips parentheses,
-    # which can RE-CREATE a delimiter from "<(!--"). Neutralising the raw
-    # annotation up front is therefore not sufficient on its own.
+    # every other transformation, as a guarantee that does not depend on any one
+    # of them. (The model label can no longer carry a delimiter at all:
+    # _sanitize_model_label reduces it to [A-Za-z0-9 .,/-]. Earlier, stripping
+    # only parentheses could RE-CREATE one from "<(!--".)
     assessment = neutralise_comment_delimiters(assessment)
 
     fixes = list(wording_fixes) if wording_fixes else []
