@@ -1228,7 +1228,12 @@ def check_pr_comments(
     required_roles: set[str] | None = None,
     tier: str = "",
 ) -> tuple[bool, str, list[str]]:
-    """Check if required review comments and PR body contain approval patterns.
+    """Check if required review comments and PR Reviews contain approvals.
+
+    The PR description is NOT approval evidence of any kind (#116 P0-2,
+    operator ruling relayed 2026-11-16): it clears no peer role, revokes none,
+    and satisfies no self-review. It still feeds review DECLARATIONS
+    (_collect_bitemporal_declarations), which can only add required roles.
 
     Supports two calling conventions for backward compatibility:
     - New: check_pr_comments(required_roles={'CE', 'CRS'}, tier='TIER_2_STANDARD')
@@ -1261,17 +1266,17 @@ def check_pr_comments(
 
     print(f"   Checking PR #{pr_number} for review comments...")
 
-    # Use gh CLI to get comments, PR body, and PR reviews
+    # Use gh CLI to get comments and PR reviews (not the PR body, #116 P0-2)
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", pr_number, "--json", "comments,body,reviews"],
+            ["gh", "pr", "view", pr_number, "--json", "comments,reviews"],
             capture_output=True,
             text=True,
             check=True,
         )
         pr_data = json.loads(result.stdout)
 
-        # Collect all searchable text: PR body + comment bodies + review bodies
+        # Collect all searchable text: comment bodies + review bodies
         # Exclude ALL bot comments/reviews to prevent false positive approval matches.
         # Bot review prose (Copilot, Cubic, github-actions) often
         # contains "APPROVED", "GO", etc. which would falsely clear the gate.
@@ -1289,11 +1294,8 @@ def check_pr_comments(
         # Each source is (timestamp, text). The timestamp orders footer verdicts
         # for the latest-verdict-per-role rule (issue #201): comments carry
         # `createdAt`, PR Reviews `submittedAt` (ISO-8601 UTC, so string order is
-        # time order). The PR body has no verdict time and sorts first.
+        # time order). The PR description is not a source (#116 P0-2).
         sources: list[tuple[str, str]] = []
-        pr_body = pr_data.get("body")
-        if pr_body:
-            sources.append(("", pr_body))
 
         # Filter comments, logging any bot comments that are skipped
         skipped_bots: list[str] = []
