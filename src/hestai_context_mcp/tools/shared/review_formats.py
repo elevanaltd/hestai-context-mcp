@@ -87,7 +87,11 @@ def _match_existing_header_token(assessment: str, role: str) -> str | None:
         # a shorter token sharing a prefix.
         tokens = sorted(_RECOGNIZED_HEADER_TOKENS, key=len, reverse=True)
         token_alt = "|".join(re.escape(t) for t in tokens)
-        pattern = re.compile(rf"^{re.escape(role)} ({token_alt}):", re.IGNORECASE)
+        # re.ASCII: case-insensitive for ASCII only. Without it Python's Unicode
+        # case folding accepts lookalike roles (U+017F long s for "S", U+0130 /
+        # U+0131 for "I") as an existing header, which would then be kept
+        # verbatim as a first line the review gate rejects.
+        pattern = re.compile(rf"^{re.escape(role)} ({token_alt}):", re.IGNORECASE | re.ASCII)
         _ANY_TOKEN_HEADER_RE_CACHE[role] = pattern
 
     first_line = assessment.split("\n", 1)[0]
