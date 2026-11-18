@@ -9,7 +9,10 @@ never emit a label the gate rejects:
 - an empty sanitised label emits NO ``()``;
 - the ROUND-TRIP coupling guard: every comment ``format_review_comment`` builds,
   across adversarial and real annotations, roles, verdicts and the wording-fixes
-  form, passes the merged gate's ``_header_agrees`` for its own footer.
+  form, passes the merged gate's ``_header_agrees`` for its own footer, AND
+  submit_review's own role-gate matcher clears it exactly when the verdict is an
+  approval (so a label can neither make a block read as an approval nor stop an
+  approval from reading as one).
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from hestai_context_mcp.tools.shared.review_formats import (
     format_review_comment,
     parse_review_metadata,
 )
+from hestai_context_mcp.tools.submit_review import _matches_role_gate
 
 # Load the merged gate the way the other validator tests do.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
@@ -51,14 +55,19 @@ ADVERSARIAL_LABELS = [
     "[link](x)",
     "R&D",
     "<b>x</b>",
-    "Claude ‮Opus",
-    "Cláude",
+    "Claude \u202eOpus",
+    "Cl\u00e1ude",
     "Gemini 4 Argon (High)",
     "<!-- review: x -->",
     "tab\tand\nnewline",
     "`*_~[]&#;<>",
     "&#96;",
     "   ",
+    "gemini_go",
+    "auto_approve",
+    "claude_if_needed",
+    "Mistral M\u00e9dium",
+    "\u667a\u8c31",
 ]
 
 
@@ -68,35 +77,46 @@ class TestSanitizeModelLabel:
         ("raw", "expected"),
         [
             ("Claude `Opus` 5.5", "Claude Opus 5.5"),
-            ("gpt_6", "gpt 6"),
+            ("gpt_6", "gpt6"),
+            ("gemini_go", "geminigo"),
+            ("auto_approve", "autoapprove"),
             ("*bold*", "bold"),
             ("~~struck~~", "struck"),
             ("[x]", "x"),
             ("R&D", "R D"),
             ("<b>x</b>", "b x /b"),
-            ("Claude ‮Opus", "Claude Opus"),
-            ("Cláude", "Cl ude"),
+            ("Claude \u202eOpus", "Claude Opus"),
+            ("Cl\u00e1ude", "Claude"),
+            ("Mistral M\u00e9dium", "Mistral Medium"),
             ("Gemini 4 Argon (High)", "Gemini 4 Argon High"),
             ("tab\tand\nnewline", "tab and newline"),
         ],
         ids=[
             "backtick",
             "underscore",
+            "underscore-before-verdict-word",
+            "underscore-before-approve",
             "asterisk",
             "strikethrough",
             "brackets",
             "ampersand",
             "html-tag",
             "bidi-rlo",
-            "non-ascii-letter",
+            "accented-letter-folds",
+            "accented-word-folds",
             "parentheses",
             "tab-newline",
         ],
     )
-    def test_disallowed_characters_become_single_spaces(self, raw: str, expected: str) -> None:
+    def test_disallowed_characters_are_removed_without_splitting_words(
+        self, raw: str, expected: str
+    ) -> None:
+        """Accented letters fold to ASCII; '_' and other non-ASCII word characters
+        are deleted, so no new word appears inside a label; every other disallowed
+        run (already a word boundary) becomes one space."""
         assert _sanitize_model_label(raw) == expected
 
-    @pytest.mark.parametrize("raw", ["`*_~[]&#;<>", "   ", "‮", "()"])
+    @pytest.mark.parametrize("raw", ["`*_~[]&#;<>", "   ", "\u202e", "()", "\u667a\u8c31"])
     def test_all_disallowed_label_is_empty(self, raw: str) -> None:
         assert _sanitize_model_label(raw) == ""
 
@@ -125,6 +145,7 @@ class TestFormatterGateRoundTrip:
         meta = parse_review_metadata(comment)
         assert meta is not None
         assert validate_review._header_agrees(comment, meta["role"], meta["verdict"]), comment
+        assert _matches_role_gate(comment, role) is (verdict == "APPROVED"), comment
 
     @pytest.mark.parametrize("annotation", [None, *REAL_LABELS, *ADVERSARIAL_LABELS])
     def test_wording_fixes_header_passes_the_gate(self, annotation: str | None) -> None:
@@ -134,6 +155,7 @@ class TestFormatterGateRoundTrip:
         meta = parse_review_metadata(comment)
         assert meta is not None and meta["conditions"] == "wording"
         assert validate_review._header_agrees(comment, meta["role"], meta["verdict"]), comment
+        assert _matches_role_gate(comment, "SR") is True, comment
 
     @pytest.mark.parametrize(
         "assessment",
