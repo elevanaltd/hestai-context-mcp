@@ -1174,16 +1174,20 @@ def _sha_binds_to_head(sha: object, head_sha: str) -> bool:
 
 # The verdict header submit_review emits as the first line of a review
 # (review_formats._build_comment): "<ROLE> <KEYWORD>: ...", optionally with a
-# sanitised model label "<ROLE> (<label>) <KEYWORD>: ...", or the SR
-# wording-fixes form "... APPROVED (wording fixes pending):". The label has its
-# parentheses stripped, so it cannot nest; it may not contain '<' or '>' either,
-# so no HTML element in the label can hide the verdict that follows it (real
-# labels such as "z-ai/glm-5.2" or "Gemini 4 Argon High" are unaffected, and
-# backticks arrive escaped as &#96;). Role and verdict accept either case
-# and are compared upper-cased, because an agreeing header already in the
-# assessment is kept verbatim (_match_existing_header_token).
+# model label "<ROLE> (<label>) <KEYWORD>: ...", or the SR wording-fixes form
+# "... APPROVED (wording fixes pending):".
+#
+# The label is an ASCII ALLOWLIST: letters, digits, space, '.', ',', '/' and '-'
+# (issue #201, HC ruling in PR #295 round 4). Every other character -- markup
+# such as '<', '`', '~', '*', '_', '[', ']', '&' entities, bidi controls and
+# non-ASCII letters -- disqualifies the comment, so nothing in the label can
+# hide, collapse or restyle the verdict that follows it. Real provider and model
+# labels ("z-ai/glm-5.2", "Gemini 4 Argon High", "GPT-6", a comma-separated
+# preset note) fit the allowlist. Role and verdict accept either case and are
+# compared upper-cased, because an agreeing header already in the assessment is
+# kept verbatim (_match_existing_header_token).
 _VERDICT_HEADER_RE: Final = re.compile(
-    r"(?P<role>[A-Za-z]+)(?: \([^()<>\n]*\))? (?P<verdict>[A-Za-z-]+)"
+    r"(?P<role>[A-Za-z]+)(?: \([A-Za-z0-9 .,/-]*\))? (?P<verdict>[A-Za-z-]+)"
     r"(?::| \(wording fixes pending\):)"
 )
 
