@@ -163,13 +163,24 @@ def _sanitize_model_label(model_annotation: str) -> str:
     The review gate counts a peer verdict only if the header label holds nothing
     but ``[A-Za-z0-9 .,/-]`` (anything else could hide or restyle the verdict:
     nested parentheses, code spans, emphasis, link text, HTML, entities, bidi
-    controls, non-ASCII). Each run of other characters becomes one space, then
-    whitespace is collapsed, so ``"Gemini 3.1 Pro (High)"`` becomes
-    ``"Gemini 3.1 Pro High"`` and real labels such as ``"z-ai/glm-5.2"`` are
-    unchanged. An all-disallowed label yields ``""`` (the header then carries no
-    label). The footer ``provider`` token is derived separately and unchanged.
+    controls, non-ASCII). Three steps, chosen so the label never gains a new
+    word -- the approval matcher reads words, so "gemini_go" must not become
+    "gemini go":
+
+    1. accented letters fold to ASCII (NFKD, combining marks dropped);
+    2. remaining word characters outside the allowlist ('_' and non-ASCII
+       letters or digits) are deleted, so they cannot split a word;
+    3. every other disallowed run, already a word boundary, becomes one space,
+       and whitespace is collapsed.
+
+    So ``"Gemini 3.1 Pro (High)"`` becomes ``"Gemini 3.1 Pro High"`` and real
+    labels such as ``"z-ai/glm-5.2"`` are unchanged. An all-disallowed label
+    yields ``""`` (the header then carries no label). The footer ``provider``
+    token is derived separately and unchanged.
     """
-    return " ".join(_LABEL_DISALLOWED_RE.sub(" ", model_annotation).split())
+    folded = "".join(c for c in _ud.normalize("NFKD", model_annotation) if not _ud.combining(c))
+    joined = "".join(c for c in folded if c != "_" and not (c.isalnum() and not c.isascii()))
+    return " ".join(_LABEL_DISALLOWED_RE.sub(" ", joined).split())
 
 
 def _header_prefix(role: str, model_annotation: str | None) -> str:
