@@ -725,10 +725,12 @@ class TestHeaderLineRule:
 @pytest.mark.unit
 @pytest.mark.security
 class TestHeaderLabelCannotCarryHtml:
-    """cubic P1 at e129ee2e: the optional ' (<label>)' must not carry HTML, or the
-    verdict after it can sit inside a collapsed or hidden element while the header
-    still matches. Labels may not contain '<' or '>'; real provider and model
-    labels (slashes, spaces, the &#96; backtick escape) are unaffected."""
+    """Round 4 (CE at fdb69db1; HC ruling): the optional ' (<label>)' in the verdict
+    header is an ASCII allowlist, [A-Za-z0-9 .,/-]*. Any other character disqualifies
+    the comment, so no markup in the label (HTML, a code span, strikethrough,
+    emphasis, link text, entities, bidi controls) can hide or restyle the verdict
+    that follows. Real provider and model labels are unaffected. (Earlier denylist
+    rounds: cubic P1 at e129ee2e barred '<' and '>'.)"""
 
     @pytest.mark.parametrize(
         "label",
@@ -744,7 +746,57 @@ class TestHeaderLabelCannotCarryHtml:
 
     @pytest.mark.parametrize(
         "label",
-        ["z-ai/glm-5.2", "Gemini 4 Argon High", "Claude &#96;Opus&#96; 5.5", "openai/gpt-6-sol"],
+        [
+            "Claude `x",
+            "Claude ~~x",
+            "Claude *x",
+            "Claude _x",
+            "Claude [x]",
+            "Claude &#96;Opus&#96; 5.5",
+            "Claude \u202eOpus",
+            "Cl\u00e1ude",
+        ],
+        ids=[
+            "backtick",
+            "strikethrough",
+            "asterisk",
+            "underscore",
+            "brackets",
+            "escaped-backtick-entity",
+            "bidi-rlo",
+            "non-ascii-letter",
+        ],
+    )
+    def test_out_of_allowlist_label_is_disqualified(self, label: str) -> None:
+        body = _verdict("CE", "APPROVED", HEAD[:7], text=f"CE ({label}) APPROVED: fine")
+        approved, msg, missing = _check(comments=[_comment(body)])
+        assert approved is False, msg
+        assert missing == ["CE"]
+        assert "spoofing" in msg.lower(), msg
+
+    def test_out_of_allowlist_label_on_a_block_still_revokes(self) -> None:
+        """Ruling 1: the disqualified comment clears nothing, but its non-approval
+        footer still counts as the role's latest verdict."""
+        blocked = _verdict("CE", "BLOCKED", HEAD[:7], text="CE (Claude `x) BLOCKED: race")
+        approved, msg, missing = _check(
+            comments=[
+                _comment(_verdict("CE", "APPROVED", HEAD[:7]), at=T1),
+                _comment(blocked, at=T2),
+            ]
+        )
+        assert approved is False, msg
+        assert missing == ["CE"]
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "z-ai/glm-5.2",
+            "openai/gpt-6-sol",
+            "Gemini 4 Argon High",
+            "GPT-6",
+            "Claude Opus 5.5",
+            "moonshotai/kimi-k3 goose critical-engineer preset, CIV lens",
+        ],
     )
     def test_real_labels_still_clear(self, label: str) -> None:
         body = _verdict("CE", "APPROVED", HEAD[:7], text=f"CE ({label}) APPROVED: fine")
