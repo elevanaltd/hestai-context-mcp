@@ -688,15 +688,15 @@ class TestTemplateSelfMatchGuard:
 
 @pytest.mark.behavior
 class TestPRBodyScanning:
-    """Validate that PR body is scanned for approval patterns in addition to comments."""
+    """The PR description is not approval evidence (#116 P0-2): approval-shaped text
+    there satisfies neither peer roles nor self-review. Comments are still checked."""
 
     def test_footerless_tmg_crs_and_ce_approval_in_pr_body_is_not_accepted(
         self, ci_environment, monkeypatch, pr_head
     ):
-        """Footerless approval text in the PR body no longer satisfies peer roles
-        (#201: footerless path retired). The body is still scanned -- a
-        head-bound footer there still counts until PR-B (#116 P0-2) -- but a
-        body carries at most one footer, so this three-role body clears none."""
+        """Footerless approval text in the PR body does not satisfy peer roles
+        (#201: footerless path retired; since #116 P0-2 the body is not approval
+        evidence at all, footer or not)."""
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
