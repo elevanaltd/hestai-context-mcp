@@ -1,0 +1,176 @@
+"""Header label emits only the merged gate's ASCII allowlist (#295 follow-up).
+
+The review gate (scripts/validate_review.py, merged in PR #295) disqualifies a
+peer verdict unless its first line is ``<ROLE>[ (<label>)] <VERDICT>:`` with the
+label drawn from ``[A-Za-z0-9 .,/-]``. These tests pin that the formatter can
+never emit a label the gate rejects:
+
+- unit tests on ``_sanitize_model_label`` for each disallowed character class;
+- an empty sanitised label emits NO ``()``;
+- the ROUND-TRIP coupling guard: every comment ``format_review_comment`` builds,
+  across adversarial and real annotations, roles, verdicts and the wording-fixes
+  form, passes the merged gate's ``_header_agrees`` for its own footer.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+from hestai_context_mcp.tools.shared import review_formats as _rf
+from hestai_context_mcp.tools.shared.review_formats import (
+    VALID_ROLES,
+    _sanitize_model_label,
+    format_review_comment,
+    parse_review_metadata,
+)
+
+# Load the merged gate the way the other validator tests do.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+import validate_review  # noqa: E402
+
+SHA = "f461f9a20d2a8d11f3004140df4465e0079b14f5"
+
+REAL_LABELS = [
+    "z-ai/glm-5.2",
+    "openai/gpt-6-sol",
+    "GPT-6",
+    "Claude Opus 5.5",
+    "Gemini 4 Argon High",
+    "moonshotai/kimi-k3 goose critical-engineer preset, CIV lens",
+]
+
+ADVERSARIAL_LABELS = [
+    "Claude `Opus` 5.5",
+    "a`b c`d",
+    "gpt_6",
+    "*bold*",
+    "~~struck~~",
+    "[link](x)",
+    "R&D",
+    "<b>x</b>",
+    "Claude ‮Opus",
+    "Cláude",
+    "Gemini 4 Argon (High)",
+    "<!-- review: x -->",
+    "tab\tand\nnewline",
+    "`*_~[]&#;<>",
+    "&#96;",
+    "   ",
+]
+
+
+@pytest.mark.unit
+class TestSanitizeModelLabel:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("Claude `Opus` 5.5", "Claude Opus 5.5"),
+            ("gpt_6", "gpt 6"),
+            ("*bold*", "bold"),
+            ("~~struck~~", "struck"),
+            ("[x]", "x"),
+            ("R&D", "R D"),
+            ("<b>x</b>", "b x /b"),
+            ("Claude ‮Opus", "Claude Opus"),
+            ("Cláude", "Cl ude"),
+            ("Gemini 4 Argon (High)", "Gemini 4 Argon High"),
+            ("tab\tand\nnewline", "tab and newline"),
+        ],
+        ids=[
+            "backtick",
+            "underscore",
+            "asterisk",
+            "strikethrough",
+            "brackets",
+            "ampersand",
+            "html-tag",
+            "bidi-rlo",
+            "non-ascii-letter",
+            "parentheses",
+            "tab-newline",
+        ],
+    )
+    def test_disallowed_characters_become_single_spaces(self, raw: str, expected: str) -> None:
+        assert _sanitize_model_label(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["`*_~[]&#;<>", "   ", "‮", "()"])
+    def test_all_disallowed_label_is_empty(self, raw: str) -> None:
+        assert _sanitize_model_label(raw) == ""
+
+    @pytest.mark.parametrize("label", REAL_LABELS)
+    def test_real_labels_are_unchanged(self, label: str) -> None:
+        assert _sanitize_model_label(label) == label
+
+    def test_empty_label_emits_no_parentheses(self) -> None:
+        comment = format_review_comment("CE", "APPROVED", "fine", "`*_~", SHA)
+        assert comment.splitlines()[0] == "CE APPROVED: fine"
+
+
+@pytest.mark.unit
+@pytest.mark.security
+class TestFormatterGateRoundTrip:
+    """Coupling guard: whatever the formatter emits, the merged gate's header rule
+    accepts for the comment's own footer."""
+
+    @pytest.mark.parametrize("annotation", [None, *REAL_LABELS, *ADVERSARIAL_LABELS])
+    @pytest.mark.parametrize("verdict", ["APPROVED", "BLOCKED", "CONDITIONAL", "REJECTED"])
+    @pytest.mark.parametrize("role", sorted(VALID_ROLES))
+    def test_emitted_header_passes_the_gate(
+        self, role: str, verdict: str, annotation: str | None
+    ) -> None:
+        comment = format_review_comment(role, verdict, "assessment text", annotation, SHA)
+        meta = parse_review_metadata(comment)
+        assert meta is not None
+        assert validate_review._header_agrees(comment, meta["role"], meta["verdict"]), comment
+
+    @pytest.mark.parametrize("annotation", [None, *REAL_LABELS, *ADVERSARIAL_LABELS])
+    def test_wording_fixes_header_passes_the_gate(self, annotation: str | None) -> None:
+        comment = format_review_comment(
+            "SR", "APPROVED", "assessment text", annotation, SHA, wording_fixes=["Soften X"]
+        )
+        meta = parse_review_metadata(comment)
+        assert meta is not None and meta["conditions"] == "wording"
+        assert validate_review._header_agrees(comment, meta["role"], meta["verdict"]), comment
+
+    @pytest.mark.parametrize(
+        "assessment",
+        [
+            "CE APPROVED: already headed",
+            "ce approved: lowercase header kept verbatim",
+            "CE (my `label`) APPROVED: reviewer-typed label",
+            "CE (Gemini) APPROVED: reviewer-typed real label",
+            "  CE APPROVED: indented",
+            "\nCE APPROVED: after a blank line",
+        ],
+    )
+    @pytest.mark.parametrize("annotation", [None, "Claude `Opus`", "Gemini"])
+    def test_assessment_that_already_opens_with_a_header_passes_the_gate(
+        self, assessment: str, annotation: str | None
+    ) -> None:
+        """Kept-verbatim path: an exact '<ROLE> <TOKEN>:' opening is reused as-is;
+        any other opening (including a reviewer-typed label) gets the canonical
+        header prepended, so the first line is always a header the gate accepts."""
+        comment = format_review_comment("CE", "APPROVED", assessment, annotation, SHA)
+        meta = parse_review_metadata(comment)
+        assert meta is not None
+        assert validate_review._header_agrees(comment, "CE", "APPROVED"), comment
+
+    def test_escalation_path_label_has_no_entity_residue(self, monkeypatch) -> None:
+        """When the first footer check fails, the escalated rebuild escapes
+        backticks in free text; the label is already allowlisted, so it must not
+        carry '&#96;' residue such as a stray '96'."""
+        real = _rf.parse_review_metadata
+        calls = {"n": 0}
+
+        def flaky(text: str):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            return None if calls["n"] <= 1 else real(text)
+
+        monkeypatch.setattr(_rf, "parse_review_metadata", flaky)
+        comment = format_review_comment("CE", "APPROVED", "has `code`", "Claude `Opus`", SHA)
+        first = comment.splitlines()[0]
+        assert first.startswith("CE (Claude Opus) APPROVED: "), first
+        assert validate_review._header_agrees(comment, "CE", "APPROVED"), comment
