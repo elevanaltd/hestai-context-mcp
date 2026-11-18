@@ -421,9 +421,11 @@ class TestTier1SelfUnchanged:
         approved, msg, _ = self._self(_comment("CRS APPROVED: looks good"))
         assert approved is True, msg
 
-    def test_self_review_in_pr_body_still_clears(self) -> None:
+    def test_self_review_in_pr_body_no_longer_clears(self) -> None:
+        """#116 P0-2 (operator ruling): the PR body is not approval evidence; this
+        #201 pin asserted it still cleared and now asserts it does not."""
         approved, msg, _ = self._self(body="IL SELF-REVIEWED: done")
-        assert approved is True, msg
+        assert approved is False, msg
 
     def test_head_binding_does_not_apply_to_self_review(self) -> None:
         """A self-review footer at another SHA still clears TIER_1_SELF."""
