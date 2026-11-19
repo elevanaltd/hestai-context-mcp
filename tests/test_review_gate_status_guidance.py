@@ -23,8 +23,7 @@ WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "revi
 # review-gate-v2 tooling commit, superseded by review-gate-v3 (record #300).
 V2_SHA = "7634feb87298b77c507cade2e6b0f40a6a04d911"
 # Peeled commit of annotated tag review-gate-v3 (git ls-remote --tags origin 'review-gate-v3*').
-# RED placeholder: deliberately wrong so the exact-pin assertion is seen to fail first.
-V3_SHA = "0" * 40
+V3_SHA = "44a8a1527c3257c5338101e5dac8abf30e652c45"
 # The `if:` trigger substrings, lowercased (GitHub contains() ignores case).
 TRIGGERS = ("approve", "reviewed", " go", "**go**")
 

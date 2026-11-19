@@ -403,6 +403,9 @@ jobs:
               // Extract required reviewers dynamically from validation output.
               // The validator prints lines like "   - 'CE APPROVED: [assessment]' (or CE GO:)"
               // for each required role. Parse these to build the guidance block.
+              const headSha = (gateData && gateData.sha && gateData.sha !== 'unknown')
+                ? gateData.sha
+                : "the PR's current head SHA";
               if (tier === 'TIER_1_SELF') {
                 message += '**Required**: Self-review or HO supervisory review:\n';
                 message += '```\n{your-role} SELF-REVIEWED: [your rationale]\n-- or --\nHO REVIEWED: [rationale after delegated work]\n```\nAny role or name accepted (e.g., IL, skills-expert, Shaun).\nPost it as a PR comment or a PR Review body; the PR description never counts.\n';
@@ -410,6 +413,7 @@ jobs:
                 if (roles.length > 0) {
                   message += `**Required**: ${roles.join(' + ')} verdict, posted with \`mcp__hestai-context__submit_review\`.\n\n`;
                   message += 'The tool writes the verdict header plus the footer bound to the head SHA. ';
+                  message += `Pass commit_sha set to ${headSha}: without it the footer is unbound and the gate rejects it.\n`;
                   message += 'Hand-typed lines do not count, and a verdict for an earlier commit does not carry over: a new push needs a fresh one.\n';
                 } else {
                   message += '**Required**: See validation output for details\n';
