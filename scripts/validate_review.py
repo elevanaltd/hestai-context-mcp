@@ -1234,6 +1234,10 @@ def _visible_text(text: str) -> str:
 # repository for `gh pr view`, so the lookup targets the gated repository in
 # local and remote mode alike.
 _WRITE_PERMISSIONS: Final = frozenset({"admin", "maintain", "write"})
+# The other permission values the endpoint documents. An account with one of
+# these is listed as without write access; any value outside both sets is an
+# unexpected response.
+_NO_WRITE_PERMISSIONS: Final = frozenset({"read", "none"})
 # GitHub login syntax. gh returns app accounts WITHOUT their [bot] suffix (run
 # 44496751555: "cubic-dev-ai", "github-actions"), so no well-formed login here
 # carries one, and nothing outside this syntax is ever put in an API path.
@@ -1266,9 +1270,10 @@ def _fetch_author_permission(login: str) -> dict[str, Any]:
 def _author_status(login: str) -> tuple[_AuthorStatus, str]:
     """Classify a verdict author; the string says why a lookup failed, else ''.
 
-    Fails closed: any error, or a response without a string permission and a
-    string account type, is "failed" -- the author does not count and the
-    caller names the failure in its output.
+    Counts ("write") only for account type exactly "User" with permission
+    exactly admin, maintain or write. Fails closed: any error, or any response
+    outside the expected values, is "failed" -- the author does not count and
+    the caller names the failure in its output.
     """
     try:
         data = _fetch_author_permission(login)
@@ -1280,11 +1285,20 @@ def _author_status(login: str) -> tuple[_AuthorStatus, str]:
     permission = data.get("permission")
     user = data.get("user")
     account_type = user.get("type") if isinstance(user, dict) else None
-    if not isinstance(permission, str) or not isinstance(account_type, str):
-        return "failed", "unexpected permission response"
+    # Explicit allowlist: exact, case-sensitive values only. Anything else --
+    # another account type, another permission string, a missing field or a
+    # non-string value -- is an unexpected response and fails closed, loudly.
     if account_type == "Bot":
         return "bot", ""
-    return ("write" if permission in _WRITE_PERMISSIONS else "no-write"), ""
+    if account_type == "User" and isinstance(permission, str):
+        if permission in _WRITE_PERMISSIONS:
+            return "write", ""
+        if permission in _NO_WRITE_PERMISSIONS:
+            return "no-write", ""
+    return "failed", (
+        f"unexpected permission response (type={account_type!r:.40}, "
+        f"permission={permission!r:.40})"
+    )
 
 
 def check_pr_comments(
