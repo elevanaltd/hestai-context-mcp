@@ -44,7 +44,7 @@ def _authors_have_write_access() -> Any:
     post as has write access unless a test says otherwise. The rule itself is
     tested in test_validate_review_author_access.py.
     """
-    with patch("scripts.validate_review._fetch_author_permission", _write_access, create=True):
+    with patch("scripts.validate_review._fetch_author_permission", _write_access):
         yield
 
 
@@ -376,9 +376,7 @@ class TestCheckPrCommentsBotReviewExclusion:
         def _bot_with_write(login: str) -> dict[str, Any]:
             return {"permission": "write", "user": {"login": login, "type": "Bot"}}
 
-        with patch(
-            "scripts.validate_review._fetch_author_permission", _bot_with_write, create=True
-        ):
+        with patch("scripts.validate_review._fetch_author_permission", _bot_with_write):
             approved, _msg, missing = _run_check(pr_data, required_roles={"CRS"})
         assert approved is False, "Bot-type review must not satisfy the gate"
         assert "CRS" in missing

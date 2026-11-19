@@ -55,7 +55,7 @@ def _authors_have_write_access() -> Any:
     as has write access. The rule itself is tested in
     test_validate_review_author_access.py.
     """
-    with patch("scripts.validate_review._fetch_author_permission", _write_access, create=True):
+    with patch("scripts.validate_review._fetch_author_permission", _write_access):
         yield
 
 

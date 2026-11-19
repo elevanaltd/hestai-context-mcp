@@ -3238,7 +3238,6 @@ class TestSubmitReviewCiParity:
             validate_review,
             "_fetch_author_permission",
             lambda login: {"permission": "write", "user": {"login": login, "type": "User"}},
-            raising=False,
         )
         footer = json.dumps(
             {"role": role, "provider": "goose", "verdict": "APPROVED", "sha": cls._HEAD[:7]}

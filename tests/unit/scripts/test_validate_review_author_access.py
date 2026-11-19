@@ -62,7 +62,7 @@ def _review(body: str, login: str, at: str = T1, state: str = "COMMENTED") -> di
     return {"author": {"login": login}, "body": body, "state": state, "submittedAt": at}
 
 
-def _perm(permission: str, login: str = "", user_type: str = "User") -> dict[str, Any]:
+def _perm(permission: Any, login: str = "", user_type: Any = "User") -> dict[str, Any]:
     """A collaborator-permission response body, as the REST API returns it."""
     return {
         "permission": permission,
@@ -403,6 +403,71 @@ class TestLookupFailureFailsClosedAndLoud:
         out = capsys.readouterr().out
         assert "write-access lookup failed" in out
         assert "maintainer" in out
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            _perm("admin", "maintainer", user_type="Organization"),
+            _perm("admin", "maintainer", user_type="Mannequin"),
+            _perm("admin", "maintainer", user_type=""),
+            _perm("admin", "maintainer", user_type=None),
+            _perm("admin", "maintainer", user_type="user"),
+            _perm("ADMIN", "maintainer"),
+            _perm("triage", "maintainer"),
+            _perm(["admin"], "maintainer"),
+            {"permission": "admin", "user": "maintainer"},
+            '"admin"',
+        ],
+        ids=[
+            "type-organization",
+            "type-mannequin",
+            "type-empty",
+            "type-null",
+            "type-lowercase-user",
+            "permission-uppercase",
+            "permission-triage",
+            "permission-list",
+            "user-not-object",
+            "response-not-object",
+        ],
+    )
+    def test_unexpected_type_or_permission_clears_nothing_and_is_named(self, answer: Any) -> None:
+        """Only type "User" with admin/maintain/write counts; anything outside
+        the expected values (User/Bot; admin/maintain/write/read/none) is a
+        failed lookup, never a pass."""
+        fake = _FakeGh(
+            comments=[_comment(_verdict("CE"), "maintainer")],
+            permissions={"maintainer": answer},
+        )
+        approved, msg, missing = _check(fake, required_roles={"CE"})
+        assert approved is False
+        assert missing == ["CE"]
+        assert "write-access lookup failed" in msg
+        assert "maintainer" in msg
+
+    def test_unexpected_type_clears_nothing_on_tier_1_self_and_is_named(self) -> None:
+        fake = _FakeGh(
+            comments=[_comment("IL SELF-REVIEWED: looked at it", "maintainer")],
+            permissions={"maintainer": _perm("admin", "maintainer", user_type="Organization")},
+        )
+        approved, msg, _missing = _check(fake, required_roles=set(), tier="TIER_1_SELF")
+        assert approved is False
+        assert "write-access lookup failed" in msg
+
+    @pytest.mark.parametrize("permission", ["read", "none"])
+    def test_read_or_none_is_no_write_access_not_a_failed_lookup(
+        self, permission: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """read and none are expected values: the account is listed as without
+        write access, not reported as a failed lookup."""
+        fake = _FakeGh(
+            comments=[_comment(_verdict("CE"), "outside-reader")],
+            permissions={"outside-reader": _perm(permission, "outside-reader")},
+        )
+        approved, msg, _missing = _check(fake, required_roles={"CE"})
+        assert approved is False
+        assert "write-access lookup failed" not in msg
+        assert "without write access" in capsys.readouterr().out
 
     @pytest.mark.parametrize("login", ["", "some-app[bot]", "a/../b", "a b"])
     def test_login_outside_github_login_syntax_is_not_looked_up(self, login: str) -> None:
