@@ -330,6 +330,69 @@ class TestBotsNeverClear:
 
 
 # ---------------------------------------------------------------------------
+# App and organization accounts never count
+# ---------------------------------------------------------------------------
+# gh returns app accounts without their [bot] suffix, so the permission lookup
+# for an app comment (e.g. "vercel", "supabase") answers for the same-named
+# organization: type Organization, permission none. Such an account never
+# counts and is listed quietly -- it is an expected response, not a failed
+# lookup.
+
+
+@pytest.mark.security
+class TestAppAndOrganizationAccountsNeverCount:
+    @pytest.mark.parametrize("permission", ["none", "read", "admin", "write"])
+    def test_organization_account_never_counts_and_is_not_a_failed_lookup(
+        self, permission: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        fake = _FakeGh(
+            comments=[_comment(_verdict("CE"), "some-org")],
+            permissions={"some-org": _perm(permission, "some-org", user_type="Organization")},
+        )
+        approved, msg, missing = _check(fake, required_roles={"CE"})
+        out = capsys.readouterr().out
+        assert approved is False
+        assert missing == ["CE"]
+        assert "write-access lookup failed" not in msg
+        assert "write-access lookup failed" not in out
+        assert "app and organization accounts" in out
+        assert "some-org" in out
+
+    def test_organization_account_never_counts_on_tier_1_self(self) -> None:
+        fake = _FakeGh(
+            comments=[_comment("IL SELF-REVIEWED: looked at it", "some-org")],
+            permissions={"some-org": _perm("admin", "some-org", user_type="Organization")},
+        )
+        approved, msg, _missing = _check(fake, required_roles=set(), tier="TIER_1_SELF")
+        assert approved is False
+        assert "write-access lookup failed" not in msg
+
+    def test_app_comment_beside_write_access_approval(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A deployment-bot comment does not disturb a real approval or warn."""
+        fake = _FakeGh(
+            comments=[
+                _comment(
+                    "Deployment preview ready. Status: APPROVED for preview.", "vercel", at=T1
+                ),
+                _comment(_verdict("CE"), "maintainer", at=T2),
+            ],
+            permissions={
+                "vercel": _perm("none", "vercel", user_type="Organization"),
+                "maintainer": _perm("admin", "maintainer"),
+            },
+        )
+        approved, msg, missing = _check(fake, required_roles={"CE"})
+        out = capsys.readouterr().out
+        assert approved is True
+        assert missing == []
+        assert "write-access lookup failed" not in msg
+        assert "write-access lookup failed" not in out
+        assert "vercel" in out
+
+
+# ---------------------------------------------------------------------------
 # A failed lookup clears nothing, and says so
 # ---------------------------------------------------------------------------
 
@@ -407,7 +470,6 @@ class TestLookupFailureFailsClosedAndLoud:
     @pytest.mark.parametrize(
         "answer",
         [
-            _perm("admin", "maintainer", user_type="Organization"),
             _perm("admin", "maintainer", user_type="Mannequin"),
             _perm("admin", "maintainer", user_type=""),
             _perm("admin", "maintainer", user_type=None),
@@ -419,7 +481,6 @@ class TestLookupFailureFailsClosedAndLoud:
             '"admin"',
         ],
         ids=[
-            "type-organization",
             "type-mannequin",
             "type-empty",
             "type-null",
@@ -433,8 +494,8 @@ class TestLookupFailureFailsClosedAndLoud:
     )
     def test_unexpected_type_or_permission_clears_nothing_and_is_named(self, answer: Any) -> None:
         """Only type "User" with admin/maintain/write counts; anything outside
-        the expected values (User/Bot; admin/maintain/write/read/none) is a
-        failed lookup, never a pass."""
+        the expected values (User/Bot/Organization; admin/maintain/write/read/
+        none) is a failed lookup, never a pass."""
         fake = _FakeGh(
             comments=[_comment(_verdict("CE"), "maintainer")],
             permissions={"maintainer": answer},
@@ -448,7 +509,7 @@ class TestLookupFailureFailsClosedAndLoud:
     def test_unexpected_type_clears_nothing_on_tier_1_self_and_is_named(self) -> None:
         fake = _FakeGh(
             comments=[_comment("IL SELF-REVIEWED: looked at it", "maintainer")],
-            permissions={"maintainer": _perm("admin", "maintainer", user_type="Organization")},
+            permissions={"maintainer": _perm("admin", "maintainer", user_type="Mannequin")},
         )
         approved, msg, _missing = _check(fake, required_roles=set(), tier="TIER_1_SELF")
         assert approved is False
