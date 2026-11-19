@@ -90,7 +90,7 @@ _GIT_SYMLINK_MODE: Final = "120000"
 
 # Byte bound for every recorded read (issue #185 item 2): a single enormous
 # line can no longer be read whole. Generous next to any real 50-line META
-# header; the 50-line sniff window still applies within it.
+# header. It is also the only bound on the META.TYPE sniff (#157 F3: no line cap).
 _CONTENT_READ_LIMIT_BYTES: Final = 64 * 1024
 
 _OCTAVE_SUFFIX: Final = ".oct.md"
@@ -110,6 +110,22 @@ def _decode_content(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+class _TruncatedText(str):
+    """Recorded text that is only the first ``_CONTENT_READ_LIMIT_BYTES`` of a
+    longer file. It is a ``str`` in every other respect, so sniffing and every
+    consumer of recorded text work unchanged; only the classifier asks
+    ``isinstance(content, _TruncatedText)`` -- a TYPE line the bound cut off
+    must fail closed, not read as "no TYPE" (CE, #305 round 1)."""
+
+
+def _decode_bounded(data: bytes) -> str:
+    """Decode ``data`` read with ONE byte more than the bound: longer than the
+    bound means the file was truncated, so keep the bound and say so."""
+    if len(data) > _CONTENT_READ_LIMIT_BYTES:
+        return _TruncatedText(_decode_content(data[:_CONTENT_READ_LIMIT_BYTES]))
+    return _decode_content(data)
+
+
 def _read_revision_content(revision: str, path: str) -> FileContent:
     """Return the first bytes of ``path`` at ``revision`` as text, bounded by bytes.
 
@@ -126,14 +142,15 @@ def _read_revision_content(revision: str, path: str) -> FileContent:
         return CONTENT_UNAVAILABLE
     with proc:
         try:
-            data = proc.stdout.read(_CONTENT_READ_LIMIT_BYTES) if proc.stdout else b""
+            data = proc.stdout.read(_CONTENT_READ_LIMIT_BYTES + 1) if proc.stdout else b""
         except OSError:
             proc.kill()
             return CONTENT_UNAVAILABLE
-        if len(data) >= _CONTENT_READ_LIMIT_BYTES:
-            # Bound reached: stop git; what was read is the recorded head.
+        if len(data) > _CONTENT_READ_LIMIT_BYTES:
+            # Bound exceeded: stop git; what was read is the recorded head,
+            # flagged as truncated.
             proc.kill()
-            return _decode_content(data)
+            return _decode_bounded(data)
     # The blob ended inside the bound, so git ran to completion (the context
     # manager waited for it): its exit status says whether the read succeeded.
     if proc.returncode != 0:
@@ -149,7 +166,7 @@ def _read_working_tree_content(path: str) -> FileContent:
     """
     try:
         with open(path, "rb") as fh:
-            return _decode_content(fh.read(_CONTENT_READ_LIMIT_BYTES))
+            return _decode_bounded(fh.read(_CONTENT_READ_LIMIT_BYTES + 1))
     except OSError:
         return CONTENT_UNAVAILABLE
 
@@ -490,12 +507,22 @@ def _is_vendored_path(path: str) -> bool:
     )
 
 
+# #171: a skill spec is any file named SKILL.md, whatever directory holds it.
+_SKILL_SPEC_BASENAME_CASEFOLDED: Final = "skill.md"
+
+# #171: a pattern ``.md`` under a ``library/patterns/`` directory. The segment
+# immediately before ``patterns`` may carry a prefix (``starter-library``) or
+# sit at the repo root (``library/patterns/``); the old ``/library/patterns/``
+# substring matched neither. A bare ``patterns/`` or ``docs/patterns/``
+# directory is NOT matched: ordinary docs keep their exemption.
+_LIBRARY_PATTERN_MD_RE: Final = re.compile(r"(^|/)[^/]*library/patterns/.*\.md$")
+
 # OCTAVE types that classify as EXECUTABLE_SPEC
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
 
 def _sniff_octave_type(text: str) -> str:
-    """Read META.TYPE from OCTAVE text. Max 50 lines, fail-safe. Text only.
+    """Read META.TYPE from OCTAVE text. First ``TYPE::`` line wins. Text only.
 
     Issue #161 (option C): this never opens a file or calls git -- the text
     arrives recorded on the change record by get_changed_files, decoded by
@@ -503,7 +530,16 @@ def _sniff_octave_type(text: str) -> str:
     universal newlines (LF, CRLF, CR), exactly what text-mode ``open()``
     applied when this read files. ``str.splitlines`` is deliberately not used:
     it also breaks on VT, FF, FS/GS/RS, NEL, U+2028 and U+2029, which would let
-    attacker-authorable bytes move TYPE:: in or out of the 50-line window.
+    attacker-authorable bytes move TYPE:: in or out of the window.
+
+    Truncated text (``_TruncatedText``): the final line, whatever follows the last
+    newline, is ignored because the byte bound may have cut it.
+
+    Issue #157 F3: there is no line cap. The former 50-line window let an
+    author push ``TYPE::AGENT_DEFINITION`` to line 51+ and downgrade an
+    agent spec to GOVERNANCE. The bound is now the producer's byte bound
+    (``_CONTENT_READ_LIMIT_BYTES``, 64 KiB): ``text`` is at most that long, so
+    scanning all of it is O(64 KiB) and no separate line limit is needed.
 
     Args:
         text: The recorded content of an .oct.md file.
@@ -511,11 +547,14 @@ def _sniff_octave_type(text: str) -> str:
     Returns:
         The TYPE value string (e.g., 'AGENT_DEFINITION', 'RULE') or empty string.
     """
+    if isinstance(text, _TruncatedText):
+        # Truncated text can only be partial on its FINAL line (whatever follows
+        # the last newline): a cut through ``TYPE::AGENT_DEFINITION`` leaves a
+        # value that is not the file's TYPE. Drop it before matching, whatever
+        # the cut position. A complete, newline-terminated line still counts.
+        text = text[: max(text.rfind("\n"), text.rfind("\r")) + 1]
     stream = io.StringIO(text, newline=None)
-    for _ in range(50):
-        line = stream.readline()
-        if not line:  # '' only at end of text; a blank line is '\n'
-            break
+    for line in stream:
         if "TYPE::" in line:
             parts = line.split("::", 1)
             if len(parts) == 2:
@@ -538,10 +577,10 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
             only for ``.oct.md`` paths outside the library directories. An
             ``.oct.md`` symlink is conservatively EXECUTABLE_SPEC: its target
             is not something this gate reads. Not supplying content means
-            exactly one thing: CONTENT_UNAVAILABLE -- the text is not known,
-            so the path classifies on its name alone and an unsniffable
-            ``.oct.md`` lands on the GOVERNANCE fallback. There is no other
-            meaning; in particular the classifier never goes and reads it.
+            exactly one thing: CONTENT_UNAVAILABLE -- the text is not known
+            (deleted, unreadable or never recorded), so an ``.oct.md`` fails
+            closed to EXECUTABLE_SPEC (#157 F3). There is no other meaning; in
+            particular the classifier never goes and reads it.
 
     Returns:
         Facet name string, or None if the file is exempt.
@@ -562,11 +601,23 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
     if not is_vendored and path.rsplit("/", 1)[-1].casefold() in _SECURITY_BASENAMES_CASEFOLDED:
         return "SECURITY"
 
-    # Bundled hub skill/pattern files (.md but NOT exempt — governance artifacts)
-    # These define agent behavior and must be classified before exempt check
-    if "/library/skills/" in path and path.endswith("/SKILL.md"):
+    # Path-segment patterns below match the CASEFOLDED path, like the basename
+    # checks above and _MD_GOVERNANCE_PATH_PREFIXES: the same on-disk directory
+    # can reach this classifier as ``TOOLS/`` or ``Tools/`` (macOS), and a
+    # case-sensitive miss is a silent downgrade to ROUTINE_CODE. The tests/ and
+    # markdown EXEMPTIONS below stay as they were (case-sensitive).
+    folded = path.casefold()
+
+    # Skill and pattern specs (.md but NOT exempt -- governance artifacts that
+    # define agent behaviour). Classified before the markdown exemption.
+    # A SKILL.md is recognised by BASENAME, wherever it lives (#171): the old
+    # ``/library/skills/`` substring missed ``resources/starter-library/skills/``
+    # (the char before ``library`` is ``-``) and repo-root ``skills/`` layouts,
+    # which then fell through the markdown exemption to zero reviewers.
+    # Casefolded like the security-basename check above (case-insensitive FS).
+    if path.rsplit("/", 1)[-1].casefold() == _SKILL_SPEC_BASENAME_CASEFOLDED:
         return "EXECUTABLE_SPEC"
-    if "/library/patterns/" in path and path.endswith(".md"):
+    if _LIBRARY_PATTERN_MD_RE.search(folded):
         return "EXECUTABLE_SPEC"
 
     # META_CONTROL_PLANE: hardcoded paths
@@ -586,9 +637,19 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
         # get_changed_files); treat it as the strictest spec facet.
         if content is CONTENT_SYMLINK:
             return "EXECUTABLE_SPEC"
+        # An .oct.md whose text is unavailable -- deleted in the PR, unreadable,
+        # or never recorded -- cannot be shown NOT to be a spec, so it fails
+        # closed to the strictest spec facet, as an unreadable rename's old
+        # side already does (#157 F3).
+        if content is CONTENT_UNAVAILABLE:
+            return "EXECUTABLE_SPEC"
         # For other .oct.md files, sniff TYPE from the recorded text
         octave_type = _sniff_octave_type(content) if isinstance(content, str) else ""
         if octave_type in _EXECUTABLE_SPEC_TYPES:
+            return "EXECUTABLE_SPEC"
+        # Recorded text cut off by the byte bound with no TYPE in the part we
+        # have: the TYPE may sit beyond it, so fail closed like unavailable text.
+        if isinstance(content, _TruncatedText) and not octave_type:
             return "EXECUTABLE_SPEC"
         # All other .oct.md (RULE, STANDARD, NORTH_STAR_SUMMARY, unknown) -> GOVERNANCE
         return "GOVERNANCE"
@@ -598,7 +659,6 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
     # below would otherwise return None and the GOVERNANCE facet (SR) would never
     # apply to them. Checked before that exemption; casefolded because the same
     # on-disk directory can reach here under a different casing on macOS.
-    folded = path.casefold()
     if folded.endswith(".md") and folded.startswith(_MD_GOVERNANCE_PATH_PREFIXES):
         return "GOVERNANCE"
 
@@ -621,20 +681,22 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
         return "ROUTINE_CODE"
 
     # Security paths
-    if any(re.search(pattern, path) for pattern in _SECURITY_PATTERNS):
+    if any(re.search(pattern, folded) for pattern in _SECURITY_PATTERNS):
         return "SECURITY"
 
     # Architecture/infrastructure paths (base classes, shared modules, hooks, tools, MCP)
     architecture_patterns = [
         r"(^|/)base\.py$",
-        r"/shared/",
+        r"(^|/)shared/",
         r"(^|/)abstract/",
         r"(^|/)hooks/",
-        r"(^|/)modules/tools/",
-        r"(^|/)mcp/tools/",
+        # Any ``tools/`` path segment (#268): review-requirements v3.3 s1 lists
+        # ``tools/`` as a SECURITY trigger. This subsumes the former narrower
+        # ``modules/tools/`` and ``mcp/tools/`` entries.
+        r"(^|/)tools/",
         r"^clink/agents/",
     ]
-    if any(re.search(pattern, path) for pattern in architecture_patterns):
+    if any(re.search(pattern, folded) for pattern in architecture_patterns):
         return "SECURITY"  # Architecture changes require same elevated review as security
 
     # SQL files -> SECURITY (high-impact data changes)
@@ -671,25 +733,18 @@ def _recorded_content(record: dict[str, Any], key: str) -> FileContent:
 def _classify_old_side(record: dict[str, Any]) -> str | None:
     """Facet of a renamed file's OLD side, from what the record carries.
 
-    Two rules are written here, not assumed:
-
-    1. A record that names a ``previous_path`` but carries NO recorded old
-       side is NOT "not a rename": its old side is CONTENT_UNAVAILABLE and is
-       handled as unreadable (via _recorded_content).
-    2. Escalation on an unreadable old side is NARROW: it escalates to
-       EXECUTABLE_SPEC only when classifying the old NAME alone lands on the
-       ambiguous GOVERNANCE fallback (an ``.oct.md`` whose TYPE is unknown).
-       Any other unreadable rename keeps its ordinary category, so ordinary
-       moves do not over-escalate.
+    A record that names a ``previous_path`` but carries NO recorded old side is
+    NOT "not a rename": its old side is CONTENT_UNAVAILABLE and is handled as
+    unreadable (via _recorded_content). An unreadable ``.oct.md`` old side then
+    fails closed to EXECUTABLE_SPEC inside _classify_file_facet itself; any
+    other unreadable rename keeps its ordinary category, so ordinary moves do
+    not over-escalate.
     """
     previous_path = record.get("previous_path")
     if not isinstance(previous_path, str) or not previous_path:
         return None  # not a rename
     content = _recorded_content(record, "old_content")
-    facet = _classify_file_facet(previous_path, content)
-    if content is CONTENT_UNAVAILABLE and facet == "GOVERNANCE" and _is_octave_path(previous_path):
-        return "EXECUTABLE_SPEC"
-    return facet
+    return _classify_file_facet(previous_path, content)
 
 
 def classify_pr_facets(
@@ -1709,12 +1764,47 @@ def _get_head_sha() -> str:
         return "unknown"
 
 
+class PrBodyFetchError(Exception):
+    """The PR description could not be fetched in CI (gh/parse failure)."""
+
+
+_STDERR_DIAGNOSTIC_MAX_CHARS: Final = 200
+_CONTROL_CHARS_RE: Final = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _last_stderr_line(exc: BaseException) -> str:
+    """The last non-empty stderr line of a failed ``gh`` call, made safe to print.
+
+    Control characters are stripped, the line is capped at
+    ``_STDERR_DIAGNOSTIC_MAX_CHARS``, and the value of any token in the
+    environment is replaced, so gh echoing a credential cannot reach the log.
+    Only stderr text is ever read; the environment is never included.
+    """
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if not isinstance(stderr, str):
+        return ""
+    for token_var in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(token_var)
+        if token:
+            stderr = stderr.replace(token, "***")
+    lines = [_CONTROL_CHARS_RE.sub("", line).strip() for line in stderr.splitlines()]
+    last = next((line for line in reversed(lines) if line), "")
+    return last[:_STDERR_DIAGNOSTIC_MAX_CHARS]
+
+
 def _get_pr_body() -> str:
     """Fetch the PR description text for declaration scanning (issue #412).
 
     Uses ``gh pr view <PR_NUMBER> --json body``. Returns an empty string outside
-    CI (no PR context), when PR_NUMBER is unset, or on any gh/parse failure —
-    the bitemporal union simply omits the PR_BODY source rather than crashing.
+    CI (no PR context) and when PR_NUMBER is unset; a description that is empty
+    but fetched successfully is ``""`` too.
+
+    In CI a fetch that ERRORS (gh failure, unparseable output, no text ``body``)
+    raises :class:`PrBodyFetchError`: the description can carry reviewer
+    declarations, so a failed fetch must not be read as "no declarations".
+    ``main`` turns the error into a failing gate. Outside CI it stays lenient.
     """
     if "CI" not in os.environ:
         return ""
@@ -1729,10 +1819,24 @@ def _get_pr_body() -> str:
             check=True,
         )
         data = json.loads(result.stdout)
-        body = data.get("body")
-        return body if isinstance(body, str) else ""
-    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+    except (
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+        OSError,
+        TypeError,  # json.loads on non-text stdout
+        UnicodeError,  # gh output that text-mode decoding rejects
+    ) as exc:
+        detail = _last_stderr_line(exc)
+        suffix = f" [gh stderr: {detail}]" if detail else ""
+        raise PrBodyFetchError(f"gh pr view {pr_number} failed: {exc}{suffix}") from exc
+    if not isinstance(data, dict) or "body" not in data:
+        raise PrBodyFetchError(f"gh pr view {pr_number} returned no 'body' field")
+    body = data["body"]
+    if body is None:  # a PR with no description: fetched, empty
         return ""
+    if not isinstance(body, str):
+        raise PrBodyFetchError(f"gh pr view {pr_number} returned a non-text 'body'")
+    return body
 
 
 def _get_base_ref_sha() -> str:
@@ -1904,7 +2008,20 @@ def main() -> int:
         # file, intersect with ALLOWED_ESCALATION_ROLES, then union into the
         # diff-computed floor. Reads are safe on missing blobs (new/deleted files).
         base_sha = _get_base_ref_sha()
-        pr_body = _get_pr_body()
+        try:
+            pr_body = _get_pr_body()
+        except PrBodyFetchError as exc:
+            # Fail closed (CI only; _get_pr_body is lenient elsewhere). Runs
+            # BEFORE the TIER_0_EXEMPT early return, so an otherwise-exempt diff
+            # cannot pass while its description -- a declaration source -- is
+            # unreadable. Tier/Reason lines match the workflow's regex fallback.
+            # No REVIEW_GATE_JSON is emitted: the workflow caches the sha and
+            # roles from it for the comment-event fast path, and a cached empty
+            # role set must never stand in for a gate that did not evaluate.
+            print("\n📋 Review Tier: UNKNOWN")
+            print(f"   Reason: PR description fetch failed -- gate fails closed ({exc})")
+            print("❌ Could not read the PR description in CI; re-run the gate.", file=sys.stderr)
+            return 1
         declared_roles, decl_provenance = _collect_bitemporal_declarations(
             files=files,
             pr_body=pr_body,
