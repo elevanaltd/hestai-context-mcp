@@ -1,0 +1,17 @@
+---
+type: "DECISION_RECORD"
+version: "1.4"
+token: "HO-EMERGENCY-BYPASS-RETAINED-20261119"
+status: "PROPOSED"
+tier: "OPERATIONAL"
+authored_at: "2026-11-19T09:18:17Z"
+decision: "Keep the EMERGENCY: commit-message bypass unchanged for now; it is outside the review-gate-v3 defect fixes."
+because: "Read-only gate-security triage on 2026-11-19 rated it P0 because an EMERGENCY: head commit message passes with zero reviewers and the CI audit log is not durable; HC recommended removal, but the operator retained it as acceptable risk requiring less change."
+scope: "The bypass is defined in review-requirements v3.3 §7 and implemented by check_emergency_bypass in scripts/validate_review.py. Review-gate-v3 went live 2026-11-19 via PR #301, which pinned the validator at 44a8a152."
+ceremony_ref: "05a59f60"
+compression_tier: "CONSERVATIVE"
+loss_profile: "[preserve:decision∧causal rationale∧operator quote∧implementation∧review-gate context∧revisit condition∧IDs,drop:narrative filler]"
+operator_ruling: "First-hand HC control-room ruling: \"No. Leave for now. It's an acceptable risk and requires less change.\""
+re_review_trigger: "A later operator ruling may remove or harden the bypass; \"For now\" means the decision is revisitable."
+related_decisions: "HO-REVIEW-GATE-AND-HC-MERGE-AUTHORITY-20261119"
+---
