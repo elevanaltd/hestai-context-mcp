@@ -490,6 +490,16 @@ def _is_vendored_path(path: str) -> bool:
     )
 
 
+# #171: a skill spec is any file named SKILL.md, whatever directory holds it.
+_SKILL_SPEC_BASENAME_CASEFOLDED: Final = "skill.md"
+
+# #171: a pattern ``.md`` under a ``library/patterns/`` directory. The segment
+# immediately before ``patterns`` may carry a prefix (``starter-library``) or
+# sit at the repo root (``library/patterns/``); the old ``/library/patterns/``
+# substring matched neither. A bare ``patterns/`` or ``docs/patterns/``
+# directory is NOT matched: ordinary docs keep their exemption.
+_LIBRARY_PATTERN_MD_RE: Final = re.compile(r"(^|/)[^/]*library/patterns/.*\.md$")
+
 # OCTAVE types that classify as EXECUTABLE_SPEC
 _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
@@ -562,11 +572,16 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
     if not is_vendored and path.rsplit("/", 1)[-1].casefold() in _SECURITY_BASENAMES_CASEFOLDED:
         return "SECURITY"
 
-    # Bundled hub skill/pattern files (.md but NOT exempt — governance artifacts)
-    # These define agent behavior and must be classified before exempt check
-    if "/library/skills/" in path and path.endswith("/SKILL.md"):
+    # Skill and pattern specs (.md but NOT exempt -- governance artifacts that
+    # define agent behaviour). Classified before the markdown exemption.
+    # A SKILL.md is recognised by BASENAME, wherever it lives (#171): the old
+    # ``/library/skills/`` substring missed ``resources/starter-library/skills/``
+    # (the char before ``library`` is ``-``) and repo-root ``skills/`` layouts,
+    # which then fell through the markdown exemption to zero reviewers.
+    # Casefolded like the security-basename check above (case-insensitive FS).
+    if path.rsplit("/", 1)[-1].casefold() == _SKILL_SPEC_BASENAME_CASEFOLDED:
         return "EXECUTABLE_SPEC"
-    if "/library/patterns/" in path and path.endswith(".md"):
+    if _LIBRARY_PATTERN_MD_RE.search(path):
         return "EXECUTABLE_SPEC"
 
     # META_CONTROL_PLANE: hardcoded paths
