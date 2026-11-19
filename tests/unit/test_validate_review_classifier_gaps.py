@@ -408,7 +408,8 @@ def _git_repo_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rel: str, da
             },
         )
 
-    git("init", "-q")
+    if not (tmp_path / ".git").exists():  # reusable: later calls add a commit
+        git("init", "-q")
     target = tmp_path / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
@@ -512,3 +513,62 @@ class TestPrBodyFetchErrorCarriesStderr:
         self, ci_pr: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         assert "gh pr view 321 failed" in self._raise_with(monkeypatch, None)
+
+
+@pytest.mark.unit
+class TestCutThroughTypeLineFailsClosed:
+    """CE round 2: the byte bound can cut THROUGH the TYPE line. Only the final
+    line of truncated text can be partial, so no cut position may turn an
+    AGENT_DEFINITION into GOVERNANCE (e.g. ``TYPE::AGENT_DEFINITIO``)."""
+
+    REL = "docs/x.oct.md"
+    LINE = b"  TYPE::AGENT_DEFINITION\n"
+
+    def _file(self, cut_into_line: int, line: bytes, tail: bytes = b"x" * 16) -> bytes:
+        """A file whose first ``_LIMIT`` bytes end ``cut_into_line`` bytes into ``line``."""
+        pad = b"#" * (_LIMIT - cut_into_line - 1) + b"\n"
+        data = pad + line + tail
+        assert data[:_LIMIT].endswith(line[:cut_into_line]) and len(data) > _LIMIT
+        return data
+
+    def test_every_cut_offset_through_an_agent_type_line_is_executable_spec(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # k = 0: cut just before the line; k = len(LINE): cut just after its "\n".
+        for k in range(len(self.LINE) + 1):
+            data = self._file(k, self.LINE)
+            for name, content in _readers(tmp_path, monkeypatch, self.REL, data).items():
+                facet = validate_review._classify_file_facet(self.REL, content)
+                assert (
+                    facet == "EXECUTABLE_SPEC"
+                ), f"{name}: cut {k} bytes into TYPE line -> {facet}"
+
+    def test_complete_rule_type_line_ending_exactly_at_the_bound_stays_governance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        line = b"  TYPE::RULE\n"
+        data = self._file(len(line), line)
+        assert data[:_LIMIT].endswith(line)
+        for name, content in _readers(tmp_path, monkeypatch, self.REL, data).items():
+            assert isinstance(content, validate_review._TruncatedText), name
+            assert validate_review._classify_file_facet(self.REL, content) == "GOVERNANCE", name
+
+    def test_partial_rule_type_line_is_not_trusted_either(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # TYPE::RULE cut to "TYPE::RU" is a partial value: ignored, so the
+        # truncated-with-no-TYPE rule applies.
+        line = b"  TYPE::RULE\n"
+        data = self._file(len(line) - 3, line)
+        for name, content in _readers(tmp_path, monkeypatch, self.REL, data).items():
+            assert (
+                validate_review._classify_file_facet(self.REL, content) == "EXECUTABLE_SPEC"
+            ), name
+
+    def test_sniff_ignores_only_the_final_line_of_truncated_text(self) -> None:
+        trunc = validate_review._TruncatedText
+        assert validate_review._sniff_octave_type(trunc("a\n  TYPE::RULE\n")) == "RULE"
+        assert validate_review._sniff_octave_type(trunc("a\n  TYPE::RULE")) == ""
+        assert validate_review._sniff_octave_type(trunc("  TYPE::RULE")) == ""
+        # Untruncated text keeps its final line: an unterminated last line is complete.
+        assert validate_review._sniff_octave_type("a\n  TYPE::RULE") == "RULE"
