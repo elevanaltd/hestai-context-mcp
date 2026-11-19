@@ -22,12 +22,23 @@ import pytest
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "review-gate.yml"
 # review-gate-v2 tooling commit, superseded by review-gate-v3 (record #300).
 V2_SHA = "7634feb87298b77c507cade2e6b0f40a6a04d911"
+# Peeled commit of annotated tag review-gate-v3 (git ls-remote --tags origin 'review-gate-v3*').
+# RED placeholder: deliberately wrong so the exact-pin assertion is seen to fail first.
+V3_SHA = "0" * 40
 # The `if:` trigger substrings, lowercased (GitHub contains() ignores case).
 TRIGGERS = ("approve", "reviewed", " go", "**go**")
 
 
 def _text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
+
+
+def _tooling_ref(text: str) -> str:
+    """The ``ref:`` value of the "Checkout review-gate tooling" step."""
+    step = text.index("- name: Checkout review-gate tooling")
+    match = re.compile(r"^\s+ref:\s*(\S+)\s*$", re.MULTILINE).search(text, step)
+    assert match is not None, "tooling step has no ref line"
+    return match.group(1)
 
 
 def _peer_guidance(text: str) -> str:
@@ -88,3 +99,25 @@ def test_self_guidance_says_comment_or_review_never_the_description() -> None:
     assert "PR comment" in guidance
     assert "PR Review" in guidance
     assert "description" in guidance
+
+
+@pytest.mark.unit
+def test_tooling_ref_is_exactly_the_v3_commit() -> None:
+    assert _tooling_ref(_text()) == V3_SHA
+
+
+@pytest.mark.unit
+def test_mutated_tooling_ref_is_caught() -> None:
+    mutated = _text().replace(_tooling_ref(_text()), "1" * 40)
+    assert _tooling_ref(mutated) != V3_SHA
+
+
+@pytest.mark.unit
+def test_peer_guidance_names_commit_sha_bound_to_the_head() -> None:
+    text = _text()
+    guidance = _string_literals(_peer_guidance(text))
+    assert "commit_sha" in guidance
+    assert "${headSha}" in guidance
+    assert (
+        "gateData.sha" in text.split("if (tier === 'TIER_1_SELF')")[0].rsplit("const headSha", 1)[1]
+    )
