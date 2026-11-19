@@ -112,9 +112,10 @@ jobs:
       # a branch name from the wrong repo.
       #
       # PINNED TO A COMMIT (#170): `ref` is the full SHA of the commit tagged
-      # review-gate-v2, per HO-REVIEW-GATE-PIN-RELEASE-20261025.  A branch or
-      # tag name is mutable, so a merge here would silently change the judge
-      # of every consuming repo.  tests/test_review_gate_workflow_pin.py
+      # review-gate-v3, per HO-REVIEW-GATE-PIN-RELEASE-20261025 and
+      # HO-REVIEW-GATE-AND-HC-MERGE-AUTHORITY-20261119.  A branch or tag name
+      # is mutable, so a merge here would silently change the judge of every
+      # consuming repo.  tests/test_review_gate_workflow_pin.py
       # enforces the full-SHA shape.
       #
       # RELEASE PROCEDURE (to change the judge):
@@ -135,7 +136,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: elevanaltd/hestai-context-mcp
-          ref: 7634feb87298b77c507cade2e6b0f40a6a04d911
+          ref: 44a8a1527c3257c5338101e5dac8abf30e652c45
           path: .review-gate-tools
           sparse-checkout: |
             scripts/validate_review.py
@@ -404,15 +405,12 @@ jobs:
               // for each required role. Parse these to build the guidance block.
               if (tier === 'TIER_1_SELF') {
                 message += '**Required**: Self-review or HO supervisory review:\n';
-                message += '```\n{your-role} SELF-REVIEWED: [your rationale]\n-- or --\nHO REVIEWED: [rationale after delegated work]\n```\nAny role or name accepted (e.g., IL, skills-expert, Shaun).\n';
+                message += '```\n{your-role} SELF-REVIEWED: [your rationale]\n-- or --\nHO REVIEWED: [rationale after delegated work]\n```\nAny role or name accepted (e.g., IL, skills-expert, Shaun).\nPost it as a PR comment or a PR Review body; the PR description never counts.\n';
               } else {
                 if (roles.length > 0) {
-                  message += `**Required**: ${roles.join(' + ')} approval:\n`;
-                  message += '```\n';
-                  for (const role of roles) {
-                    message += `${role} APPROVED: [assessment] (or ${role} GO:)\n`;
-                  }
-                  message += '```\n';
+                  message += `**Required**: ${roles.join(' + ')} verdict, posted with \`mcp__hestai-context__submit_review\`.\n\n`;
+                  message += 'The tool writes the verdict header plus the footer bound to the head SHA. ';
+                  message += 'Hand-typed lines do not count, and a verdict for an earlier commit does not carry over: a new push needs a fresh one.\n';
                 } else {
                   message += '**Required**: See validation output for details\n';
                 }
