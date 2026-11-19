@@ -90,7 +90,7 @@ _GIT_SYMLINK_MODE: Final = "120000"
 
 # Byte bound for every recorded read (issue #185 item 2): a single enormous
 # line can no longer be read whole. Generous next to any real 50-line META
-# header; the 50-line sniff window still applies within it.
+# header. It is also the only bound on the META.TYPE sniff (#157 F3: no line cap).
 _CONTENT_READ_LIMIT_BYTES: Final = 64 * 1024
 
 _OCTAVE_SUFFIX: Final = ".oct.md"
@@ -505,7 +505,7 @@ _EXECUTABLE_SPEC_TYPES = {"AGENT_DEFINITION", "SKILL"}
 
 
 def _sniff_octave_type(text: str) -> str:
-    """Read META.TYPE from OCTAVE text. Max 50 lines, fail-safe. Text only.
+    """Read META.TYPE from OCTAVE text. First ``TYPE::`` line wins. Text only.
 
     Issue #161 (option C): this never opens a file or calls git -- the text
     arrives recorded on the change record by get_changed_files, decoded by
@@ -513,7 +513,13 @@ def _sniff_octave_type(text: str) -> str:
     universal newlines (LF, CRLF, CR), exactly what text-mode ``open()``
     applied when this read files. ``str.splitlines`` is deliberately not used:
     it also breaks on VT, FF, FS/GS/RS, NEL, U+2028 and U+2029, which would let
-    attacker-authorable bytes move TYPE:: in or out of the 50-line window.
+    attacker-authorable bytes move TYPE:: in or out of the window.
+
+    Issue #157 F3: there is no line cap. The former 50-line window let an
+    author push ``TYPE::AGENT_DEFINITION`` to line 51+ and downgrade an
+    agent spec to GOVERNANCE. The bound is now the producer's byte bound
+    (``_CONTENT_READ_LIMIT_BYTES``, 64 KiB): ``text`` is at most that long, so
+    scanning all of it is O(64 KiB) and no separate line limit is needed.
 
     Args:
         text: The recorded content of an .oct.md file.
@@ -522,10 +528,7 @@ def _sniff_octave_type(text: str) -> str:
         The TYPE value string (e.g., 'AGENT_DEFINITION', 'RULE') or empty string.
     """
     stream = io.StringIO(text, newline=None)
-    for _ in range(50):
-        line = stream.readline()
-        if not line:  # '' only at end of text; a blank line is '\n'
-            break
+    for line in stream:
         if "TYPE::" in line:
             parts = line.split("::", 1)
             if len(parts) == 2:
@@ -548,10 +551,10 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
             only for ``.oct.md`` paths outside the library directories. An
             ``.oct.md`` symlink is conservatively EXECUTABLE_SPEC: its target
             is not something this gate reads. Not supplying content means
-            exactly one thing: CONTENT_UNAVAILABLE -- the text is not known,
-            so the path classifies on its name alone and an unsniffable
-            ``.oct.md`` lands on the GOVERNANCE fallback. There is no other
-            meaning; in particular the classifier never goes and reads it.
+            exactly one thing: CONTENT_UNAVAILABLE -- the text is not known
+            (deleted, unreadable or never recorded), so an ``.oct.md`` fails
+            closed to EXECUTABLE_SPEC (#157 F3). There is no other meaning; in
+            particular the classifier never goes and reads it.
 
     Returns:
         Facet name string, or None if the file is exempt.
@@ -601,6 +604,12 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
         # get_changed_files); treat it as the strictest spec facet.
         if content is CONTENT_SYMLINK:
             return "EXECUTABLE_SPEC"
+        # An .oct.md whose text is unavailable -- deleted in the PR, unreadable,
+        # or never recorded -- cannot be shown NOT to be a spec, so it fails
+        # closed to the strictest spec facet, as an unreadable rename's old
+        # side already does (#157 F3).
+        if content is CONTENT_UNAVAILABLE:
+            return "EXECUTABLE_SPEC"
         # For other .oct.md files, sniff TYPE from the recorded text
         octave_type = _sniff_octave_type(content) if isinstance(content, str) else ""
         if octave_type in _EXECUTABLE_SPEC_TYPES:
@@ -642,7 +651,7 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
     # Architecture/infrastructure paths (base classes, shared modules, hooks, tools, MCP)
     architecture_patterns = [
         r"(^|/)base\.py$",
-        r"/shared/",
+        r"(^|/)shared/",
         r"(^|/)abstract/",
         r"(^|/)hooks/",
         # Any ``tools/`` path segment (#268): review-requirements v3.3 s1 lists

@@ -646,18 +646,19 @@ class TestSniffOctaveType:
         assert result == ""
 
     def test_nonexistent_file_returns_empty(self) -> None:
-        """Unreadable content is fail-safe: never sniffed, falls to GOVERNANCE.
+        """Unreadable content fails CLOSED: never sniffed, classified EXECUTABLE_SPEC.
 
         Reading moved to the producer (get_changed_files), which records
-        CONTENT_UNAVAILABLE when a side cannot be read. The classifier treats
-        that as "no TYPE found" -- the same outcome the old unreadable-file
-        path produced -- so the .oct.md is reviewed (GOVERNANCE), not exempt.
+        CONTENT_UNAVAILABLE when a side cannot be read (including a file
+        deleted in the PR). Since #157 F3 the classifier cannot show such an
+        .oct.md is NOT a spec, so it takes the strictest spec facet -- reviewed,
+        never exempt, never downgraded to GOVERNANCE.
         """
         assert (
             validate_review._classify_file_facet(
                 "docs/nonexistent.oct.md", validate_review.CONTENT_UNAVAILABLE
             )
-            == "GOVERNANCE"
+            == "EXECUTABLE_SPEC"
         )
 
 
@@ -793,18 +794,17 @@ class TestTestsExemptionDoesNotSwallowOctaveSpecs:
         rel = "tests/fixtures/rogue_skill.oct.md"
         assert validate_review._classify_file_facet(rel, _SKILL_SPEC) == "EXECUTABLE_SPEC"
 
-    def test_unsniffable_oct_md_under_tests_is_governance(self) -> None:
-        """tests/<name>.oct.md whose content is unavailable -> GOVERNANCE (reviewed), not exempt.
+    def test_unsniffable_oct_md_under_tests_is_executable_spec(self) -> None:
+        """tests/<name>.oct.md whose content is unavailable -> EXECUTABLE_SPEC, not exempt.
 
-        With no text to sniff the .oct.md branch falls to GOVERNANCE. (Whether
-        an unsniffable file should be EXECUTABLE_SPEC is #157 Finding 3 -- not
-        asserted here.)
+        With no text to sniff the file cannot be shown not to be a spec, so it
+        fails closed (#157 Finding 3).
         """
         assert (
             validate_review._classify_file_facet(
                 "tests/absent_spec.oct.md", validate_review.CONTENT_UNAVAILABLE
             )
-            == "GOVERNANCE"
+            == "EXECUTABLE_SPEC"
         )
 
     def test_review_requirements_under_tests_is_meta_control_plane(self) -> None:
@@ -898,8 +898,9 @@ class TestGovernanceIsNotSelfReview:
         "record",
         [
             {"path": "docs/standards/naming.oct.md", "new_content": _RULE_TEXT},
-            # No recorded text: an .oct.md whose TYPE is unknown is GOVERNANCE too.
-            {"path": "docs/standards/naming.oct.md"},
+            # Readable text carrying no TYPE:: is GOVERNANCE too (unavailable text
+            # is EXECUTABLE_SPEC since #157 F3, so it is not a governance case).
+            {"path": "docs/standards/naming.oct.md", "new_content": "===X===\nMETA:\n  V::1\n"},
         ],
     )
     def test_small_single_file_governance_change_requires_sr(self, record: dict) -> None:
@@ -933,7 +934,7 @@ class TestMarkdownDecisionRecordsAreGovernance:
 
     def test_oct_md_record_unchanged(self) -> None:
         path = ".hestai/decisions/X-20261101.oct.md"
-        assert validate_review._classify_file_facet(path) == "GOVERNANCE"
+        assert validate_review._classify_file_facet(path, _RULE_TEXT) == "GOVERNANCE"
 
     @pytest.mark.parametrize(
         "path", ["README.md", "docs/tools.md", ".hestai/MANIFEST.md", "docs/adrs-notes.md"]
