@@ -1764,7 +1764,13 @@ def _get_pr_body() -> str:
             check=True,
         )
         data = json.loads(result.stdout)
-    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError) as exc:
+    except (
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+        OSError,
+        TypeError,  # json.loads on non-text stdout
+        UnicodeError,  # gh output that text-mode decoding rejects
+    ) as exc:
         raise PrBodyFetchError(f"gh pr view {pr_number} failed: {exc}") from exc
     if not isinstance(data, dict) or "body" not in data:
         raise PrBodyFetchError(f"gh pr view {pr_number} returned no 'body' field")
