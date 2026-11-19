@@ -1735,12 +1735,21 @@ def _get_head_sha() -> str:
         return "unknown"
 
 
+class PrBodyFetchError(Exception):
+    """The PR description could not be fetched in CI (gh/parse failure)."""
+
+
 def _get_pr_body() -> str:
     """Fetch the PR description text for declaration scanning (issue #412).
 
     Uses ``gh pr view <PR_NUMBER> --json body``. Returns an empty string outside
-    CI (no PR context), when PR_NUMBER is unset, or on any gh/parse failure —
-    the bitemporal union simply omits the PR_BODY source rather than crashing.
+    CI (no PR context) and when PR_NUMBER is unset; a description that is empty
+    but fetched successfully is ``""`` too.
+
+    In CI a fetch that ERRORS (gh failure, unparseable output, no text ``body``)
+    raises :class:`PrBodyFetchError`: the description can carry reviewer
+    declarations, so a failed fetch must not be read as "no declarations".
+    ``main`` turns the error into a failing gate. Outside CI it stays lenient.
     """
     if "CI" not in os.environ:
         return ""
@@ -1755,10 +1764,16 @@ def _get_pr_body() -> str:
             check=True,
         )
         data = json.loads(result.stdout)
-        body = data.get("body")
-        return body if isinstance(body, str) else ""
-    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError) as exc:
+        raise PrBodyFetchError(f"gh pr view {pr_number} failed: {exc}") from exc
+    if not isinstance(data, dict) or "body" not in data:
+        raise PrBodyFetchError(f"gh pr view {pr_number} returned no 'body' field")
+    body = data["body"]
+    if body is None:  # a PR with no description: fetched, empty
         return ""
+    if not isinstance(body, str):
+        raise PrBodyFetchError(f"gh pr view {pr_number} returned a non-text 'body'")
+    return body
 
 
 def _get_base_ref_sha() -> str:
@@ -1930,7 +1945,20 @@ def main() -> int:
         # file, intersect with ALLOWED_ESCALATION_ROLES, then union into the
         # diff-computed floor. Reads are safe on missing blobs (new/deleted files).
         base_sha = _get_base_ref_sha()
-        pr_body = _get_pr_body()
+        try:
+            pr_body = _get_pr_body()
+        except PrBodyFetchError as exc:
+            # Fail closed (CI only; _get_pr_body is lenient elsewhere). Runs
+            # BEFORE the TIER_0_EXEMPT early return, so an otherwise-exempt diff
+            # cannot pass while its description -- a declaration source -- is
+            # unreadable. Tier/Reason lines match the workflow's regex fallback.
+            # No REVIEW_GATE_JSON is emitted: the workflow caches the sha and
+            # roles from it for the comment-event fast path, and a cached empty
+            # role set must never stand in for a gate that did not evaluate.
+            print("\n📋 Review Tier: UNKNOWN")
+            print(f"   Reason: PR description fetch failed -- gate fails closed ({exc})")
+            print("❌ Could not read the PR description in CI; re-run the gate.", file=sys.stderr)
+            return 1
         declared_roles, decl_provenance = _collect_bitemporal_declarations(
             files=files,
             pr_body=pr_body,
