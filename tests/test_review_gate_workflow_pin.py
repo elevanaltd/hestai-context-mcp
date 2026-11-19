@@ -6,7 +6,7 @@ judge (``validate_review.py`` + ``review_formats.py``) from this repository.
 When that step tracked a branch (``ref: main``), every merge here changed the
 judge of other repos with no release step in between.
 HO-REVIEW-GATE-PIN-RELEASE-20261025 pins the tooling ref to a full commit SHA;
-the release tag it resolves to (currently ``review-gate-v2``) is named in the
+the release tag it resolves to (currently ``review-gate-v3``) is named in the
 workflow comment, not asserted here, so a re-pin does not stale this guard.
 
 These tests read the workflow as text with the stdlib only. The repository has
@@ -21,7 +21,7 @@ This is a regression tripwire, not a sandbox: variable indirection or obfuscatio
 of the path is out of scope. Containment is the tooling SHA pin in the workflow,
 the five-role review of every change to this workflow, and HC sign-off before
 merge: org ruleset 12626210 serves review-gate.yml from main (HO-RULESET-TRACKS-
-MAIN-20261107), so any merge to it goes live in all nine ruleset repos at merge.
+MAIN-20261107), so any merge to it goes live in all eleven ruleset repos at merge.
 """
 
 from __future__ import annotations
