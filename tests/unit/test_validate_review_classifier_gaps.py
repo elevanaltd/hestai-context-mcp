@@ -10,8 +10,11 @@ paths classify exactly as before:
 * fail-closed PR-description fetch in CI.
 """
 
+import json
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -216,3 +219,109 @@ class TestOctaveTypeSniffAndFailClosed:
             validate_review._classify_file_facet("x/library/agents/a.oct.md", "")
             == "EXECUTABLE_SPEC"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed PR-description fetch (CI)
+# ---------------------------------------------------------------------------
+def _gh_stub(outcome: object) -> Any:
+    """A subprocess.run stand-in for ``gh pr view``: raise ``outcome`` or return it."""
+
+    def run(cmd: list[str], *args: object, **kwargs: object) -> object:
+        assert cmd[:3] == ["gh", "pr", "view"], cmd
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    return run
+
+
+def _gh_ok(stdout: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+@pytest.fixture
+def ci_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("PR_NUMBER", "321")
+
+
+@pytest.mark.unit
+class TestPrBodyFetchFailsClosedInCI:
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            subprocess.CalledProcessError(1, ["gh"]),
+            OSError("gh not found"),
+            _gh_ok("not json"),
+            _gh_ok(json.dumps({"title": "no body key"})),
+            _gh_ok(json.dumps({"body": 42})),
+        ],
+        ids=["gh-exit-nonzero", "gh-missing", "unparseable", "body-key-missing", "body-not-text"],
+    )
+    def test_fetch_error_raises_in_ci(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch, outcome: object
+    ) -> None:
+        monkeypatch.setattr(validate_review.subprocess, "run", _gh_stub(outcome))
+        with pytest.raises(validate_review.PrBodyFetchError):
+            validate_review._get_pr_body()
+
+    @pytest.mark.parametrize("body", ["", "text", None])
+    def test_empty_but_fetched_body_is_fine(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch, body: str | None
+    ) -> None:
+        stub = _gh_stub(_gh_ok(json.dumps({"body": body})))
+        monkeypatch.setattr(validate_review.subprocess, "run", stub)
+        assert validate_review._get_pr_body() == (body or "")
+
+    def test_negative_control_local_mode_stays_lenient(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setenv("PR_NUMBER", "321")
+        monkeypatch.setattr(
+            validate_review.subprocess, "run", _gh_stub(subprocess.CalledProcessError(1, ["gh"]))
+        )
+        assert validate_review._get_pr_body() == ""
+
+    def _main_env(self, monkeypatch: pytest.MonkeyPatch, files: list[dict]) -> list[str]:
+        monkeypatch.setenv("GITHUB_BASE_REF", "origin/main")
+        monkeypatch.delenv("CACHED_GATE_DATA", raising=False)
+        monkeypatch.setattr(validate_review, "_get_head_sha", lambda: "a" * 40)
+        monkeypatch.setattr(validate_review, "_get_base_ref_sha", lambda: "b" * 40)
+        monkeypatch.setattr(validate_review, "check_emergency_bypass", lambda: False)
+        monkeypatch.setattr(validate_review, "get_changed_files", lambda: files)
+        monkeypatch.setattr(validate_review, "_git_show_file", lambda *a, **k: None)
+        calls: list[str] = []
+
+        def fake_check(*args: object, **kwargs: object) -> tuple[bool, str, list[str]]:
+            calls.append("check_pr_comments")
+            return True, "ok", []
+
+        monkeypatch.setattr(validate_review, "check_pr_comments", fake_check)
+        return calls
+
+    def test_main_fails_on_fetch_error_even_when_diff_is_tier0_exempt(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        docs_only = [_record("docs/README.md", total=2)]
+        calls = self._main_env(monkeypatch, docs_only)
+        monkeypatch.setattr(
+            validate_review.subprocess, "run", _gh_stub(subprocess.CalledProcessError(1, ["gh"]))
+        )
+        assert validate_review.main() == 1
+        out = capsys.readouterr()
+        text = out.out + out.err
+        assert "PR description" in text and "fail" in text.lower(), text
+        assert "Review not required" not in text
+        assert calls == []
+
+    def test_main_empty_but_fetched_body_still_passes_exempt_diff(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        docs_only = [_record("docs/README.md", total=2)]
+        self._main_env(monkeypatch, docs_only)
+        monkeypatch.setattr(
+            validate_review.subprocess, "run", _gh_stub(_gh_ok(json.dumps({"body": ""})))
+        )
+        assert validate_review.main() == 0
