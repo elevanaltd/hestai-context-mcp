@@ -31,6 +31,10 @@ def ci_environment(monkeypatch):
     monkeypatch.setenv("CI", "true")
     monkeypatch.setenv("GITHUB_BASE_REF", "origin/main")
     monkeypatch.setenv("PR_NUMBER", "123")
+    # Hermetic: main() fetches the PR description via `gh`, and a failed fetch in
+    # CI now fails the gate. Without this the result depends on whether `gh` can
+    # reach a real PR #123 from the test machine.
+    monkeypatch.setattr(validate_review, "_get_pr_body", lambda: "")
 
 
 # Issue #201: a peer role (TMG/CRS/CE/CIV/PE/SR) clears only through a review
