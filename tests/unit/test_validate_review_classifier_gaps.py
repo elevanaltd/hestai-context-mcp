@@ -338,3 +338,177 @@ class TestPrBodyFetchFailsClosedInCI:
             validate_review.subprocess, "run", _gh_stub(_gh_ok(json.dumps({"body": ""})))
         )
         assert validate_review.main() == 0
+
+
+# ---------------------------------------------------------------------------
+# Rework round 1 (CE): case-variant paths
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestCaseVariantPathsClassifyLikeLowercase:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "TOOLS/x.py",
+            "Tools/x.py",
+            "TOOLS/clock_in.py",
+            "src/pkg/Tools/x.py",
+            "SHARED/x.py",
+            "src/Shared/x.py",
+            "Hooks/x.py",
+            "src/Auth/handler.py",
+            "SRC/SESSION/store.py",
+            "Clink/Agents/x.py",
+        ],
+    )
+    def test_case_variant_security_and_architecture_paths_are_security(self, path: str) -> None:
+        assert validate_review._classify_file_facet(path) == "SECURITY"
+
+    @pytest.mark.parametrize(
+        "path", ["Library/Patterns/x.md", "resources/Starter-Library/PATTERNS/x.md"]
+    )
+    def test_case_variant_library_pattern_md_is_executable_spec(self, path: str) -> None:
+        assert validate_review._classify_file_facet(path) == "EXECUTABLE_SPEC"
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("TOOLS/clock_in.md", None),  # markdown exemption unchanged
+            ("Docs/Tools/usage.md", None),
+            ("src/MyTools/x.py", "ROUTINE_CODE"),
+            ("src/UnShared/x.py", "ROUTINE_CODE"),
+            ("Docs/Patterns/x.md", None),
+        ],
+    )
+    def test_negative_control_unchanged(self, path: str, expected: str | None) -> None:
+        assert validate_review._classify_file_facet(path) == expected
+
+
+# ---------------------------------------------------------------------------
+# Rework round 1 (CE): truncated .oct.md content fails closed
+# ---------------------------------------------------------------------------
+_LIMIT = 64 * 1024
+
+
+def _git_repo_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rel: str, data: bytes) -> None:
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", *args],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+                "HOME": str(tmp_path),
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            },
+        )
+
+    git("init", "-q")
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    git("add", "-A")
+    git("commit", "-q", "-m", "x")
+    monkeypatch.chdir(tmp_path)
+
+
+def _readers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rel: str, data: bytes) -> dict:
+    _git_repo_with(tmp_path, monkeypatch, rel, data)
+    return {
+        "working-tree": validate_review._read_working_tree_content(rel),
+        "revision": validate_review._read_revision_content("HEAD", rel),
+    }
+
+
+@pytest.mark.unit
+class TestTruncatedOctaveContentFailsClosed:
+    REL = "docs/x.oct.md"
+
+    def test_type_past_the_byte_bound_is_executable_spec_for_both_readers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data = b"===P===\nMETA:\n" + b"#" * _LIMIT + b"\n  TYPE::AGENT_DEFINITION\n===END===\n"
+        for name, content in _readers(tmp_path, monkeypatch, self.REL, data).items():
+            assert (
+                validate_review._classify_file_facet(self.REL, content) == "EXECUTABLE_SPEC"
+            ), name
+            files = [_record(self.REL, new_content=content)]
+            facets, _roles, _tier, _ = validate_review.classify_pr_facets(files)
+            assert facets == {"EXECUTABLE_SPEC"}, name
+
+    def test_truncated_file_with_type_inside_the_bound_keeps_its_sniffed_facet(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data = b"===R===\nMETA:\n  TYPE::RULE\n" + b"#" * (2 * _LIMIT)
+        for name, content in _readers(tmp_path, monkeypatch, self.REL, data).items():
+            assert validate_review._classify_file_facet(self.REL, content) == "GOVERNANCE", name
+
+    def test_untruncated_file_exactly_at_the_bound_without_type_is_governance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data = (b"#" * (_LIMIT - 1)) + b"\n"
+        assert len(data) == _LIMIT
+        for name, content in _readers(tmp_path, monkeypatch, self.REL, data).items():
+            assert validate_review._classify_file_facet(self.REL, content) == "GOVERNANCE", name
+
+    def test_read_is_still_byte_bounded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data = b"x" * (3 * _LIMIT)
+        for name, content in _readers(tmp_path, monkeypatch, self.REL, data).items():
+            assert isinstance(content, str) and len(content) <= _LIMIT, name
+
+
+# ---------------------------------------------------------------------------
+# Rework round 1 (CE): fetch-failure diagnostics carry gh's last stderr line
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestPrBodyFetchErrorCarriesStderr:
+    def _raise_with(self, monkeypatch: pytest.MonkeyPatch, stderr: str | None) -> str:
+        err = subprocess.CalledProcessError(1, ["gh"], stderr=stderr)
+        monkeypatch.setattr(validate_review.subprocess, "run", _gh_stub(err))
+        with pytest.raises(validate_review.PrBodyFetchError) as info:
+            validate_review._get_pr_body()
+        return str(info.value)
+
+    def test_last_non_empty_stderr_line_is_included(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        msg = self._raise_with(monkeypatch, "warning: first\nHTTP 404: Not Found\n\n  \n")
+        assert "HTTP 404: Not Found" in msg
+        assert "warning: first" not in msg
+
+    def test_control_characters_are_stripped(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        msg = self._raise_with(monkeypatch, "bad \x1b[31mred\x07 \x00text\r\n")
+        assert "bad" in msg and "text" in msg
+        assert not any(ord(c) < 32 or ord(c) == 127 for c in msg), repr(msg)
+
+    def test_stderr_line_is_capped_at_200_characters(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        msg = self._raise_with(monkeypatch, "A" * 5000)
+        assert "A" * 200 in msg
+        assert "A" * 201 not in msg
+
+    def test_token_values_from_the_environment_are_never_included(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GH_TOKEN", "ghs_SECRETVALUE123")
+        monkeypatch.setenv("GITHUB_TOKEN", "ghs_OTHERSECRET456")
+        msg = self._raise_with(
+            monkeypatch, "auth failed for ghs_SECRETVALUE123 / ghs_OTHERSECRET456"
+        )
+        assert "ghs_SECRETVALUE123" not in msg and "ghs_OTHERSECRET456" not in msg
+        assert "auth failed" in msg
+
+    def test_missing_stderr_still_raises_the_designed_error(
+        self, ci_pr: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert "gh pr view 321 failed" in self._raise_with(monkeypatch, None)
