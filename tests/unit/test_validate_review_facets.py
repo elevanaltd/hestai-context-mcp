@@ -246,9 +246,11 @@ class TestCredentialSafetyPathsAreSecurity:
             # Start-anchored: a name that merely CONTAINS the stem must not match.
             ("src/hestai_context_mcp/core/unredaction.py", {"ROUTINE_CODE"}),
             ("src/hestai_context_mcp/storage/unprovenance.py", {"ROUTINE_CODE"}),
-            ("src/hestai_context_mcp/tools/xclock_out.py", {"ROUTINE_CODE"}),
+            ("src/hestai_context_mcp/core/xclock_out.py", {"ROUTINE_CODE"}),
             ("src/hestai_context_mcp/core/reduction.py", {"ROUTINE_CODE"}),
-            ("src/hestai_context_mcp/tools/clock_in.py", {"ROUTINE_CODE"}),
+            # (#268: files under a tools/ segment are SECURITY; see
+            # test_validate_review_classifier_gaps.py::TestToolsSegmentIsSecurity.)
+            ("src/hestai_context_mcp/core/clock_in.py", {"ROUTINE_CODE"}),
             # Exempt classes still win before the SECURITY path check.
             ("docs/redactions_notes.md", set()),
             ("tests/unit/core/test_redaction.py", set()),

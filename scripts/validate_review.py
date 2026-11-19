@@ -645,8 +645,10 @@ def _classify_file_facet(path: str, content: FileContent = CONTENT_UNAVAILABLE) 
         r"/shared/",
         r"(^|/)abstract/",
         r"(^|/)hooks/",
-        r"(^|/)modules/tools/",
-        r"(^|/)mcp/tools/",
+        # Any ``tools/`` path segment (#268): review-requirements v3.3 s1 lists
+        # ``tools/`` as a SECURITY trigger. This subsumes the former narrower
+        # ``modules/tools/`` and ``mcp/tools/`` entries.
+        r"(^|/)tools/",
         r"^clink/agents/",
     ]
     if any(re.search(pattern, path) for pattern in architecture_patterns):
