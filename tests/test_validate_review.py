@@ -688,15 +688,15 @@ class TestTemplateSelfMatchGuard:
 
 @pytest.mark.behavior
 class TestPRBodyScanning:
-    """Validate that PR body is scanned for approval patterns in addition to comments."""
+    """The PR description is not approval evidence (#116 P0-2): approval-shaped text
+    there satisfies neither peer roles nor self-review. Comments are still checked."""
 
     def test_footerless_tmg_crs_and_ce_approval_in_pr_body_is_not_accepted(
         self, ci_environment, monkeypatch, pr_head
     ):
-        """Footerless approval text in the PR body no longer satisfies peer roles
-        (#201: footerless path retired). The body is still scanned -- a
-        head-bound footer there still counts until PR-B (#116 P0-2) -- but a
-        body carries at most one footer, so this three-role body clears none."""
+        """Footerless approval text in the PR body does not satisfy peer roles
+        (#201: footerless path retired; since #116 P0-2 the body is not approval
+        evidence at all, footer or not)."""
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -716,8 +716,12 @@ class TestPRBodyScanning:
         assert approved is False, "footerless PR-body approvals must not clear peer roles"
         assert sorted(missing) == ["CE", "CRS", "TMG"]
 
-    def test_self_review_in_pr_body_is_accepted(self, ci_environment, monkeypatch):
-        """Self-review pattern in PR body should satisfy TIER_1_SELF."""
+    def test_self_review_in_pr_body_is_not_accepted(self, ci_environment, monkeypatch):
+        """A self-review line in the PR body no longer satisfies TIER_1_SELF.
+
+        #116 P0-2 (operator ruling): the PR description is not approval evidence;
+        self-review lines count only as PR comments.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -734,16 +738,14 @@ class TestPRBodyScanning:
         monkeypatch.setattr(subprocess, "run", mock_run)
 
         approved, message, _ = validate_review.check_pr_comments("TIER_1_SELF")
-        assert approved is True, "Self-review in PR body should be accepted"
-        assert "Self-review found" in message
+        assert approved is False, "Self-review in the PR body must not be accepted"
+        assert "Self-review found" not in message
 
-    def test_tier_3_approvals_split_between_body_and_comments(
-        self, ci_environment, monkeypatch, pr_head
-    ):
-        """TIER_3_CRITICAL: TMG+CRS+CE+CIV split between body and comments should pass.
+    def test_tier_3_approval_in_body_does_not_count(self, ci_environment, monkeypatch, pr_head):
+        """TIER_3_CRITICAL: an approval in the PR body no longer counts.
 
-        #201: each approval carries a head-bound footer; a text carries one footer,
-        so the body holds TMG and the comments hold CRS, CE and CIV.
+        #116 P0-2 (operator ruling): the body holds a head-bound TMG approval and
+        the comments hold CRS, CE and CIV; only TMG is missing.
         """
 
         def mock_run(cmd, *args, **kwargs):
@@ -764,11 +766,16 @@ class TestPRBodyScanning:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        approved, message, _ = validate_review.check_pr_comments("TIER_3_CRITICAL")
-        assert approved is True, "Approvals split between body and comments should pass"
+        approved, message, missing = validate_review.check_pr_comments("TIER_3_CRITICAL")
+        assert approved is False, "An approval in the PR body must not count"
+        assert missing == ["TMG"], message
 
-    def test_gh_cli_fetches_body_and_comments(self, ci_environment, monkeypatch):
-        """The gh CLI call should request 'body', 'comments', and 'reviews' fields."""
+    def test_gh_cli_fetches_comments_and_reviews_not_body(self, ci_environment, monkeypatch):
+        """The approval fetch requests 'comments' and 'reviews' only.
+
+        #116 P0-2: the PR body is no longer approval evidence, so it is not fetched
+        here (the declaration path fetches it separately via _get_pr_body).
+        """
         captured_cmds = []
 
         def mock_run(cmd, *args, **kwargs):
@@ -792,12 +799,11 @@ class TestPRBodyScanning:
 
         validate_review.check_pr_comments("TIER_2_STANDARD")
 
-        # Verify gh pr view fetches body, comments, and reviews
+        # Verify gh pr view fetches comments and reviews, and not the body
         assert len(captured_cmds) > 0
         gh_cmd = captured_cmds[0]
-        json_arg = next((a for a in gh_cmd if "comments" in a and "body" in a), None)
-        assert json_arg is not None, f"gh CLI should fetch comments and body, got: {gh_cmd}"
-        assert "reviews" in json_arg, f"gh CLI should also fetch reviews, got: {gh_cmd}"
+        json_arg = gh_cmd[gh_cmd.index("--json") + 1]
+        assert set(json_arg.split(",")) == {"comments", "reviews"}, gh_cmd
 
     def test_empty_pr_body_still_checks_comments(self, ci_environment, monkeypatch, pr_head):
         """Empty or null PR body should not break comment checking."""
@@ -895,8 +901,11 @@ class TestHOSupervisoryReview:
         assert approved is True, "IL SELF-REVIEWED must still pass T1"
         assert "Self-review found" in message
 
-    def test_tier_1_ho_reviewed_in_pr_body(self, ci_environment, monkeypatch):
-        """HO REVIEWED in PR body should also satisfy T1."""
+    def test_tier_1_ho_reviewed_in_pr_body_does_not_count(self, ci_environment, monkeypatch):
+        """A supervisory review line in the PR body no longer satisfies T1.
+
+        #116 P0-2 (operator ruling): self-review lines count only as PR comments.
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -913,7 +922,7 @@ class TestHOSupervisoryReview:
         monkeypatch.setattr(subprocess, "run", mock_run)
 
         approved, message, _ = validate_review.check_pr_comments("TIER_1_SELF")
-        assert approved is True, "HO REVIEWED in PR body should satisfy T1"
+        assert approved is False, "A supervisory review in the PR body must not satisfy T1"
 
     def test_tier_1_crs_still_satisfies_after_ho_addition(self, ci_environment, monkeypatch):
         """CRS approval should still satisfy T1 (hierarchy rule preserved)."""
@@ -955,8 +964,9 @@ class TestFlexiblePatternMatching:
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": _at_head("TMG APPROVED: tests verified", "TMG"),
+                        "body": "",
                         "comments": [
+                            {"body": _at_head("TMG APPROVED: tests verified", "TMG")},
                             {
                                 "body": _at_head(
                                     "CRS (Gemini): APPROVED - Logic correct, tests pass", "CRS"
@@ -1021,8 +1031,9 @@ class TestFlexiblePatternMatching:
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": _at_head("TMG APPROVED: ok", "TMG"),
+                        "body": "",
                         "comments": [
+                            {"body": _at_head("TMG APPROVED: ok", "TMG")},
                             {"body": _at_head("CRS  APPROVED: Logic correct", "CRS")},
                             {"body": _at_head("CE APPROVED: Sound", "CE")},
                         ],
@@ -1039,14 +1050,17 @@ class TestFlexiblePatternMatching:
         assert missing == ["CRS"], message
 
     def test_il_parenthetical_model_format(self, ci_environment, monkeypatch):
-        """'IL (Claude): SELF-REVIEWED' format should be recognized."""
+        """'IL (Claude): SELF-REVIEWED' format should be recognized.
+
+        #116 P0-2: posted as a PR comment (the PR body no longer counts).
+        """
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": "IL (Claude): SELF-REVIEWED: Quick fix",
-                        "comments": [],
+                        "body": "",
+                        "comments": [{"body": "IL (Claude): SELF-REVIEWED: Quick fix"}],
                     }
                 ),
                 returncode=0,
@@ -1175,8 +1189,9 @@ class TestGoKeywordApproval:
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": _at_head("TMG APPROVED: ok", "TMG"),
+                        "body": "",
                         "comments": [
+                            {"body": _at_head("TMG APPROVED: ok", "TMG")},
                             {"body": _at_head("CRS (Gemini): GO", "CRS", "GO")},
                             {"body": _at_head("CE APPROVED: Sound", "CE")},
                         ],
@@ -1235,8 +1250,9 @@ class TestGoKeywordApproval:
             return MagicMock(
                 stdout=json.dumps(
                     {
-                        "body": _at_head("TMG APPROVED: ok", "TMG"),
+                        "body": "",
                         "comments": [
+                            {"body": _at_head("TMG APPROVED: ok", "TMG")},
                             {"body": _at_head("CRS (Gemini): GO (9/10)", "CRS", "GO")},
                             {"body": _at_head("CE APPROVED: Sound", "CE")},
                         ],

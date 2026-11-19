@@ -408,12 +408,15 @@ class TestCheckPrCommentsNoRegression:
         assert approved is True
         assert missing == []
 
-    def test_pr_body_approval_still_works(self) -> None:
-        """CRS approval in the PR body itself still satisfies the gate."""
+    def test_pr_body_approval_no_longer_counts(self) -> None:
+        """A head-bound CRS approval in the PR body no longer satisfies the gate.
+
+        #116 P0-2 (operator ruling): the PR description is not approval evidence.
+        """
         pr_data = _make_pr_data(body=_at_head("CRS APPROVED: in the PR description", "CRS"))
         approved, _msg, missing = _run_check(pr_data, required_roles={"CRS"})
-        assert approved is True
-        assert missing == []
+        assert approved is False
+        assert missing == ["CRS"]
 
     def test_empty_reviews_field_does_not_crash(self) -> None:
         """When reviews key is absent from API response, the gate must not crash."""

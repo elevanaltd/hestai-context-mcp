@@ -421,9 +421,11 @@ class TestTier1SelfUnchanged:
         approved, msg, _ = self._self(_comment("CRS APPROVED: looks good"))
         assert approved is True, msg
 
-    def test_self_review_in_pr_body_still_clears(self) -> None:
+    def test_self_review_in_pr_body_no_longer_clears(self) -> None:
+        """#116 P0-2 (operator ruling): the PR body is not approval evidence; this
+        #201 pin asserted it still cleared and now asserts it does not."""
         approved, msg, _ = self._self(body="IL SELF-REVIEWED: done")
-        assert approved is True, msg
+        assert approved is False, msg
 
     def test_head_binding_does_not_apply_to_self_review(self) -> None:
         """A self-review footer at another SHA still clears TIER_1_SELF."""
@@ -802,3 +804,86 @@ class TestHeaderLabelCannotCarryHtml:
         body = _verdict("CE", "APPROVED", HEAD[:7], text=f"CE ({label}) APPROVED: fine")
         approved, msg, _ = _check(comments=[_comment(body)])
         assert approved is True, msg
+
+
+@pytest.mark.unit
+@pytest.mark.security
+class TestPrBodyIsNotApprovalEvidence:
+    """#116 P0-2 (operator ruling, relayed 2026-11-16): the PR description is not
+    approval evidence of any kind, on the peer-role path or the TIER_1_SELF path.
+    Self-review lines count only as PR comments; PR Review bodies (reviews[]) keep
+    their treatment. The review-declaration path still reads the body."""
+
+    # --- peer-role path ---
+
+    def test_body_footer_and_header_clear_no_peer_role(self) -> None:
+        approved, msg, missing = _check(body=_verdict("CE", "APPROVED", HEAD[:7]))
+        assert approved is False, msg
+        assert missing == ["CE"]
+
+    def test_body_block_does_not_revoke_a_comment_approval(self) -> None:
+        approved, msg, _ = _check(
+            body=_verdict("CE", "BLOCKED", HEAD[:7]),
+            comments=[_comment(_verdict("CE", "APPROVED", HEAD[:7]))],
+        )
+        assert approved is True, msg
+
+    # --- TIER_1_SELF path ---
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "IL SELF-REVIEWED: fixed a typo",
+            "HO (Claude Opus 5.5) REVIEWED: delegated work checked",
+            "CRS APPROVED: looks good",
+            _verdict("IL", "SELF-REVIEWED", HEAD[:7]),
+        ],
+        ids=["il-self-reviewed", "ho-reviewed", "crs-approved", "il-footer"],
+    )
+    def test_body_only_self_review_no_longer_clears(self, body: str) -> None:
+        approved, msg, _ = _check(body=body, required_roles=set(), tier="TIER_1_SELF")
+        assert approved is False, msg
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "IL SELF-REVIEWED: fixed a typo",
+            "HO (Claude Opus 5.5) REVIEWED: delegated work checked",
+            "CRS APPROVED: looks good",
+        ],
+        ids=["il-self-reviewed", "ho-reviewed-footerless", "crs-approved"],
+    )
+    def test_same_lines_as_comments_still_clear_self_review(self, text: str) -> None:
+        approved, msg, _ = _check(
+            comments=[_comment(text)], required_roles=set(), tier="TIER_1_SELF"
+        )
+        assert approved is True, msg
+
+    # --- PR Review bodies keep their treatment ---
+
+    def test_review_body_self_review_still_clears(self) -> None:
+        approved, msg, _ = _check(
+            reviews=[_review("IL SELF-REVIEWED: fixed a typo")],
+            required_roles=set(),
+            tier="TIER_1_SELF",
+        )
+        assert approved is True, msg
+
+    def test_review_body_footer_still_clears_peer_role(self) -> None:
+        approved, msg, _ = _check(reviews=[_review(_verdict("CE", "APPROVED", HEAD[:7]))])
+        assert approved is True, msg
+
+    # --- declarations: the body still adds required roles ---
+
+    def test_body_declaration_still_adds_a_required_role(self) -> None:
+        from scripts import validate_review
+
+        with patch.object(validate_review, "_git_show_file", lambda sha, path: None):
+            roles, provenance = validate_review._collect_bitemporal_declarations(
+                files=[{"path": "docs/ADR.md", "added": 1, "deleted": 0, "total_changed": 1}],
+                pr_body="<!-- review-requirements: [SR] -->",
+                base_sha="base",
+                head_sha="head",
+            )
+        assert "SR" in roles
+        assert "PR_BODY" in provenance["SR"]
