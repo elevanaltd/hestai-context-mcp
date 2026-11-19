@@ -1298,7 +1298,7 @@ _NO_WRITE_PERMISSIONS: Final = frozenset({"read", "none"})
 # carries one, and nothing outside this syntax is ever put in an API path.
 _GITHUB_LOGIN_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
 
-_AuthorStatus = Literal["write", "no-write", "bot", "failed"]
+_AuthorStatus = Literal["write", "no-write", "bot", "app-or-org", "failed"]
 
 
 def _fetch_author_permission(login: str) -> dict[str, Any]:
@@ -1326,9 +1326,10 @@ def _author_status(login: str) -> tuple[_AuthorStatus, str]:
     """Classify a verdict author; the string says why a lookup failed, else ''.
 
     Counts ("write") only for account type exactly "User" with permission
-    exactly admin, maintain or write. Fails closed: any error, or any response
-    outside the expected values, is "failed" -- the author does not count and
-    the caller names the failure in its output.
+    exactly admin, maintain or write. App and organization accounts never
+    count ("app-or-org"). Fails closed: any error, or any response outside the
+    expected values, is "failed" -- the author does not count and the caller
+    names the failure in its output.
     """
     try:
         data = _fetch_author_permission(login)
@@ -1345,6 +1346,12 @@ def _author_status(login: str) -> tuple[_AuthorStatus, str]:
     # non-string value -- is an unexpected response and fails closed, loudly.
     if account_type == "Bot":
         return "bot", ""
+    # App and organization accounts never count. gh returns an app account
+    # without its [bot] suffix, so the lookup for an app comment (e.g.
+    # "vercel") answers for the same-named organization. That is an expected
+    # response, listed quietly, not a failed lookup.
+    if account_type == "Organization":
+        return "app-or-org", ""
     if account_type == "User" and isinstance(permission, str):
         if permission in _WRITE_PERMISSIONS:
             return "write", ""
@@ -1423,6 +1430,7 @@ def check_pr_comments(
         author_cache: dict[str, tuple[_AuthorStatus, str]] = {}
         skipped_bots: list[str] = []
         skipped_no_write: list[str] = []
+        skipped_app_or_org: list[str] = []
         failed_lookups: dict[str, str] = {}
 
         def _author_counts(item: dict[str, Any]) -> bool:
@@ -1443,6 +1451,8 @@ def check_pr_comments(
                 skipped_bots.append(login)
             elif status == "no-write":
                 skipped_no_write.append(login)
+            elif status == "app-or-org":
+                skipped_app_or_org.append(login)
             return status == "write"
 
         # Each source is (timestamp, text). The timestamp orders footer verdicts
@@ -1493,6 +1503,12 @@ def check_pr_comments(
                 f"   Skipped {len(skipped_no_write)} comment(s) from accounts without "
                 f"write access to this repository (not counted for gate): "
                 f"{', '.join(sorted(set(skipped_no_write)))}"
+            )
+        if skipped_app_or_org:
+            print(
+                f"   Skipped {len(skipped_app_or_org)} comment(s) from app and organization "
+                f"accounts (never counted for gate): "
+                f"{', '.join(sorted(set(skipped_app_or_org)))}"
             )
         # A failed lookup must be visible, never read as a pass: it decorates
         # every verdict message below via _reason, like the disqualification note.
