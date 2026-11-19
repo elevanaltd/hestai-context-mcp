@@ -532,6 +532,9 @@ def _sniff_octave_type(text: str) -> str:
     it also breaks on VT, FF, FS/GS/RS, NEL, U+2028 and U+2029, which would let
     attacker-authorable bytes move TYPE:: in or out of the window.
 
+    Truncated text (``_TruncatedText``): the final line, whatever follows the last
+    newline, is ignored because the byte bound may have cut it.
+
     Issue #157 F3: there is no line cap. The former 50-line window let an
     author push ``TYPE::AGENT_DEFINITION`` to line 51+ and downgrade an
     agent spec to GOVERNANCE. The bound is now the producer's byte bound
@@ -544,6 +547,12 @@ def _sniff_octave_type(text: str) -> str:
     Returns:
         The TYPE value string (e.g., 'AGENT_DEFINITION', 'RULE') or empty string.
     """
+    if isinstance(text, _TruncatedText):
+        # Truncated text can only be partial on its FINAL line (whatever follows
+        # the last newline): a cut through ``TYPE::AGENT_DEFINITION`` leaves a
+        # value that is not the file's TYPE. Drop it before matching, whatever
+        # the cut position. A complete, newline-terminated line still counts.
+        text = text[: max(text.rfind("\n"), text.rfind("\r")) + 1]
     stream = io.StringIO(text, newline=None)
     for line in stream:
         if "TYPE::" in line:
