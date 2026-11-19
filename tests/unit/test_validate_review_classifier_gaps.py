@@ -236,7 +236,7 @@ def _gh_stub(outcome: object) -> Any:
     return run
 
 
-def _gh_ok(stdout: str) -> subprocess.CompletedProcess[str]:
+def _gh_ok(stdout: str | None) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
 
 
@@ -256,8 +256,18 @@ class TestPrBodyFetchFailsClosedInCI:
             _gh_ok("not json"),
             _gh_ok(json.dumps({"title": "no body key"})),
             _gh_ok(json.dumps({"body": 42})),
+            _gh_ok(None),  # json.loads(None) -> TypeError
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
         ],
-        ids=["gh-exit-nonzero", "gh-missing", "unparseable", "body-key-missing", "body-not-text"],
+        ids=[
+            "gh-exit-nonzero",
+            "gh-missing",
+            "unparseable",
+            "body-key-missing",
+            "body-not-text",
+            "stdout-none-typeerror",
+            "undecodable-unicodeerror",
+        ],
     )
     def test_fetch_error_raises_in_ci(
         self, ci_pr: None, monkeypatch: pytest.MonkeyPatch, outcome: object
@@ -312,8 +322,11 @@ class TestPrBodyFetchFailsClosedInCI:
         assert validate_review.main() == 1
         out = capsys.readouterr()
         text = out.out + out.err
-        assert "PR description" in text and "fail" in text.lower(), text
+        assert "Review Tier: UNKNOWN" in text, text
+        assert "Reason: PR description fetch failed" in text, text
         assert "Review not required" not in text
+        # No cacheable gate data: the workflow would cache sha + roles from it.
+        assert "REVIEW_GATE_JSON" not in text, text
         assert calls == []
 
     def test_main_empty_but_fetched_body_still_passes_exempt_diff(
