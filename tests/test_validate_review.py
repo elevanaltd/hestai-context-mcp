@@ -54,6 +54,22 @@ def pr_head(monkeypatch):
     monkeypatch.setattr(validate_review, "_get_head_sha", lambda: _PR_HEAD)
 
 
+def _write_access(login):
+    """A collaborator-permission response granting write access to ``login``."""
+    return {"permission": "write", "user": {"login": login, "type": "User"}}
+
+
+@pytest.fixture(autouse=True)
+def _authors_have_write_access(monkeypatch):
+    """Verdicts count only from accounts with write access to the repository.
+
+    The tests in this module exercise other semantics, so every author they
+    post as has write access. The rule itself is tested in
+    tests/unit/scripts/test_validate_review_author_access.py.
+    """
+    monkeypatch.setattr(validate_review, "_fetch_author_permission", _write_access, raising=False)
+
+
 @pytest.fixture
 def local_environment(monkeypatch):
     """Set up local development environment."""
@@ -545,9 +561,11 @@ class TestPRCommentValidation:
 # The real protection is TWO independent lines of defense in
 # check_pr_comments()'s _is_bot_comment() filter (validate_review.py
 # ~lines 840-900):
-#   1. bot-author exclusion: the status comment is always posted by a
-#      [bot]-suffixed account (github-actions[bot] via GITHUB_TOKEN), and
-#      _is_bot_comment() excludes any `login.endswith("[bot]")`.
+#   1. bot-author exclusion: the status comment is always posted by the
+#      workflow token's account, which gh returns as "github-actions" (no
+#      [bot] suffix -- Actions run 44496751555), and that login is in
+#      _BOT_LOGIN_SET. (Separately, verdicts count only from accounts with
+#      write access to the repository; Bot-type accounts never count.)
 #   2. a LEGACY MARKER check, independent of author: any comment body
 #      containing the literal string "<!-- review-gate-status -->" is also
 #      excluded, regardless of who posted it.
@@ -585,7 +603,7 @@ class TestTemplateSelfMatchGuard:
             assert matches_approval_pattern(self._TEMPLATE_BODY, role, "APPROVED") is True
 
     def test_bot_authored_template_comment_does_not_clear_gate(self, ci_environment, monkeypatch):
-        """Defense 1: a [bot]-suffixed author's template comment is excluded."""
+        """Defense 1: the status comment's author (github-actions) is excluded."""
 
         def mock_run(cmd, *args, **kwargs):
             return MagicMock(
@@ -595,7 +613,7 @@ class TestTemplateSelfMatchGuard:
                         "comments": [
                             {
                                 "body": self._TEMPLATE_BODY,
-                                "author": {"login": "github-actions[bot]"},
+                                "author": {"login": "github-actions"},
                             }
                         ],
                     }

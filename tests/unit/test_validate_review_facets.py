@@ -25,6 +25,22 @@ import validate_review
 _PR_HEAD = "0123456789abcdef0123456789abcdef01234567"
 
 
+def _write_access(login: str) -> dict[str, object]:
+    """A collaborator-permission response granting write access to ``login``."""
+    return {"permission": "write", "user": {"login": login, "type": "User"}}
+
+
+@pytest.fixture(autouse=True)
+def _authors_have_write_access(monkeypatch):
+    """Verdicts count only from accounts with write access to the repository.
+
+    The tests in this module exercise facet routing, so every author they post
+    as has write access. The rule itself is tested in
+    tests/unit/scripts/test_validate_review_author_access.py.
+    """
+    monkeypatch.setattr(validate_review, "_fetch_author_permission", _write_access, raising=False)
+
+
 def _at_head(body: str, role: str, verdict: str = "APPROVED") -> str:
     """Append the footer submit_review emits, bound to the pinned PR head."""
     footer = json.dumps(

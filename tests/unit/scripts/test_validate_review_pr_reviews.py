@@ -31,6 +31,23 @@ import pytest
 _HEAD = "0123456789abcdef0123456789abcdef01234567"
 
 
+def _write_access(login: str) -> dict[str, Any]:
+    """A collaborator-permission response granting write access to ``login``."""
+    return {"permission": "write", "user": {"login": login, "type": "User"}}
+
+
+@pytest.fixture(autouse=True)
+def _authors_have_write_access() -> Any:
+    """Verdicts count only from accounts with write access to the repository.
+
+    The tests in this module exercise PR Review handling, so every author they
+    post as has write access unless a test says otherwise. The rule itself is
+    tested in test_validate_review_author_access.py.
+    """
+    with patch("scripts.validate_review._fetch_author_permission", _write_access, create=True):
+        yield
+
+
 def _at_head(body: str, role: str, verdict: str = "APPROVED") -> str:
     """Append the footer submit_review emits, bound to the pinned PR head."""
     footer = json.dumps({"role": role, "provider": "goose", "verdict": verdict, "sha": _HEAD[:7]})
@@ -339,19 +356,31 @@ class TestCheckPrCommentsBotReviewExclusion:
         assert approved is False, "Copilot bot review must not satisfy the gate"
         assert "CE" in missing
 
-    def test_bot_suffix_review_approval_is_ignored(self) -> None:
-        """A review from any [bot]-suffixed account must be excluded."""
+    def test_bot_type_review_approval_is_ignored(self) -> None:
+        """A review from any Bot-type account must be excluded.
+
+        gh returns bot logins WITHOUT the [bot] suffix (Actions run
+        44496751555: "cubic-dev-ai", "github-actions"), so the suffix never
+        identifies a bot. The permission lookup reports the account type.
+        """
         pr_data = _make_pr_data(
             reviews=[
                 {
-                    "author": {"login": "some-new-bot[bot]"},
+                    "author": {"login": "some-new-app"},
                     "state": "COMMENTED",
                     "body": _at_head("CRS APPROVED: auto-review", "CRS"),
                 }
             ]
         )
-        approved, _msg, missing = _run_check(pr_data, required_roles={"CRS"})
-        assert approved is False, "[bot]-suffixed review must not satisfy the gate"
+
+        def _bot_with_write(login: str) -> dict[str, Any]:
+            return {"permission": "write", "user": {"login": login, "type": "Bot"}}
+
+        with patch(
+            "scripts.validate_review._fetch_author_permission", _bot_with_write, create=True
+        ):
+            approved, _msg, missing = _run_check(pr_data, required_roles={"CRS"})
+        assert approved is False, "Bot-type review must not satisfy the gate"
         assert "CRS" in missing
 
     def test_human_review_with_bot_marker_is_excluded(self) -> None:
