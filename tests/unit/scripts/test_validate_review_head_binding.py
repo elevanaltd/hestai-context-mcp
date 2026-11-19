@@ -42,6 +42,23 @@ T3 = "2026-11-16T12:00:00Z"
 # ---------------------------------------------------------------------------
 
 
+def _write_access(login: str) -> dict[str, Any]:
+    """A collaborator-permission response granting write access to ``login``."""
+    return {"permission": "write", "user": {"login": login, "type": "User"}}
+
+
+@pytest.fixture(autouse=True)
+def _authors_have_write_access() -> Any:
+    """Verdicts count only from accounts with write access to the repository.
+
+    The tests in this module exercise head binding, so every author they post
+    as has write access. The rule itself is tested in
+    test_validate_review_author_access.py.
+    """
+    with patch("scripts.validate_review._fetch_author_permission", _write_access):
+        yield
+
+
 def _footer(role: str, verdict: str, sha: Any, provider: str = "goose") -> str:
     """Render the metadata footer submit_review emits (review_formats.py)."""
     payload = {"role": role, "provider": provider, "verdict": verdict, "sha": sha}

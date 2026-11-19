@@ -37,6 +37,22 @@ def _at_head(body: str, role: str, verdict: str = "APPROVED") -> str:
     return f"{body}\n<!-- review: {footer} -->"
 
 
+def _write_access(login: str) -> dict[str, object]:
+    """A collaborator-permission response granting write access to ``login``."""
+    return {"permission": "write", "user": {"login": login, "type": "User"}}
+
+
+@pytest.fixture(autouse=True)
+def _authors_have_write_access(monkeypatch):
+    """Verdicts count only from accounts with write access to the repository.
+
+    The tests in this module exercise other semantics, so every author they
+    post as has write access. The rule itself is tested in
+    tests/unit/scripts/test_validate_review_author_access.py.
+    """
+    monkeypatch.setattr(validate_review, "_fetch_author_permission", _write_access)
+
+
 @pytest.fixture
 def ci_environment(monkeypatch):
     """Set up CI environment variables."""

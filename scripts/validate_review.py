@@ -1222,6 +1222,85 @@ def _visible_text(text: str) -> str:
     return re.sub(r"`[^`]+`", "", visible)
 
 
+# --- Verdict authorship ---
+# A comment or PR Review is a verdict source only when its author has write
+# access (write, maintain or admin) to the repository being gated, and is not a
+# bot. The collaborator permission endpoint answers that under the workflow's
+# default GITHUB_TOKEN, with the review-gate job's permission block and with the
+# caller template's (Actions run 44496751555: admin for a maintainer, read for
+# an outside account, type Bot for an app account). authorAssociation does not:
+# it reported an app account as CONTRIBUTOR, and MEMBER or COLLABORATOR do not
+# imply write access. gh resolves {owner}/{repo} exactly as it resolves the
+# repository for `gh pr view`, so the lookup targets the gated repository in
+# local and remote mode alike.
+_WRITE_PERMISSIONS: Final = frozenset({"admin", "maintain", "write"})
+# The other permission values the endpoint documents. An account with one of
+# these is listed as without write access; any value outside both sets is an
+# unexpected response.
+_NO_WRITE_PERMISSIONS: Final = frozenset({"read", "none"})
+# GitHub login syntax. gh returns app accounts WITHOUT their [bot] suffix (run
+# 44496751555: "cubic-dev-ai", "github-actions"), so no well-formed login here
+# carries one, and nothing outside this syntax is ever put in an API path.
+_GITHUB_LOGIN_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+
+_AuthorStatus = Literal["write", "no-write", "bot", "failed"]
+
+
+def _fetch_author_permission(login: str) -> dict[str, Any]:
+    """Return the collaborator-permission response for ``login`` on the gated repo.
+
+    Raises ValueError for a login outside GitHub login syntax (it is never sent
+    to the API) or a response that is not a JSON object, and lets gh's
+    CalledProcessError / OSError propagate.
+    """
+    if _GITHUB_LOGIN_RE.fullmatch(login) is None:
+        raise ValueError(f"not a GitHub login: {login!r}")
+    result = subprocess.run(
+        ["gh", "api", f"repos/{{owner}}/{{repo}}/collaborators/{login}/permission"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    if not isinstance(data, dict):
+        raise ValueError("permission response is not a JSON object")
+    return data
+
+
+def _author_status(login: str) -> tuple[_AuthorStatus, str]:
+    """Classify a verdict author; the string says why a lookup failed, else ''.
+
+    Counts ("write") only for account type exactly "User" with permission
+    exactly admin, maintain or write. Fails closed: any error, or any response
+    outside the expected values, is "failed" -- the author does not count and
+    the caller names the failure in its output.
+    """
+    try:
+        data = _fetch_author_permission(login)
+    except subprocess.CalledProcessError as e:
+        lines = (e.stderr or "").strip().splitlines()
+        return "failed", lines[-1] if lines else f"gh exited {e.returncode}"
+    except (OSError, ValueError) as e:  # json.JSONDecodeError is a ValueError
+        return "failed", str(e)
+    permission = data.get("permission")
+    user = data.get("user")
+    account_type = user.get("type") if isinstance(user, dict) else None
+    # Explicit allowlist: exact, case-sensitive values only. Anything else --
+    # another account type, another permission string, a missing field or a
+    # non-string value -- is an unexpected response and fails closed, loudly.
+    if account_type == "Bot":
+        return "bot", ""
+    if account_type == "User" and isinstance(permission, str):
+        if permission in _WRITE_PERMISSIONS:
+            return "write", ""
+        if permission in _NO_WRITE_PERMISSIONS:
+            return "no-write", ""
+    return "failed", (
+        f"unexpected permission response (type={account_type!r:.40}, "
+        f"permission={permission!r:.40})"
+    )
+
+
 def check_pr_comments(
     _tier_or_roles: set[str] | str | None = None,
     *,
@@ -1234,6 +1313,11 @@ def check_pr_comments(
     operator ruling relayed 2026-11-16): it clears no peer role, revokes none,
     and satisfies no self-review. It still feeds review DECLARATIONS
     (_collect_bitemporal_declarations), which can only add required roles.
+
+    A comment or PR Review counts -- to clear, or to revoke -- only when its
+    author has write access (write, maintain or admin) to the gated repository
+    and is not a bot. A failed permission lookup counts the author out and is
+    named in the returned message.
 
     Supports two calling conventions for backward compatibility:
     - New: check_pr_comments(required_roles={'CE', 'CRS'}, tier='TIER_2_STANDARD')
@@ -1276,20 +1360,35 @@ def check_pr_comments(
         )
         pr_data = json.loads(result.stdout)
 
-        # Collect all searchable text: comment bodies + review bodies
-        # Exclude ALL bot comments/reviews to prevent false positive approval matches.
-        # Bot review prose (Copilot, Cubic, github-actions) often
+        # Collect all searchable text: comment bodies + review bodies, from
+        # counted authors only (see "Verdict authorship" above). Bots never
+        # count: bot review prose (Copilot, Cubic, github-actions) often
         # contains "APPROVED", "GO", etc. which would falsely clear the gate.
-        def _is_bot_comment(comment: dict[str, Any]) -> bool:
-            """Check if a comment or review is from a bot author."""
-            login = (comment.get("author") or {}).get("login", "")
-            if login in _BOT_LOGIN_SET:
-                return True
-            # Catch any other [bot]-suffixed accounts (GitHub convention)
-            if login.endswith("[bot]"):
-                return True
-            # Legacy marker check for review-gate status comments
-            return "<!-- review-gate-status -->" in comment.get("body", "")
+        # Lookups are cached per login for this run.
+        author_cache: dict[str, tuple[_AuthorStatus, str]] = {}
+        skipped_bots: list[str] = []
+        skipped_no_write: list[str] = []
+        failed_lookups: dict[str, str] = {}
+
+        def _author_counts(item: dict[str, Any]) -> bool:
+            """True iff a comment or PR Review is a verdict source (logs why not)."""
+            login = (item.get("author") or {}).get("login")
+            login = login if isinstance(login, str) else ""
+            # Known bot logins and the legacy review-gate status marker are
+            # excluded without a lookup.
+            if login in _BOT_LOGIN_SET or "<!-- review-gate-status -->" in (item.get("body") or ""):
+                skipped_bots.append(login or "unknown")
+                return False
+            if login not in author_cache:
+                author_cache[login] = _author_status(login)
+            status, why = author_cache[login]
+            if status == "failed":
+                failed_lookups[login] = why
+            elif status == "bot":
+                skipped_bots.append(login)
+            elif status == "no-write":
+                skipped_no_write.append(login)
+            return status == "write"
 
         # Each source is (timestamp, text). The timestamp orders footer verdicts
         # for the latest-verdict-per-role rule (issue #201): comments carry
@@ -1297,13 +1396,8 @@ def check_pr_comments(
         # time order). The PR description is not a source (#116 P0-2).
         sources: list[tuple[str, str]] = []
 
-        # Filter comments, logging any bot comments that are skipped
-        skipped_bots: list[str] = []
         for c in pr_data.get("comments", []):
-            if _is_bot_comment(c):
-                bot_login = (c.get("author") or {}).get("login", "unknown")
-                skipped_bots.append(bot_login)
-            else:
+            if _author_counts(c):
                 sources.append((str(c.get("createdAt") or ""), c.get("body", "")))
 
         # Include PR review bodies — GitHub PR Reviews (submitted via the Review
@@ -1319,18 +1413,16 @@ def check_pr_comments(
         # not searched (TIER_1_SELF is unchanged).
         review_revocations: list[tuple[str, dict[str, str | None]]] = []
         for r in pr_data.get("reviews", []):
-            if r.get("state") == "CHANGES_REQUESTED" and not _is_bot_comment(r):
-                block = _parse_review_metadata(r.get("body") or "") or {}
-                verdict = block.get("verdict")
-                if isinstance(verdict, str) and verdict not in _APPROVAL_VERDICTS:
-                    review_revocations.append((str(r.get("submittedAt") or ""), block))
+            if r.get("state") == "CHANGES_REQUESTED":
+                if _author_counts(r):
+                    block = _parse_review_metadata(r.get("body") or "") or {}
+                    verdict = block.get("verdict")
+                    if isinstance(verdict, str) and verdict not in _APPROVAL_VERDICTS:
+                        review_revocations.append((str(r.get("submittedAt") or ""), block))
                 continue
             if r.get("state") not in active_review_states:
                 continue
-            if _is_bot_comment(r):
-                bot_login = (r.get("author") or {}).get("login", "unknown")
-                skipped_bots.append(bot_login)
-            else:
+            if _author_counts(r):
                 review_body = r.get("body", "")
                 if review_body:
                     sources.append((str(r.get("submittedAt") or ""), review_body))
@@ -1340,6 +1432,27 @@ def check_pr_comments(
                 f"   Skipped {len(skipped_bots)} bot comment(s) "
                 f"(ADVISORY only, not counted for gate): "
                 f"{', '.join(sorted(set(skipped_bots)))}"
+            )
+        if skipped_no_write:
+            print(
+                f"   Skipped {len(skipped_no_write)} comment(s) from accounts without "
+                f"write access to this repository (not counted for gate): "
+                f"{', '.join(sorted(set(skipped_no_write)))}"
+            )
+        # A failed lookup must be visible, never read as a pass: it decorates
+        # every verdict message below via _reason, like the disqualification note.
+        lookup_note = ""
+        if failed_lookups:
+            detail = "; ".join(
+                f"{login or '<no login>'}: {why}" for login, why in sorted(failed_lookups.items())
+            )
+            print(
+                f"   ⚠️  write-access lookup failed for {len(failed_lookups)} author(s) "
+                f"({detail}). Their comments cleared nothing. Validation continues."
+            )
+            lookup_note = (
+                f" [⚠️ write-access lookup failed for {len(failed_lookups)} author(s) "
+                f"({detail}); their comments cleared nothing]"
             )
 
         # --- Metadata extraction and cross-validation ---
@@ -1430,8 +1543,8 @@ def check_pr_comments(
             )
 
         def _reason(text: str) -> str:
-            """Decorate a verdict message with the disqualification notice (if any)."""
-            return f"{text}{disqualified_note}"
+            """Decorate a verdict message with the disqualification and lookup notices."""
+            return f"{text}{disqualified_note}{lookup_note}"
 
         def _meta_has(
             role: str,
